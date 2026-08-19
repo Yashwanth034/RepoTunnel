@@ -14,10 +14,8 @@ jobs:
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
 
     steps:
-      - name: Checkout audited v0.1.0 source
+      - name: Checkout current v0.1.0 source
         uses: actions/checkout@v7
-        with:
-          ref: 7cf04a91231fb69796fb8067972069317c0ed3de
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -78,10 +76,8 @@ jobs:
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
 
     steps:
-      - name: Checkout audited v0.1.0 source
+      - name: Checkout current v0.1.0 source
         uses: actions/checkout@v7
-        with:
-          ref: 7cf04a91231fb69796fb8067972069317c0ed3de
 
       - name: Set up Node.js
         uses: actions/setup-node@v6

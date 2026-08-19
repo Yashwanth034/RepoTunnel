@@ -175,8 +175,11 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static TEMP_WORKSPACE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     use super::{resolve_workspace_path, AccessOperation};
     use crate::models::{CommandPolicy, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy};
@@ -186,7 +189,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("repotunnel-access-{nonce}"));
+        let counter = TEMP_WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-access-{}-{nonce}-{counter}",
+            std::process::id()
+        ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/app.ts"), "export {};").unwrap();
 
