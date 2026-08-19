@@ -1,0 +1,27 @@
+[package]
+name = "repotunnel"
+version = "0.1.0"
+description = "Secure local workspace gateway for AI tools"
+edition = "2021"
+
+[lib]
+name = "repotunnel_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+axum = "0.8"
+rmcp = { version = "3.1.2", features = ["schemars", "server", "transport-streamable-http-server"] }
+ngrok = "0.19"
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
+getrandom = "0.4.3"
+sha2 = "0.11.0"
+base64 = "0.23.1"
+subtle = "2.6.1"
