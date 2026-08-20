@@ -100,7 +100,7 @@ RepoTunnel saves the public endpoint and normally reconnects it automatically on
 
 Official ChatGPT MCP setup instructions:
 
-**https://help.openai.com/en/articles/12584461-developer-mode-and-full-mcp-connectors-in-chatgpt-beta**
+**https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins**
 
 To connect RepoTunnel:
 
