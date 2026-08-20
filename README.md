@@ -1,6 +1,6 @@
 # RepoTunnel
 
-RepoTunnel turns a normal MCP-compatible AI chat into an AI that can work directly with the local projects you approve.
+RepoTunnel turns any MCP-compatible AI chat client into one that can work directly with the local projects you approve.
 
 Instead of copying code between AI chat, your editor, terminal, Git, and browser, RepoTunnel securely connects them together. The AI can work on your project from normal chat instructions while RepoTunnel controls what it is allowed to access and do on your computer.
 
@@ -30,13 +30,15 @@ Through RepoTunnel, the AI can:
 
 Team Mode connects two persistent AI engineers to the same approved project.
 
-The two engineers split meaningful implementation work, work on non-overlapping parts in parallel, cross-review each other's changes, test the result, and verify that the requested work is complete.
+The two engineers split meaningful implementation work and work on non-overlapping parts in parallel. They then cross-review each other's changes, test the result, and verify that the requested work is complete.
 
 After both engineers are connected, the Team stays attached to the project. You can continue giving new work in the same AI chats without recreating the Team each time.
 
 <!-- Add Team Mode screenshot here -->
 
 ## Install
+
+**Current version: v0.1.0**
 
 Download RepoTunnel from the official GitHub Releases page:
 
@@ -103,9 +105,9 @@ Official ChatGPT MCP setup instructions:
 To connect RepoTunnel:
 
 1. Open ChatGPT on the web.
-2. Go to **Settings → Apps**.
-3. Enable Developer Mode if required for your account or workspace.
-4. Choose **Create**.
+2. Go to **Settings → Apps → Advanced settings**.
+3. Enable **Developer Mode** if required for your account or workspace.
+4. Return to **Apps** and choose **Create app**.
 5. Enter `RepoTunnel` as the app name.
 6. Paste the MCP URL shown on RepoTunnel's **Connect** page.
 7. Select OAuth authentication.
@@ -167,6 +169,10 @@ RepoTunnel intentionally blocks AI terminal execution when the required sandbox 
 The current v0.1.0 Windows and macOS packages are not commercially code-signed or Apple-notarized.
 
 Download RepoTunnel only from the official release page and verify the package using `RepoTunnel-SHA256SUMS.txt`.
+
+## License
+
+This project is licensed under the [LICENSE NAME — fill in, e.g. MIT] — see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
