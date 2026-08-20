@@ -172,7 +172,7 @@ Download RepoTunnel only from the official release page and verify the package u
 
 ## License
 
-This project is licensed under the [LICENSE NAME — fill in, e.g. MIT] — see [LICENSE](LICENSE) for details.
+This project is licensed under the MIT License — see [LICENSE](https://github.com/Yashwanth034/RepoTunnel/blob/main/LICENSE) for details.
 
 ## Contributing
 
