@@ -4,7 +4,7 @@ RepoTunnel turns any MCP-compatible AI chat client into one that can work direct
 
 Instead of copying code between AI chat, your editor, terminal, Git, and browser, RepoTunnel securely connects them together. The AI can work on your project from normal chat instructions while RepoTunnel controls what it is allowed to access and do on your computer.
 
-<!-- Add main RepoTunnel screenshot here -->
+![RepoTunnel home screen](RepoTunnel.png)
 
 ## What RepoTunnel can do
 
