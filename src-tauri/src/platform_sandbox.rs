@@ -232,6 +232,7 @@ mod platform {
         env
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn configure(
         program: &Path,
         args: &[String],
@@ -525,14 +526,20 @@ mod platform {
     }
 
     fn profile_name(identity_root: &Path) -> String {
+        use std::fmt::Write as _;
+
         let mut hasher = Sha256::new();
         hasher.update(identity_root.to_string_lossy().as_bytes());
         hasher.update(b"|");
         hasher.update(sandbox_suffix().as_bytes());
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = hasher.finalize();
+        let mut digest_hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut digest_hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
         // Every command receives an ephemeral AppContainer profile. This avoids granting a
         // reusable sandbox identity long-lived access to the user's approved project.
-        format!("RepoTunnel.Sandbox.{}", &digest[..24])
+        format!("RepoTunnel.Sandbox.{}", &digest_hex[..24])
     }
 
     unsafe fn derive_profile_sid(name: &str) -> Result<PSID, String> {
@@ -1227,7 +1234,7 @@ mod platform {
             UpdateProcThreadAttribute(
                 attribute_list,
                 0,
-                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
                 (&mut security_capabilities as *mut SECURITY_CAPABILITIES).cast::<c_void>(),
                 size_of::<SECURITY_CAPABILITIES>(),
                 null_mut(),
