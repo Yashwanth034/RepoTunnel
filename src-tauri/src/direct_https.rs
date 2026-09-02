@@ -97,11 +97,11 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn protect_private_key(path: &Path) -> Result<(), String> {
+fn protect_private_key(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o600))
             .map_err(|error| format!("Could not protect Direct HTTPS private key: {error}"))?;
     }
     Ok(())

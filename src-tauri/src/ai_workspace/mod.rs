@@ -1166,13 +1166,9 @@ mod tests {
     use super::{
         application_allowed, build_application_command, build_gnome_terminal_clean_shell_command,
         build_gnome_terminal_legacy_command, build_gnome_terminal_private_server_command,
-        display_available, spawn_group, stop_child, uses_window_lifecycle, HEIGHT, WIDTH,
+        display_available, uses_window_lifecycle, HEIGHT, WIDTH,
     };
     use crate::models::LaunchApplication;
-    use std::{
-        process::Command,
-        time::{Duration, Instant},
-    };
 
     fn application(id: &str, category: &str) -> LaunchApplication {
         LaunchApplication {
@@ -1336,6 +1332,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn process_group_teardown_is_bounded() {
+        use super::{spawn_group, stop_child};
+        use std::{
+            process::Command,
+            time::{Duration, Instant},
+        };
+
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "sleep 30 & wait"]);
         let mut child = spawn_group(&mut command).expect("test process group should start");

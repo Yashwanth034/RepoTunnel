@@ -3,11 +3,14 @@ use std::{
     fs::{self},
     io::Read,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, ExitStatus},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 
 #[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
