@@ -249,8 +249,8 @@ mod platform {
             );
         }
         let runtime_root = create_runtime_root()?;
-        std::fs::create_dir_all(runtime_root.join("config")).ok();
-        std::fs::create_dir_all(runtime_root.join("cache")).ok();
+        let _ = std::fs::create_dir_all(runtime_root.join("config"));
+        let _ = std::fs::create_dir_all(runtime_root.join("cache"));
         let profile = sandbox_profile(
             program,
             writable_root,
@@ -876,8 +876,8 @@ mod platform {
             .unwrap_or_else(|_| identity_root.to_path_buf());
         let profile_name = profile_name(&identity_root);
         let runtime_root = create_runtime_root()?;
-        std::fs::create_dir_all(runtime_root.join("AppData/Roaming")).ok();
-        std::fs::create_dir_all(runtime_root.join("AppData/Local")).ok();
+        let _ = std::fs::create_dir_all(runtime_root.join("AppData/Roaming"));
+        let _ = std::fs::create_dir_all(runtime_root.join("AppData/Local"));
 
         let mut extra_roots = BTreeSet::new();
         extra_roots.extend(read_roots.iter().cloned());
