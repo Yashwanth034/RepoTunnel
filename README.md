@@ -71,11 +71,9 @@ Download RepoTunnel from the official GitHub Releases page:
 | Fedora / RHEL compatible | `.rpm` |
 | Other supported x86_64 Linux systems | AppImage |
 
-Each release includes `RepoTunnel-SHA256SUMS.txt` so downloaded installers can be verified before use.
+Each release includes `RepoTunnel-SHA256SUMS.txt` so downloaded installers can be verified before use. Release notes and older versions are available on the GitHub Releases page.
 
-Version history and release notes belong on the GitHub Releases page rather than in this README.
-
-## Quick start
+## Setup
 
 ### 1. Add a project
 
@@ -84,35 +82,41 @@ Open RepoTunnel and either:
 - select an existing local project folder, or
 - clone a GitHub repository directly.
 
-Choose **AI Auto** or **AI Review** for the project.
+RepoTunnel limits AI access to the projects you explicitly approve.
 
-### 2. Start a public MCP connection
+### 2. Choose a work mode
 
-RepoTunnel supports a simple ngrok-based connection and an advanced Direct HTTPS setup.
+Choose the mode you want for that project:
 
-For the normal setup, open the **Connect** page, configure ngrok, and wait until the public endpoint shows **Ready**.
+- **AI Auto** — compatible project work can proceed without repeated approval prompts.
+- **AI Review** — supported changes and actions wait for your local approval.
 
-RepoTunnel will show an MCP URL similar to:
+The same project security boundaries remain active in both modes.
+
+### 3. Configure the public connection
+
+For the normal setup, use RepoTunnel's built-in ngrok connection.
+
+1. Create or sign in to an ngrok account:
+   **https://dashboard.ngrok.com/signup**
+2. Open the ngrok authtoken page:
+   **https://dashboard.ngrok.com/get-started/your-authtoken**
+3. Copy your ngrok authtoken.
+4. Open RepoTunnel's **Connect** page.
+5. Enter the authtoken and start the public connection.
+6. Wait until the connection shows **Ready**.
+
+RepoTunnel will display an MCP URL similar to:
 
 ```text
 https://your-public-host/mcp
 ```
 
-Use the exact MCP URL shown by RepoTunnel.
+Use the exact MCP URL shown by RepoTunnel. You do not need to install the ngrok CLI separately.
 
 RepoTunnel can save the public endpoint configuration and reconnect it on later launches.
 
-For an advanced self-managed HTTPS path, see [Direct HTTPS](docs/direct-https.md).
-
-### 3. Connect your AI client
-
-Add the MCP URL shown by RepoTunnel to your MCP-compatible AI client and complete RepoTunnel authorization.
-
-After connecting, verify the setup with a real RepoTunnel tool call such as listing approved workspaces. A real tool call confirms that the complete MCP path is working.
-
-## Connect ChatGPT
-
-To connect RepoTunnel with ChatGPT:
+### 4. Connect ChatGPT
 
 1. Open ChatGPT on the web.
 2. Go to **Settings → Apps → Advanced settings**.
@@ -132,25 +136,21 @@ Official ChatGPT app/connector setup page:
 
 Normal RepoTunnel restarts should not require recreating the ChatGPT app when the public MCP URL remains the same.
 
-## ngrok setup
+### 5. Verify the connection
 
-RepoTunnel can use ngrok to provide the public HTTPS endpoint required by a remote MCP client.
+Open a fresh ChatGPT conversation and make a real RepoTunnel tool call, such as asking it to list the approved workspaces.
 
-You do not need to install the ngrok CLI separately.
+A successful tool call confirms the complete path is working:
 
-Create or sign in to an ngrok account:
+```text
+ChatGPT → HTTPS → OAuth → MCP → RepoTunnel → approved project
+```
 
-**https://dashboard.ngrok.com/signup**
-
-Open the authtoken page:
-
-**https://dashboard.ngrok.com/get-started/your-authtoken**
-
-Copy your ngrok authtoken, open RepoTunnel's **Connect** page, enter it there, and start the public connection.
+For another MCP-compatible AI client, use the same MCP URL shown by RepoTunnel and complete the client's OAuth connection flow.
 
 ## Direct HTTPS
 
-Direct HTTPS is an advanced option for users who want to expose RepoTunnel through their own trusted HTTPS endpoint while keeping the raw MCP gateway private.
+Direct HTTPS is an advanced alternative to the normal ngrok setup. It is intended for users who want to expose RepoTunnel through their own trusted HTTPS endpoint while keeping the raw MCP gateway private.
 
 The raw gateway must remain loopback-only. Direct HTTPS exposes only the routes needed for MCP, OAuth, authorization, health checks, and certificate handling.
 
