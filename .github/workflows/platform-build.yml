@@ -221,7 +221,22 @@ jobs:
           }
 
       - name: Windows Rust Clippy
-        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        shell: pwsh
+        run: |
+          $log = "windows-clippy.log"
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings *>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $first = Select-String -Path $log -Pattern 'warning:|error:' | Select-Object -First 1
+            if ($first) {
+              Write-Output "::error title=Windows Rust Clippy::$($first.Line)"
+            }
+            "### Windows Rust Clippy failure" | Add-Content $env:GITHUB_STEP_SUMMARY
+            "```text" | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content $log | Select-Object -Last 80 | Add-Content $env:GITHUB_STEP_SUMMARY
+            "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+            exit $code
+          }
 
       - name: Windows Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
@@ -293,7 +308,24 @@ jobs:
         run: npm ci
 
       - name: macOS Rust Clippy
-        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings 2>&1 | tee macos-clippy.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            first="$(grep -m1 -E 'warning:|error:' macos-clippy.log || true)"
+            if [ -n "$first" ]; then
+              echo "::error title=macOS Rust Clippy::$first"
+            fi
+            {
+              echo "### macOS Rust Clippy failure"
+              echo '```text'
+              tail -80 macos-clippy.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$status"
+          fi
 
       - name: macOS Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
