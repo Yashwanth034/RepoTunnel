@@ -236,16 +236,29 @@ jobs:
           $lines = Get-Content $log
           $lines | ForEach-Object { Write-Output $_ }
           $diagnostics = $lines | Select-String -Pattern 'warning(:|\[)|error(:|\[)' | Select-Object -First 50
+          $annotated = 0
           if ($diagnostics) {
             foreach ($diagnostic in $diagnostics) {
-              $message = $diagnostic.Line.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-              Write-Output "::error title=Windows Rust Clippy::$message"
+              $raw = $diagnostic.Line
+              $match = [regex]::Match($raw, '^(?<path>.+?\.rs):(?<line>\d+):(?<col>\d+):\s+(?<level>warning|error)(?:\[[^\]]+\])?:\s+(?<message>.*)$')
+              if ($match.Success) {
+                $path = $match.Groups['path'].Value.Replace([char]92, [char]47).Replace('%', '%25').Replace(',', '%2C').Replace(':', '%3A')
+                $line = $match.Groups['line'].Value
+                $col = $match.Groups['col'].Value
+                $message = $match.Groups['message'].Value.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                Write-Output "::error file=$path,line=$line,col=$col,title=Windows Rust Clippy::$message"
+                $annotated++
+              } else {
+                $message = $raw.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                Write-Output "::error title=Windows Rust Clippy::$message"
+              }
             }
-          } else {
+          }
+          if ($annotated -eq 0) {
             $first = $lines | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -First 1
             if (-not $first) { $first = 'Windows Clippy failed without diagnostic output.' }
             $message = $first.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-            Write-Output "::error title=Windows Rust Clippy::$message"
+            Write-Output "::error title=Windows Rust Clippy diagnostic::$message"
           }
           "### Windows Rust Clippy failure" | Add-Content $env:GITHUB_STEP_SUMMARY
           "```text" | Add-Content $env:GITHUB_STEP_SUMMARY
