@@ -2,13 +2,15 @@ use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::{Read, Write},
-    os::unix::{fs::PermissionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Mutex,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -324,9 +326,13 @@ fn profile_env(
         let runtime = root.join("runtime");
         fs::create_dir_all(&runtime)
             .map_err(|error| format!("Could not create AI Workspace terminal runtime: {error}"))?;
-        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).map_err(|error| {
-            format!("Could not secure AI Workspace terminal runtime permissions: {error}")
-        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                format!("Could not secure AI Workspace terminal runtime permissions: {error}")
+            })?;
+        }
         values.insert("XDG_RUNTIME_DIR", runtime);
     }
     Ok(values)
@@ -513,6 +519,7 @@ fn wait_for_application_window(
 }
 
 fn spawn_group(command: &mut Command) -> Result<Child, String> {
+    #[cfg(unix)]
     command.process_group(0);
     command
         .spawn()
@@ -1326,6 +1333,7 @@ mod tests {
         assert!(debug.contains("LC_ALL=\"C.UTF-8\""));
     }
 
+    #[cfg(unix)]
     #[test]
     fn process_group_teardown_is_bounded() {
         let mut command = Command::new("/bin/sh");
