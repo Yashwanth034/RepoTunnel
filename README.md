@@ -1,56 +1,62 @@
 # RepoTunnel
 
-RepoTunnel turns any MCP-compatible AI chat client into one that can work directly with the local projects you approve.
+RepoTunnel is a local-first bridge that lets MCP-compatible AI clients work directly with the projects you explicitly approve on your computer.
 
-Instead of copying code between AI chat, your editor, terminal, Git, and browser, RepoTunnel securely connects them together. The AI can work on your project from normal chat instructions while RepoTunnel controls what it is allowed to access and do on your computer.
-
-> **Latest release: v0.2.0** — the original v0.1.0 README content below is preserved.
-
-### What’s new in v0.2.0
-
-- Added isolated **AI Workspace** control for supported desktop applications and productivity tools.
-- Upgraded the built-in editor to **CodeMirror 6** for more reliable typing, selection, Backspace, undo/redo, search, and language support.
-- Improved project monitoring and responsiveness during heavier AI work.
-- Expanded cross-platform command isolation and release/security checks.
-- Added refreshed Linux, Windows, and macOS release packaging with SHA-256 verification.
-
-Direct HTTPS / HTTP→MCP setup: [`docs/direct-https.md`](docs/direct-https.md)
+Instead of copying code between chat, your editor, terminal, Git, and browser, RepoTunnel connects those tools through one controlled workspace. The AI can inspect, edit, test, debug, and help complete real project work while RepoTunnel keeps access limited to the project and permissions you choose.
 
 ![RepoTunnel home screen](RepoTunnel.png)
 
-## What RepoTunnel can do
+## Why RepoTunnel
 
-Through RepoTunnel, the AI can:
+AI coding is most useful when it can work with the actual project instead of isolated snippets. RepoTunnel gives the AI that access without giving it unrestricted access to your computer.
 
-- Work directly with local projects you explicitly approve.
-- Clone GitHub repositories and start working on them.
+With RepoTunnel, an AI can:
+
+- Work only inside projects you explicitly approve.
 - Read, create, edit, rename, move, and delete project files.
-- Search and understand project structure without exposing unrelated folders on your computer.
+- Search and understand project structure.
 - Run builds, tests, package commands, development servers, and managed processes.
-- Launch applications and project URLs.
-- Open a managed browser for web-app testing.
-- Navigate pages, click, type, scroll, reload, inspect pages, capture screenshots, and inspect browser errors.
 - Inspect Git status, branches, diffs, and recent commits.
 - Stage and commit validated changes.
-- Push to Git only when you explicitly ask the AI to push.
-- Keep change history and recovery points for supported modifications.
-- Use **AI Auto** when you want compatible project work to proceed without repeated RepoTunnel approval prompts.
-- Use **AI Review** when you want supported changes and actions to wait for local approval.
-- Use **Team Mode** when you want two AI engineers working together on the same project.
+- Push to Git only when you explicitly ask for a push.
+- Launch supported applications and project URLs.
+- Use a managed browser to test web applications.
+- Navigate pages, click, type, scroll, reload, capture screenshots, and inspect browser errors.
+- Use an isolated AI Workspace for supported desktop applications without taking over your normal desktop session.
+- Keep project monitoring, change history, and recovery information available during longer AI work.
+- Use Team Mode when two AI engineers should collaborate on the same project.
 
-### Team Mode
+## Work modes
+
+### AI Auto
+
+AI Auto allows compatible project work to continue without repeated RepoTunnel approval prompts.
+
+Security boundaries still remain active. AI Auto does not grant unrestricted filesystem access, disable sandboxing, or give standing permission to push Git changes.
+
+### AI Review
+
+AI Review keeps supported changes and actions waiting for local approval before they are applied.
+
+Use it when you want to inspect changes more closely while still allowing the AI to work directly with the project.
+
+## AI Workspace
+
+AI Workspace provides an isolated virtual desktop for supported applications.
+
+It allows the AI to work inside an approved desktop application without stealing focus from your normal desktop. This is useful for editors, development tools, productivity applications, and other supported GUI workflows.
+
+The normal RepoTunnel file, terminal, process, browser, and project methods remain available as fallback paths where appropriate.
+
+## Team Mode
 
 Team Mode connects two persistent AI engineers to the same approved project.
 
-The two engineers split meaningful implementation work and work on non-overlapping parts in parallel. They then cross-review each other's changes, test the result, and verify that the requested work is complete.
+The engineers divide meaningful implementation work into non-overlapping tasks, work in parallel, cross-review each other's changes, test the result, and verify the requested work before completing the current task.
 
-After both engineers are connected, the Team stays attached to the project. You can continue giving new work in the same AI chats without recreating the Team each time.
-
-<!-- Add Team Mode screenshot here -->
+The Team stays attached to the project so later requests can continue without recreating the collaboration session each time.
 
 ## Install
-
-**Current version: v0.1.0**
 
 Download RepoTunnel from the official GitHub Releases page:
 
@@ -65,9 +71,11 @@ Download RepoTunnel from the official GitHub Releases page:
 | Fedora / RHEL compatible | `.rpm` |
 | Other supported x86_64 Linux systems | AppImage |
 
-The release also includes `RepoTunnel-SHA256SUMS.txt` for verifying downloaded files.
+Each release includes `RepoTunnel-SHA256SUMS.txt` so downloaded installers can be verified before use.
 
-## Setup
+Version history and release notes belong on the GitHub Releases page rather than in this README.
+
+## Quick start
 
 ### 1. Add a project
 
@@ -78,43 +86,33 @@ Open RepoTunnel and either:
 
 Choose **AI Auto** or **AI Review** for the project.
 
-### 2. Set up ngrok
+### 2. Start a public MCP connection
 
-RepoTunnel uses ngrok to create the public HTTPS MCP endpoint required for remote AI connections.
+RepoTunnel supports a simple ngrok-based connection and an advanced Direct HTTPS setup.
 
-You do not need to install the ngrok CLI separately.
+For the normal setup, open the **Connect** page, configure ngrok, and wait until the public endpoint shows **Ready**.
 
-Create or sign in to an ngrok account:
+RepoTunnel will show an MCP URL similar to:
 
-**https://dashboard.ngrok.com/signup**
+```text
+https://your-public-host/mcp
+```
 
-Open your authtoken page:
+Use the exact MCP URL shown by RepoTunnel.
 
-**https://dashboard.ngrok.com/get-started/your-authtoken**
+RepoTunnel can save the public endpoint configuration and reconnect it on later launches.
 
-Copy your **ngrok authtoken**.
+For an advanced self-managed HTTPS path, see [Direct HTTPS](docs/direct-https.md).
 
-Open the **Connect** page in RepoTunnel, paste the authtoken, and start the public connection.
+### 3. Connect your AI client
 
-Wait until the public endpoint shows **Ready**.
+Add the MCP URL shown by RepoTunnel to your MCP-compatible AI client and complete RepoTunnel authorization.
 
-RepoTunnel will display an MCP URL similar to:
-
-https://<your-ngrok-domain>/mcp
-
-Use the exact URL shown in RepoTunnel.
-
-RepoTunnel saves the public endpoint and normally reconnects it automatically on later launches.
-
-<!-- Add Connect page screenshot here -->
+After connecting, verify the setup with a real RepoTunnel tool call such as listing approved workspaces. A real tool call confirms that the complete MCP path is working.
 
 ## Connect ChatGPT
 
-Official ChatGPT MCP setup instructions:
-
-**https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins**
-
-To connect RepoTunnel:
+To connect RepoTunnel with ChatGPT:
 
 1. Open ChatGPT on the web.
 2. Go to **Settings → Apps → Advanced settings**.
@@ -125,13 +123,38 @@ To connect RepoTunnel:
 7. Select OAuth authentication.
 8. Choose **Scan Tools**.
 9. Continue with **Sign in with RepoTunnel**.
-10. RepoTunnel will show an authorization popup.
-11. Review the request and choose **Allow**.
-12. Finish creating the app in ChatGPT.
+10. Review the authorization request shown by RepoTunnel and choose **Allow**.
+11. Finish creating the app.
 
-RepoTunnel is now connected to ChatGPT.
+Official ChatGPT app/connector setup page:
 
-Normal RepoTunnel restarts should not require you to create the ChatGPT app again.
+**https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins**
+
+Normal RepoTunnel restarts should not require recreating the ChatGPT app when the public MCP URL remains the same.
+
+## ngrok setup
+
+RepoTunnel can use ngrok to provide the public HTTPS endpoint required by a remote MCP client.
+
+You do not need to install the ngrok CLI separately.
+
+Create or sign in to an ngrok account:
+
+**https://dashboard.ngrok.com/signup**
+
+Open the authtoken page:
+
+**https://dashboard.ngrok.com/get-started/your-authtoken**
+
+Copy your ngrok authtoken, open RepoTunnel's **Connect** page, enter it there, and start the public connection.
+
+## Direct HTTPS
+
+Direct HTTPS is an advanced option for users who want to expose RepoTunnel through their own trusted HTTPS endpoint while keeping the raw MCP gateway private.
+
+The raw gateway must remain loopback-only. Direct HTTPS exposes only the routes needed for MCP, OAuth, authorization, health checks, and certificate handling.
+
+See the complete setup and security requirements in [docs/direct-https.md](docs/direct-https.md).
 
 ## Security
 
@@ -141,12 +164,14 @@ RepoTunnel is designed around explicit project access instead of unrestricted co
 - Absolute-path access, `../` traversal, and symlink escapes outside approved projects are blocked.
 - Sensitive files such as `.env`, private keys, credential files, and common secret formats are protected.
 - Public MCP access is protected with RepoTunnel OAuth.
-- **Revoke MCP access** immediately invalidates current remote authorization.
+- **Revoke MCP access** invalidates current remote authorization.
 - Git push is allowed only when you explicitly ask the AI to push.
 - **Pause AI** provides an emergency stop for RepoTunnel-managed AI activity.
-- On Linux, AI terminal and process execution is isolated with Bubblewrap and is blocked if the required sandbox is unavailable.
+- AI command execution uses the platform-specific isolation available to RepoTunnel.
+- On Linux, AI terminal and process execution uses Bubblewrap and is blocked if the required sandbox is unavailable.
+- Direct HTTPS keeps the raw MCP gateway on loopback and preserves Host validation rather than weakening it.
 
-For the complete security model, see [`docs/security.md`](docs/security.md).
+For the complete security model, see [docs/security.md](docs/security.md).
 
 ## Troubleshooting
 
@@ -158,39 +183,45 @@ You normally do not need to recreate the ChatGPT app.
 
 ### Public connection is not Ready
 
-Check your internet connection and ngrok authtoken, then use **Restart connection** in RepoTunnel.
+Check your internet connection and connection-provider configuration, then use **Restart connection** in RepoTunnel.
 
 ### ngrok shows a warning page
 
-If your ngrok endpoint shows a first-visit warning, open your RepoTunnel public URL in the browser and choose **Visit Site**, then retry the ChatGPT connection.
+Open the RepoTunnel public URL in your browser, complete the ngrok first-visit step if shown, and then retry the AI-client connection.
 
 ### Disconnect remote AI access
 
 Use **Revoke MCP access** in RepoTunnel.
 
-Your approved projects and public endpoint configuration remain unchanged.
+Your approved projects and local project configuration remain unchanged.
 
 ### Linux AI terminal commands are unavailable
 
 Install Bubblewrap using your Linux distribution's package manager and restart RepoTunnel.
 
-RepoTunnel intentionally blocks AI terminal execution when the required sandbox is unavailable.
+RepoTunnel intentionally blocks AI terminal execution when the required Linux sandbox is unavailable.
 
 ### Windows or macOS shows a security warning
 
-The current v0.1.0 Windows and macOS packages are not commercially code-signed or Apple-notarized.
+Download RepoTunnel only from the official GitHub Releases page and verify the package using `RepoTunnel-SHA256SUMS.txt`.
 
-Download RepoTunnel only from the official release page and verify the package using `RepoTunnel-SHA256SUMS.txt`.
+Platform signing and trust behavior may vary by release and operating-system policy.
 
-## License
+## Documentation
 
-This project is licensed under the MIT License — see [LICENSE](https://github.com/Yashwanth034/RepoTunnel/blob/main/LICENSE) for details.
+- [Security model](docs/security.md)
+- [Direct HTTPS](docs/direct-https.md)
+- [GitHub Releases](https://github.com/Yashwanth034/RepoTunnel/releases)
 
 ## Contributing
 
 Bug reports, feature requests, improvements, and pull requests are welcome.
 
 **https://github.com/Yashwanth034/RepoTunnel/issues**
+
+## License
+
+RepoTunnel is licensed under the MIT License. See [LICENSE](LICENSE).
 
 ## Copyright
 
