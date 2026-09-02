@@ -219,26 +219,39 @@ jobs:
           }
 
       - name: Windows Rust Clippy
+        id: windows_clippy
+        continue-on-error: true
+        shell: cmd
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings > windows-clippy.log 2>&1
+
+      - name: Report Windows Rust Clippy failure
+        if: steps.windows_clippy.outcome == 'failure'
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
-            $PSNativeCommandUseErrorActionPreference = $false
-          }
           $log = "windows-clippy.log"
-          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings *>&1 | Tee-Object -FilePath $log
-          $code = $LASTEXITCODE
-          if ($code -ne 0) {
-            $diagnostics = Select-String -Path $log -Pattern 'warning(:|\[)|error(:|\[)' | Select-Object -First 20
-            foreach ($diagnostic in $diagnostics) {
-              Write-Output "::error title=Windows Rust Clippy::$($diagnostic.Line)"
-            }
-            "### Windows Rust Clippy failure" | Add-Content $env:GITHUB_STEP_SUMMARY
-            "```text" | Add-Content $env:GITHUB_STEP_SUMMARY
-            Get-Content $log | Select-Object -Last 120 | Add-Content $env:GITHUB_STEP_SUMMARY
-            "```" | Add-Content $env:GITHUB_STEP_SUMMARY
-            exit $code
+          if (-not (Test-Path $log)) {
+            Write-Output "::error title=Windows Rust Clippy::Clippy failed before producing its diagnostic log."
+            exit 1
           }
+          $lines = Get-Content $log
+          $lines | ForEach-Object { Write-Output $_ }
+          $diagnostics = $lines | Select-String -Pattern 'warning(:|\[)|error(:|\[)' | Select-Object -First 50
+          if ($diagnostics) {
+            foreach ($diagnostic in $diagnostics) {
+              $message = $diagnostic.Line.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Windows Rust Clippy::$message"
+            }
+          } else {
+            $first = $lines | Where-Object { $_.Trim().Length -gt 0 } | Select-Object -First 1
+            if (-not $first) { $first = 'Windows Clippy failed without diagnostic output.' }
+            $message = $first.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Windows Rust Clippy::$message"
+          }
+          "### Windows Rust Clippy failure" | Add-Content $env:GITHUB_STEP_SUMMARY
+          "```text" | Add-Content $env:GITHUB_STEP_SUMMARY
+          $lines | Select-Object -Last 160 | Add-Content $env:GITHUB_STEP_SUMMARY
+          "```" | Add-Content $env:GITHUB_STEP_SUMMARY
+          exit 1
 
       - name: Windows Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
