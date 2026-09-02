@@ -186,8 +186,6 @@ jobs:
     name: Windows x64
     needs: quality
     runs-on: windows-latest
-    env:
-      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -223,17 +221,21 @@ jobs:
       - name: Windows Rust Clippy
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Continue'
+          if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+            $PSNativeCommandUseErrorActionPreference = $false
+          }
           $log = "windows-clippy.log"
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings *>&1 | Tee-Object -FilePath $log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
-            $first = Select-String -Path $log -Pattern 'warning(:|\[)|error(:|\[)' | Select-Object -First 1
-            if ($first) {
-              Write-Output "::error title=Windows Rust Clippy::$($first.Line)"
+            $diagnostics = Select-String -Path $log -Pattern 'warning(:|\[)|error(:|\[)' | Select-Object -First 20
+            foreach ($diagnostic in $diagnostics) {
+              Write-Output "::error title=Windows Rust Clippy::$($diagnostic.Line)"
             }
             "### Windows Rust Clippy failure" | Add-Content $env:GITHUB_STEP_SUMMARY
             "```text" | Add-Content $env:GITHUB_STEP_SUMMARY
-            Get-Content $log | Select-Object -Last 80 | Add-Content $env:GITHUB_STEP_SUMMARY
+            Get-Content $log | Select-Object -Last 120 | Add-Content $env:GITHUB_STEP_SUMMARY
             "```" | Add-Content $env:GITHUB_STEP_SUMMARY
             exit $code
           }
@@ -242,6 +244,8 @@ jobs:
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Build installers
+        env:
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
         run: npm run tauri -- build --bundles nsis,msi
 
       - name: Collect installers
@@ -336,14 +340,29 @@ jobs:
       - name: Verify and collect DMG
         shell: bash
         run: |
+          set -euo pipefail
           BUNDLE_ROOT="src-tauri/target/${{ matrix.target }}/release/bundle"
-          APP_PATH="$(find "$BUNDLE_ROOT" -type d -name '*.app' -print -quit)"
           DMG_PATH="$(find "$BUNDLE_ROOT" -type f -name '*.dmg' -print -quit)"
-          test -n "$APP_PATH"
           test -n "$DMG_PATH"
+          test -s "$DMG_PATH"
+          hdiutil verify "$DMG_PATH" >/dev/null
+
+          MOUNT_DIR="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$MOUNT_DIR" >/dev/null 2>&1 || true
+            rm -rf "$MOUNT_DIR"
+          }
+          trap cleanup EXIT
+          hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$MOUNT_DIR" >/dev/null
+          APP_PATH="$(find "$MOUNT_DIR" -maxdepth 2 -type d -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
           test -f "$APP_PATH/Contents/Info.plist"
           EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
+          test -n "$EXECUTABLE"
           test -x "$APP_PATH/Contents/MacOS/$EXECUTABLE"
+          cleanup
+          trap - EXIT
+
           VERSION="$(node -p "require('./package.json').version")"
           mkdir -p platform-artifacts
           cp "$DMG_PATH" "platform-artifacts/RepoTunnel_${VERSION}_${{ matrix.file_arch }}.dmg"
