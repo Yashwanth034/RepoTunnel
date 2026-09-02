@@ -227,7 +227,7 @@ jobs:
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings *>&1 | Tee-Object -FilePath $log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
-            $first = Select-String -Path $log -Pattern 'warning:|error:' | Select-Object -First 1
+            $first = Select-String -Path $log -Pattern 'warning(:|\[)|error(:|\[)' | Select-Object -First 1
             if ($first) {
               Write-Output "::error title=Windows Rust Clippy::$($first.Line)"
             }
@@ -314,7 +314,7 @@ jobs:
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings 2>&1 | tee macos-clippy.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            first="$(grep -m1 -E 'warning:|error:' macos-clippy.log || true)"
+            first="$(grep -m1 -E 'warning(:|\[)|error(:|\[)' macos-clippy.log || true)"
             if [ -n "$first" ]; then
               echo "::error title=macOS Rust Clippy::$first"
             fi
