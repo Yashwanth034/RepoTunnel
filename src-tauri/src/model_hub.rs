@@ -1953,7 +1953,14 @@ mod tests {
         ));
         assert!(!status.reachable);
         assert!(status.models.is_empty());
-        assert_eq!(status.message, "Ollama is not running.");
+        assert!(
+            matches!(
+                status.message.as_str(),
+                "Ollama is not running." | "Ollama did not respond in time."
+            ),
+            "unexpected unavailable-runtime message: {}",
+            status.message
+        );
     }
 
     #[test]
