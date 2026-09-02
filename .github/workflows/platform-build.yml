@@ -61,8 +61,55 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           test "${GITHUB_REF_NAME}" = "v${VERSION}"
 
-      - name: Run release checks
-        run: npm run release:check
+      - name: Verify release metadata
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const packageVersion = require('./package.json').version;
+          const packageLockVersion = require('./package-lock.json').version;
+          const tauriVersion = require('./src-tauri/tauri.conf.json').version;
+          const cargoToml = fs.readFileSync('./src-tauri/Cargo.toml', 'utf8');
+          const cargoLock = fs.readFileSync('./src-tauri/Cargo.lock', 'utf8');
+          const cargoVersion = cargoToml.match(/^version = "([^"]+)"/m)?.[1];
+          const cargoLockVersion = cargoLock.match(/\[\[package\]\]\nname = "repotunnel"\nversion = "([^"]+)"/)?.[1];
+          const versions = { packageVersion, packageLockVersion, tauriVersion, cargoVersion, cargoLockVersion };
+          if (Object.values(versions).some((value) => !value) || new Set(Object.values(versions)).size !== 1) {
+            console.error('Release version mismatch:', versions);
+            process.exit(1);
+          }
+          NODE
+          if find src-tauri/src -type f -name '*.before-*' -print -quit | grep -q .; then
+            echo "Stale .before-* source files are present." >&2
+            exit 1
+          fi
+
+      - name: Frontend typecheck
+        run: npm run check
+
+      - name: Frontend tests
+        run: npm run test:frontend
+
+      - name: Frontend production build
+        run: npm run build
+
+      - name: npm dependency audit
+        run: npm audit --audit-level=moderate
+
+      - name: Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Rust check
+        run: cargo check --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust Clippy (warnings are errors)
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: RustSec dependency audit
+        run: cargo audit --no-yanked --file src-tauri/Cargo.lock
 
   linux:
     name: Linux x64
