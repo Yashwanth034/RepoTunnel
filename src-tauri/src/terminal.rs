@@ -549,6 +549,7 @@ fn safe_host_passthrough(
     None
 }
 
+#[cfg(target_os = "linux")]
 fn push_runtime_bind(command: &mut Command, path: &str) {
     if Path::new(path).exists() {
         command.args(["--ro-bind", path, path]);
@@ -2033,21 +2034,27 @@ pub(crate) fn stop_all_activity(app: &AppHandle) {
 mod tests {
     use std::{
         collections::BTreeMap,
-        fs::{self, File},
-        path::{Path, PathBuf},
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[cfg(target_os = "linux")]
+    use std::{
+        fs::File,
+        os::unix::process::CommandExt,
+        path::Path,
         process::{Command, Stdio},
         thread,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::Duration,
     };
-
-    #[cfg(unix)]
-    use std::os::unix::process::CommandExt;
 
     use super::{
-        execute_terminal_command, pending_terminal_record, runtimes, safe_host_passthrough,
-        spawn_with_stable_parent, stop_runtime, validate_command, validate_environment,
-        ProcessRuntime, TerminalCommandStatus, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS,
+        execute_terminal_command, pending_terminal_record, safe_host_passthrough, validate_command,
+        validate_environment, TerminalCommandStatus, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS,
     };
+    #[cfg(target_os = "linux")]
+    use super::{runtimes, spawn_with_stable_parent, stop_runtime, ProcessRuntime};
     use crate::models::{CommandPolicy, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy};
 
     fn temp_workspace(label: &str) -> (PathBuf, Workspace) {

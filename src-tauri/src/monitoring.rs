@@ -1,14 +1,19 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    net::{Ipv4Addr, Ipv6Addr},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+#[cfg(target_os = "linux")]
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    path::Path,
 };
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +39,7 @@ const SCAN_INTERVAL_MS: u64 = 5_000;
 const MAX_FILE_EVENTS: usize = 600;
 const MAX_SNAPSHOT_FILE_EVENTS: usize = 60;
 const MAX_MONITORED_FILES: usize = 4_000;
+#[cfg(target_os = "linux")]
 const MAX_PORTS: usize = 160;
 const OUTPUT_TAIL_BYTES: usize = 8 * 1024;
 const MAX_TERMINAL_SNAPSHOT: usize = 12;
@@ -68,6 +74,7 @@ struct MonitorRuntime {
     last_error: Arc<Mutex<Option<String>>>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 struct RawListener {
     protocol: String,
@@ -76,6 +83,7 @@ struct RawListener {
     inode: u64,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Debug)]
 struct ProcessOwner {
     pid: u32,
@@ -541,6 +549,7 @@ pub(crate) fn status(app: &AppHandle, workspace: &Workspace) -> MonitoringStatus
     }
 }
 
+#[cfg(target_os = "linux")]
 fn parse_ipv4(hex: &str) -> Option<String> {
     if hex.len() != 8 {
         return None;
@@ -550,6 +559,7 @@ fn parse_ipv4(hex: &str) -> Option<String> {
     Some(Ipv4Addr::from(bytes).to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn parse_ipv6(hex: &str) -> Option<String> {
     if hex.len() != 32 {
         return None;
@@ -563,6 +573,7 @@ fn parse_ipv6(hex: &str) -> Option<String> {
     Some(Ipv6Addr::from(bytes).to_string())
 }
 
+#[cfg(target_os = "linux")]
 fn read_tcp_table(path: &str, ipv6: bool) -> Vec<RawListener> {
     let Ok(contents) = fs::read_to_string(path) else {
         return Vec::new();
@@ -593,6 +604,7 @@ fn read_tcp_table(path: &str, ipv6: bool) -> Vec<RawListener> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn process_group(pid: u32) -> Option<u32> {
     let contents = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close = contents.rfind(')')?;
@@ -600,6 +612,7 @@ fn process_group(pid: u32) -> Option<u32> {
     rest.split_whitespace().nth(2)?.parse().ok()
 }
 
+#[cfg(target_os = "linux")]
 fn socket_inode(target: &Path) -> Option<u64> {
     let target = target.to_string_lossy();
     target
@@ -609,6 +622,7 @@ fn socket_inode(target: &Path) -> Option<u64> {
         .ok()
 }
 
+#[cfg(target_os = "linux")]
 fn listener_owners(inodes: &HashSet<u64>) -> HashMap<u64, ProcessOwner> {
     let mut owners = HashMap::new();
     let Ok(processes) = fs::read_dir("/proc") else {
@@ -890,7 +904,7 @@ pub(crate) fn forget_workspace(app: &AppHandle, workspace_id: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{parse_ipv4, parse_ipv6};
 

@@ -541,6 +541,7 @@ fn copy_workspace_tree(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_mount_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let target = root.join(relative);
     fs::create_dir_all(&target).map_err(|error| {
@@ -549,6 +550,7 @@ fn ensure_mount_target(root: &Path, relative: &str) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+#[cfg(target_os = "linux")]
 fn push_existing_ro_bind(args: &mut Vec<String>, source: &Path, destination: &str) {
     if source.exists() {
         args.push("--ro-bind".into());
@@ -557,6 +559,7 @@ fn push_existing_ro_bind(args: &mut Vec<String>, source: &Path, destination: &st
     }
 }
 
+#[cfg(target_os = "linux")]
 fn push_parent_dirs(args: &mut Vec<String>, path: &Path) {
     let mut current = PathBuf::new();
     if path.is_absolute() {
@@ -586,6 +589,7 @@ fn push_parent_dirs(args: &mut Vec<String>, path: &Path) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn tool_mount_root(executable: &Path, program: &str) -> PathBuf {
     let parent = executable
         .parent()
@@ -607,6 +611,7 @@ fn tool_mount_root(executable: &Path, program: &str) -> PathBuf {
     parent
 }
 
+#[cfg(target_os = "linux")]
 fn safe_path_environment(program_path: &Path) -> String {
     let mut paths = vec![
         program_path
@@ -624,6 +629,7 @@ fn safe_path_environment(program_path: &Path) -> String {
         .into_owned()
 }
 
+#[cfg(target_os = "linux")]
 fn add_user_toolchain_mounts(args: &mut Vec<String>, program: &str) {
     let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
         return;

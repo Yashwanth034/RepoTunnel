@@ -14,6 +14,7 @@ use crate::{connection, execution, models::RuntimeDiagnostics};
 const LOG_RELATIVE_PATH: &str = "logs/repotunnel.log";
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const ROTATED_LOGS: usize = 3;
+#[cfg(target_os = "linux")]
 const AUTOSTART_FILENAME: &str = "repotunnel.desktop";
 
 fn now_millis() -> u64 {
