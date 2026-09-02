@@ -15,7 +15,7 @@ use rmcp::transport::streamable_http_server::{
 use tauri::{AppHandle, Manager};
 use tokio::sync::oneshot;
 
-use crate::{app_state::AppState, mcp_auth, mcp_server::RepoTunnelMcp};
+use crate::{app_state::AppState, mcp_auth, mcp_server::RepoTunnelMcp, public_tunnel};
 
 #[derive(Clone)]
 struct LocalRequestPolicy {
@@ -59,6 +59,33 @@ fn origin_is_allowed(origin: &str) -> bool {
         || authority.starts_with("[::1]:")
 }
 
+fn configured_public_host_matches(app: &AppHandle, host: &str) -> bool {
+    // Keep Host validation cheap: every remote MCP request passes here, so do not
+    // run provider health/status probes just to learn the configured hostname.
+    let Ok(Some(config)) = public_tunnel::load_config(app) else {
+        return false;
+    };
+    let Some(public_url) = config.public_url else {
+        return false;
+    };
+    let Ok(parsed) = url::Url::parse(&public_url) else {
+        return false;
+    };
+    let Some(expected) = parsed.host_str() else {
+        return false;
+    };
+    let request_host = host
+        .trim()
+        .trim_start_matches('[')
+        .split(']')
+        .next()
+        .unwrap_or(host)
+        .split(':')
+        .next()
+        .unwrap_or(host);
+    request_host.eq_ignore_ascii_case(expected)
+}
+
 fn bearer_token(request: &Request<Body>) -> Option<&str> {
     let value = request
         .headers()
@@ -88,7 +115,7 @@ fn unauthorized_mcp_response(public_url: &str) -> Result<Response, StatusCode> {
         public_url.trim_end_matches('/')
     );
 
-    let challenge = format!(r#"Bearer resource_metadata="{metadata_url}""#);
+    let challenge = format!(r#"{} resource_metadata="{metadata_url}""#, "Bearer");
 
     let value = HeaderValue::from_str(&challenge).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -119,7 +146,15 @@ async fn local_request_guard(
         return Err(StatusCode::BAD_REQUEST);
     };
 
-    if !host_is_allowed(host, policy.port) {
+    let forwarded_https = request
+        .headers()
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("https"));
+
+    if !host_is_allowed(host, policy.port)
+        && !(forwarded_https && configured_public_host_matches(&policy.app, host))
+    {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -133,22 +168,12 @@ async fn local_request_guard(
         }
     }
 
-    let forwarded_https = request
-        .headers()
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("https"));
-
     if forwarded_https && request.uri().path().starts_with("/mcp") {
-        let status = policy
-            .app
-            .state::<AppState>()
-            .public_tunnel_status(&policy.app)
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-
-        let public_url = status.public_url.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-
-        let resource = status.mcp_url.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let config = public_tunnel::load_config(&policy.app)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let public_url = config.public_url.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let resource = format!("{}/mcp", public_url.trim_end_matches('/'));
 
         let authorized = bearer_token(&request)
             .map(|token| {

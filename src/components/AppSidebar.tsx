@@ -4,6 +4,7 @@ export type AppView =
   | "overview"
   | "projects"
   | "team"
+  | "models"
   | "editor"
   | "changes"
   | "checks"
@@ -23,6 +24,7 @@ export type IconName =
   | "home"
   | "folder"
   | "team"
+  | "model"
   | "changes"
   | "terminal"
   | "git"
@@ -48,7 +50,7 @@ export type IconName =
 const navItems: Array<{ id: AppView; label: string; icon: IconName }> = [
   { id: "overview", label: "Home", icon: "home" },
   { id: "projects", label: "Projects", icon: "folder" },
-  { id: "team", label: "Team", icon: "team" },
+  { id: "team", label: "GTP Agents", icon: "team" },
   { id: "changes", label: "History", icon: "changes" },
   { id: "checks", label: "Checks", icon: "checks" },
   { id: "git", label: "Git", icon: "git" },
@@ -72,6 +74,7 @@ export function NavIcon({ name, size = 17 }: { name: IconName; size?: number }) 
   if (name === "home") return <svg {...common}><path d="m4 10 8-7 8 7"/><path d="M6 9v11h12V9"/><path d="M10 20v-6h4v6"/></svg>;
   if (name === "folder") return <svg {...common}><path d="M3.5 7h6l1.8 2H20a1.5 1.5 0 0 1 1.5 1.5v7A2.5 2.5 0 0 1 19 20H5a2.5 2.5 0 0 1-2.5-2.5v-8A2.5 2.5 0 0 1 5 7Z"/></svg>;
   if (name === "team") return <svg {...common}><circle cx="8" cy="8" r="3"/><circle cx="16.5" cy="9" r="2.5"/><path d="M3.5 19c.5-3.7 2.3-5.5 5.2-5.5s4.7 1.8 5.2 5.5"/><path d="M13.7 14.3c.8-.8 1.8-1.2 3.1-1.2 2.3 0 3.7 1.5 4.1 4.5"/></svg>;
+  if (name === "model") return <svg {...common}><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>;
   if (name === "changes") return <svg {...common}><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h5M8 17h7"/></svg>;
   if (name === "terminal") return <svg {...common}><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="3" cy="7" r=".8" fill="currentColor" stroke="none"/><circle cx="3" cy="12" r=".8" fill="currentColor" stroke="none"/><circle cx="3" cy="17" r=".8" fill="currentColor" stroke="none"/></svg>;
   if (name === "checks") return <svg {...common}><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.8-5"/></svg>;

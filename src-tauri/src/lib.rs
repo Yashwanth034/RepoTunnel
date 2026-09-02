@@ -1,23 +1,34 @@
 mod access;
 mod activity;
+mod ai_workspace;
 mod app_state;
 mod browser;
 mod changes;
 mod checkpoint;
 mod commands;
 mod connection;
+mod conversation;
+mod desktop_control;
+mod direct_https;
 mod execution;
 mod external_access;
 mod filesystem;
 mod gateway;
 mod git;
 mod hardening;
+mod integrations;
 mod launcher;
 mod mcp_auth;
 mod mcp_server;
+mod model_hub;
+mod model_trial;
 mod models;
 mod monitoring;
+mod platform_sandbox;
+mod project_context;
 mod project_index;
+mod project_memory;
+mod project_setup;
 mod public_tunnel;
 mod repository;
 mod secret_guard;
@@ -30,8 +41,13 @@ mod workflow;
 use app_state::AppState;
 use tauri::Manager;
 
+pub fn maybe_run_platform_sandbox_helper() -> Option<i32> {
+    platform_sandbox::maybe_run_helper()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    platform_sandbox::recover_stale_state();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
@@ -41,6 +57,7 @@ pub fn run() {
             commands::get_workspace_health,
             commands::relocate_workspace,
             commands::add_workspace,
+            commands::create_project,
             commands::remove_workspace,
             commands::update_workspace_access,
             commands::update_workspace_change_policy,
@@ -56,6 +73,10 @@ pub fn run() {
             commands::editor_delete_entry,
             commands::preview_workspace_image,
             commands::open_workspace_path_local,
+            commands::get_project_setup,
+            commands::prepare_project,
+            commands::get_project_memory,
+            commands::update_project_memory,
             commands::inspect_project,
             commands::get_workflow_readiness,
             commands::create_file,
@@ -95,6 +116,17 @@ pub fn run() {
             commands::stop_managed_process,
             commands::restart_managed_process,
             commands::list_launchable_applications,
+            commands::list_deep_integrations,
+            commands::set_deep_integration_enabled,
+            commands::list_desktop_control_applications,
+            commands::get_desktop_control_enabled,
+            commands::set_desktop_control_enabled,
+            commands::get_ai_workspace_status,
+            commands::start_ai_workspace,
+            commands::stop_ai_workspace,
+            commands::get_ai_workspace_frame,
+            commands::ai_workspace_action,
+            commands::ai_workspace_sequence,
             commands::open_url,
             commands::open_workspace_path,
             commands::launch_application,
@@ -115,6 +147,8 @@ pub fn run() {
             commands::browser_scroll,
             commands::browser_reload,
             commands::browser_inspect_page,
+            commands::browser_pick_element,
+            commands::get_browser_visual_selection,
             commands::browser_take_screenshot,
             commands::get_browser_diagnostics,
             commands::list_browser_history,
@@ -152,11 +186,27 @@ pub fn run() {
             commands::get_public_tunnel_status,
             commands::configure_public_tunnel,
             commands::restart_public_tunnel,
+            commands::provision_direct_https_certificate,
             commands::clear_public_tunnel,
             commands::revoke_mcp_access,
             commands::get_chat_connection_status,
             commands::start_chat_connection,
             commands::stop_chat_connection,
+            commands::get_model_hub,
+            commands::refresh_model_runtime,
+            commands::update_model_runtime_endpoint,
+            commands::set_selected_local_model,
+            commands::test_local_model,
+            commands::get_model_trial,
+            commands::run_model_trial,
+            commands::cancel_model_trial,
+            commands::list_home_conversations,
+            commands::get_home_conversation,
+            commands::create_home_conversation,
+            commands::delete_home_conversation,
+            commands::list_home_context_files,
+            commands::begin_home_chat,
+            commands::cancel_home_chat,
             commands::get_runtime_diagnostics,
             commands::set_launch_at_login,
             commands::list_team_sessions,
@@ -214,6 +264,7 @@ pub fn run() {
                 monitoring::stop_all_activity();
                 terminal::stop_all_activity(app_handle);
                 browser::stop_all_activity();
+                model_hub::stop_owned_local_runtimes();
                 let state = app_handle.state::<AppState>();
                 let _ = state.stop_gateway();
                 hardening::shutdown(app_handle);

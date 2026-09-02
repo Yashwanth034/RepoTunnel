@@ -6,9 +6,9 @@ use std::{
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
+        mpsc, Mutex, OnceLock,
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -18,6 +18,8 @@ use std::os::unix::process::CommandExt;
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 
+#[cfg(not(target_os = "linux"))]
+use crate::platform_sandbox::{self, NetworkPolicy};
 use crate::{
     access::{
         canonical_workspace_root, is_sensitive_path, resolve_workspace_path, AccessOperation,
@@ -33,8 +35,8 @@ use crate::{
 const TERMINAL_HISTORY_FILE: &str = "terminal-history.json";
 const PROCESS_HISTORY_FILE: &str = "process-history.json";
 const PROCESS_LOG_DIRECTORY: &str = "process-logs";
-const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
-const MAX_TIMEOUT_SECONDS: u64 = 3600;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 30 * 60;
+const MAX_TIMEOUT_SECONDS: u64 = 12 * 60 * 60;
 const COMMAND_OUTPUT_LIMIT_BYTES: usize = 256 * 1024;
 const PROCESS_LOG_LIMIT_BYTES: u64 = 5 * 1024 * 1024;
 const PROCESS_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
@@ -74,8 +76,31 @@ struct StoredProcess {
     sandboxed: bool,
 }
 
+struct ProcessParentKeeper {
+    release_tx: Option<mpsc::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ProcessParentKeeper {
+    fn release(&mut self) {
+        if let Some(tx) = self.release_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for ProcessParentKeeper {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 struct ProcessRuntime {
     child: Child,
+    _parent_keeper: ProcessParentKeeper,
 }
 
 fn default_timeout() -> u64 {
@@ -403,6 +428,7 @@ fn resolve_cwd(workspace: &Workspace, cwd: Option<&str>) -> Result<(PathBuf, Str
     Ok((path, display))
 }
 
+#[cfg(target_os = "linux")]
 fn shell_path() -> &'static str {
     if Path::new("/bin/bash").is_file() {
         "/bin/bash"
@@ -411,6 +437,22 @@ fn shell_path() -> &'static str {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn shell_path() -> &'static str {
+    "/bin/zsh"
+}
+
+#[cfg(target_os = "windows")]
+fn shell_path() -> &'static str {
+    "cmd.exe"
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn shell_path() -> &'static str {
+    "sh"
+}
+
+#[cfg(target_os = "linux")]
 fn bwrap_path() -> Option<&'static str> {
     ["/usr/bin/bwrap", "/bin/bwrap"]
         .into_iter()
@@ -564,6 +606,7 @@ fn sensitive_workspace_files(workspace_root: &Path) -> Vec<PathBuf> {
     found
 }
 
+#[cfg(target_os = "linux")]
 fn configure_sandbox_command(
     command_text: &str,
     cwd: &Path,
@@ -626,6 +669,7 @@ fn configure_sandbox_command(
     for path in [
         "/etc/ssl",
         "/etc/ca-certificates",
+        "/etc/alternatives",
         "/etc/resolv.conf",
         "/etc/hosts",
         "/etc/nsswitch.conf",
@@ -675,6 +719,31 @@ fn configure_sandbox_command(
     Ok(command)
 }
 
+#[cfg(not(target_os = "linux"))]
+fn configure_sandbox_command(
+    command_text: &str,
+    cwd: &Path,
+    workspace_root: &Path,
+    env_overrides: &BTreeMap<String, String>,
+) -> Result<Command, String> {
+    let mut denied_paths = sensitive_workspace_files(workspace_root)
+        .into_iter()
+        .map(|relative| workspace_root.join(relative))
+        .collect::<Vec<_>>();
+    let git_path = workspace_root.join(".git");
+    if git_path.exists() {
+        denied_paths.push(git_path);
+    }
+    platform_sandbox::configure_shell_command(
+        command_text,
+        cwd,
+        workspace_root,
+        env_overrides,
+        NetworkPolicy::Allow,
+        &denied_paths,
+    )
+}
+
 fn configure_shell_command(
     command_text: &str,
     cwd: &Path,
@@ -702,9 +771,11 @@ fn configure_shell_command(
     }
 
     let mut command = Command::new(shell_path());
+    #[cfg(windows)]
+    command.args(["/D", "/S", "/C", command_text]);
+    #[cfg(not(windows))]
+    command.args(["-lc", command_text]);
     command
-        .arg("-lc")
-        .arg(command_text)
         .current_dir(cwd)
         .envs(env_overrides)
         .stdin(Stdio::null())
@@ -717,6 +788,7 @@ fn configure_shell_command(
     Ok(command)
 }
 
+#[cfg(unix)]
 fn signal_process_group(pid: u32, signal: &str) -> Result<(), String> {
     let kill_path = if Path::new("/bin/kill").is_file() {
         "/bin/kill"
@@ -740,6 +812,13 @@ fn signal_process_group(pid: u32, signal: &str) -> Result<(), String> {
     } else {
         Err(format!("Could not signal managed process group {pid}."))
     }
+}
+
+#[cfg(not(unix))]
+fn signal_process_group(pid: u32, _signal: &str) -> Result<(), String> {
+    Err(format!(
+        "Native process-group signals are unavailable for managed process {pid}; RepoTunnel will use the child handle fallback."
+    ))
 }
 
 fn collect_output<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<(String, bool)> {
@@ -928,6 +1007,7 @@ pub(crate) fn run_local_terminal_command(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn request_terminal_command(
     app: &AppHandle,
     workspace: &Workspace,
@@ -1220,6 +1300,47 @@ fn append_restart_marker(app: &AppHandle, process_id: &str, restart_count: u32) 
     }
 }
 
+fn spawn_with_stable_parent(mut command: Command) -> Result<(Child, ProcessParentKeeper), String> {
+    let (child_tx, child_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::channel();
+    let thread = thread::Builder::new()
+        .name("repotunnel-process-parent".to_string())
+        .spawn(move || {
+            let result = command
+                .spawn()
+                .map_err(|error| format!("Could not start managed process: {error}"));
+            let started = result.is_ok();
+            if child_tx.send(result).is_err() {
+                return;
+            }
+            if started {
+                let _ = release_rx.recv();
+            }
+        })
+        .map_err(|error| format!("Could not create the managed-process parent thread: {error}"))?;
+
+    match child_rx.recv() {
+        Ok(Ok(child)) => Ok((
+            child,
+            ProcessParentKeeper {
+                release_tx: Some(release_tx),
+                thread: Some(thread),
+            },
+        )),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
+        }
+        Err(_) => {
+            let _ = thread.join();
+            Err(
+                "Managed process startup ended before RepoTunnel received the child handle."
+                    .to_string(),
+            )
+        }
+    }
+}
+
 fn spawn_process_runtime(
     app: &AppHandle,
     workspace: &Workspace,
@@ -1243,7 +1364,7 @@ fn spawn_process_runtime(
     }
 
     let workspace_root = canonical_workspace_root(workspace)?;
-    let mut command = configure_shell_command(
+    let command = configure_shell_command(
         &stored.record.command,
         &cwd_path,
         &workspace_root,
@@ -1251,9 +1372,7 @@ fn spawn_process_runtime(
         stored.sandboxed,
         false,
     )?;
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("Could not start managed process: {error}"))?;
+    let (mut child, parent_keeper) = spawn_with_stable_parent(command)?;
     let pid = child.id();
     if let Some(stdout) = child.stdout.take() {
         capture_process_stream(stdout, stdout_path);
@@ -1264,12 +1383,19 @@ fn spawn_process_runtime(
 
     match runtimes().lock() {
         Ok(mut runtime_map) => {
-            runtime_map.insert(stored.record.id.clone(), ProcessRuntime { child });
+            runtime_map.insert(
+                stored.record.id.clone(),
+                ProcessRuntime {
+                    child,
+                    _parent_keeper: parent_keeper,
+                },
+            );
         }
         Err(_) => {
             let _ = signal_process_group(pid, "-KILL");
             let _ = child.kill();
             let _ = child.wait();
+            drop(parent_keeper);
             return Err("Managed process state is unavailable.".to_string());
         }
     }
@@ -1905,9 +2031,46 @@ pub(crate) fn stop_all_activity(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        fs::{self, File},
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
-    use super::{safe_host_passthrough, validate_command, validate_environment};
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
+    use super::{
+        execute_terminal_command, pending_terminal_record, runtimes, safe_host_passthrough,
+        spawn_with_stable_parent, stop_runtime, validate_command, validate_environment,
+        ProcessRuntime, TerminalCommandStatus, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS,
+    };
+    use crate::models::{CommandPolicy, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy};
+
+    fn temp_workspace(label: &str) -> (PathBuf, Workspace) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-terminal-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let workspace = Workspace {
+            id: format!("test-{label}"),
+            name: format!("test-{label}"),
+            path: root.to_string_lossy().into_owned(),
+            added_at: 0,
+            access_mode: WorkspaceAccessMode::ReadWrite,
+            change_policy: WorkspaceChangePolicy::Automatic,
+            command_policy: CommandPolicy::Automatic,
+        };
+        (root, workspace)
+    }
 
     #[test]
     fn terminal_commands_require_non_empty_input() {
@@ -1945,6 +2108,85 @@ mod tests {
             assert!(safe_host_passthrough("gh run list", false).is_some());
         }
         assert!(safe_host_passthrough("gh run list; cat ~/.ssh/id_ed25519", false).is_none());
+    }
+
+    #[test]
+    fn stage_eleven_a_terminal_timeout_policy_uses_practical_default_and_allows_long_explicit_jobs()
+    {
+        assert_eq!(DEFAULT_TIMEOUT_SECONDS, 30 * 60);
+        assert_eq!(MAX_TIMEOUT_SECONDS, 12 * 60 * 60);
+    }
+
+    #[test]
+    fn one_shot_terminal_timeout_remains_enforced() {
+        let (root, workspace) = temp_workspace("one-shot-timeout");
+        let record = pending_terminal_record(
+            &workspace,
+            "python3 -c 'import time; time.sleep(5)'".to_string(),
+            ".".to_string(),
+        );
+        let finished = execute_terminal_command(
+            record,
+            root.clone(),
+            root.clone(),
+            1,
+            &BTreeMap::new(),
+            false,
+            false,
+        );
+        assert_eq!(finished.status, TerminalCommandStatus::TimedOut);
+        assert!(finished
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("1 second timeout")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn quiet_persistent_process_survives_parent_worker_window_emits_then_stops() {
+        let (root, _workspace) = temp_workspace("persistent-parent");
+        let output_path = root.join("late-output.txt");
+        let python = ["/usr/bin/python3", "/usr/local/bin/python3"]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+            .expect("python3 is required for the Linux process lifecycle regression test");
+        let output = File::create(&output_path).unwrap();
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(
+                "import ctypes,time; ctypes.CDLL(None).prctl(1,15); time.sleep(11); print('late', flush=True); time.sleep(30)",
+            )
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        command.process_group(0);
+
+        let (child, parent_keeper) = spawn_with_stable_parent(command).unwrap();
+        let process_id = format!("test-persistent-parent-{}", child.id());
+        runtimes().lock().unwrap().insert(
+            process_id.clone(),
+            ProcessRuntime {
+                child,
+                _parent_keeper: parent_keeper,
+            },
+        );
+
+        thread::sleep(Duration::from_secs(12));
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "late\n");
+        {
+            let mut runtime_map = runtimes().lock().unwrap();
+            let runtime = runtime_map.get_mut(&process_id).unwrap();
+            assert_eq!(runtime.child.try_wait().unwrap(), None);
+        }
+
+        let stopped = stop_runtime(&process_id, false).unwrap();
+        assert!(stopped.is_some());
+        assert!(!runtimes().lock().unwrap().contains_key(&process_id));
+        let _ = fs::remove_dir_all(root);
     }
 }
 

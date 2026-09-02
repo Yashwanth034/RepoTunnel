@@ -3,15 +3,20 @@ use std::{
     fs::{self},
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 
+#[cfg(not(target_os = "linux"))]
+use crate::platform_sandbox::{self, NetworkPolicy};
 use crate::{
     access::{resolve_workspace_path, AccessOperation},
     models::{
@@ -24,7 +29,7 @@ use crate::{
 const COMMANDS_FILE: &str = "command-history.json";
 static COMMAND_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_TIMEOUT_SECONDS: u64 = 180;
-const MAX_TIMEOUT_SECONDS: u64 = 300;
+const MAX_TIMEOUT_SECONDS: u64 = 4 * 60 * 60;
 const OUTPUT_LIMIT_BYTES: usize = 128 * 1024;
 const COPY_FILE_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
 const COPY_TOTAL_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
@@ -36,6 +41,7 @@ struct ResolvedPreset {
     program: String,
     args: Vec<String>,
     fingerprint: String,
+    working_directory: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -145,6 +151,7 @@ fn add_preset(
         program,
         args,
         fingerprint,
+        working_directory: ".".to_string(),
     });
 }
 
@@ -325,10 +332,34 @@ pub(crate) fn list_presets(workspace: &Workspace) -> Result<Vec<CommandPreset>, 
 
 fn find_program(program: &str) -> Result<PathBuf, String> {
     let path_value = env::var_os("PATH").unwrap_or_default();
+    #[cfg(windows)]
+    let extensions = {
+        let mut values = vec![String::new()];
+        if Path::new(program).extension().is_none() {
+            let path_ext =
+                env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+            values.extend(
+                path_ext
+                    .split(';')
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| value.trim().to_ascii_lowercase()),
+            );
+        }
+        values
+    };
+    #[cfg(not(windows))]
+    let extensions = vec![String::new()];
+
     for directory in env::split_paths(&path_value) {
-        let candidate = directory.join(program);
-        if candidate.is_file() {
-            return Ok(candidate);
+        for extension in &extensions {
+            let candidate = if extension.is_empty() {
+                directory.join(program)
+            } else {
+                directory.join(format!("{program}{extension}"))
+            };
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
     }
     Err(format!(
@@ -336,6 +367,7 @@ fn find_program(program: &str) -> Result<PathBuf, String> {
     ))
 }
 
+#[cfg(target_os = "linux")]
 fn bwrap_version() -> Result<String, String> {
     let output = Command::new("bwrap")
         .arg("--version")
@@ -352,6 +384,7 @@ fn bwrap_version() -> Result<String, String> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn probe_bwrap() -> Result<(), String> {
     let true_path = if Path::new("/usr/bin/true").is_file() {
         "/usr/bin/true"
@@ -395,19 +428,29 @@ fn probe_bwrap() -> Result<(), String> {
 }
 
 pub(crate) fn execution_status() -> ExecutionStatus {
-    match bwrap_version().and_then(|version| probe_bwrap().map(|_| version)) {
-        Ok(version) => ExecutionStatus {
-            sandbox_available: true,
-            sandbox_version: Some(version),
-            message: Some("Commands run without network access in a disposable Bubblewrap workspace.".to_string()),
-        },
-        Err(error) => ExecutionStatus {
-            sandbox_available: false,
-            sandbox_version: None,
-            message: Some(format!(
-                "{error} Install/enable the 'bubblewrap' package to use sandboxed command execution."
-            )),
-        },
+    #[cfg(target_os = "linux")]
+    {
+        match bwrap_version().and_then(|version| probe_bwrap().map(|_| version)) {
+            Ok(version) => ExecutionStatus {
+                sandbox_available: true,
+                sandbox_version: Some(version),
+                message: Some(
+                    "Commands run without network access in a disposable Bubblewrap workspace."
+                        .to_string(),
+                ),
+            },
+            Err(error) => ExecutionStatus {
+                sandbox_available: false,
+                sandbox_version: None,
+                message: Some(format!(
+                    "{error} Install/enable the 'bubblewrap' package to use sandboxed command execution."
+                )),
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        platform_sandbox::execution_status()
     }
 }
 
@@ -625,6 +668,48 @@ fn add_user_toolchain_mounts(args: &mut Vec<String>, program: &str) {
     }
 }
 
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: &str) -> Result<(), String> {
+    let kill_path = if Path::new("/bin/kill").is_file() {
+        "/bin/kill"
+    } else {
+        "/usr/bin/kill"
+    };
+    let status = Command::new(kill_path)
+        .arg(signal)
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("Could not stop validation process {pid}: {error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| format!("Could not stop validation process group {pid}."))
+}
+
+fn terminate_validation_process(child: &mut Child) -> Option<ExitStatus> {
+    #[cfg(unix)]
+    {
+        let _ = signal_process_group(child.id(), "-TERM");
+        for _ in 0..10 {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        let _ = signal_process_group(child.id(), "-KILL");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    child.wait().ok()
+}
+
 fn collect_output<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<(String, bool)> {
     thread::spawn(move || {
         let mut captured = Vec::new();
@@ -652,6 +737,17 @@ fn collect_output<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle
     })
 }
 
+fn classify_command_status(timed_out: bool, success: bool) -> CommandStatus {
+    if timed_out {
+        CommandStatus::TimedOut
+    } else if success {
+        CommandStatus::Completed
+    } else {
+        CommandStatus::Failed
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn run_resolved_preset(
     workspace: &Workspace,
     preset: &ResolvedPreset,
@@ -661,6 +757,31 @@ fn run_resolved_preset(
     let source_root = Path::new(&workspace.path)
         .canonicalize()
         .map_err(|error| format!("Could not resolve the approved workspace: {error}"))?;
+    let working_directory = Path::new(&preset.working_directory);
+    if working_directory.is_absolute()
+        || working_directory.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::Normal(_)
+            )
+        })
+    {
+        return Err("The validation preset working directory is invalid.".to_string());
+    }
+    let source_working_directory = source_root
+        .join(working_directory)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the validation working directory: {error}"))?;
+    if !source_working_directory.starts_with(&source_root) || !source_working_directory.is_dir() {
+        return Err(
+            "The validation preset working directory is outside the approved project.".to_string(),
+        );
+    }
+    let sandbox_working_directory = if preset.working_directory == "." {
+        "/workspace".to_string()
+    } else {
+        format!("/workspace/{}", preset.working_directory)
+    };
     let temp_root = env::temp_dir().join(format!("repotunnel-{command_id}"));
     if temp_root.exists() {
         let _ = fs::remove_dir_all(&temp_root);
@@ -722,18 +843,30 @@ fn run_resolved_preset(
         bwrap_args.push(temp_root.to_string_lossy().into_owned());
         bwrap_args.push("/workspace".into());
 
-        for dependency in ["node_modules", ".venv", "venv"] {
-            let source = source_root.join(dependency);
-            if source.is_dir() {
-                ensure_mount_target(&temp_root, dependency)?;
+        let mut dependency_roots = vec![(PathBuf::new(), source_root.clone())];
+        if preset.working_directory != "." {
+            dependency_roots.push((
+                working_directory.to_path_buf(),
+                source_working_directory.clone(),
+            ));
+        }
+        for (relative_root, source_directory) in dependency_roots {
+            for dependency in ["node_modules", ".venv", "venv"] {
+                let source = source_directory.join(dependency);
+                if !source.is_dir() {
+                    continue;
+                }
+                let relative = relative_root.join(dependency);
+                let relative = relative.to_string_lossy().replace('\\', "/");
+                ensure_mount_target(&temp_root, &relative)?;
                 bwrap_args.push("--ro-bind".into());
                 bwrap_args.push(source.to_string_lossy().into_owned());
-                bwrap_args.push(format!("/workspace/{dependency}"));
+                bwrap_args.push(format!("/workspace/{relative}"));
             }
         }
 
         bwrap_args.push("--chdir".into());
-        bwrap_args.push("/workspace".into());
+        bwrap_args.push(sandbox_working_directory.clone());
         bwrap_args.push("--".into());
         bwrap_args.push(program_path.to_string_lossy().into_owned());
         bwrap_args.extend(preset.args.iter().cloned());
@@ -768,6 +901,10 @@ fn run_resolved_preset(
             }
         }
 
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| format!("Could not start the Bubblewrap command sandbox: {error}"))?;
@@ -780,18 +917,15 @@ fn run_resolved_preset(
                 Ok(Some(status)) => break Some(status),
                 Ok(None) if started.elapsed() >= timeout => {
                     timed_out = true;
-                    let _ = child.kill();
-                    break child.wait().ok();
+                    break terminate_validation_process(&mut child);
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(50)),
                 Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    let _ = terminate_validation_process(&mut child);
                     return Err(format!("Could not monitor the sandboxed command: {error}"));
                 }
             }
         };
-
         let (stdout, stdout_truncated) = stdout_handle
             .and_then(|handle| handle.join().ok())
             .unwrap_or_default();
@@ -801,13 +935,10 @@ fn run_resolved_preset(
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let updated_at = now_millis();
         let exit_code = exit_status.as_ref().and_then(|status| status.code());
-        let status = if timed_out {
-            CommandStatus::TimedOut
-        } else if exit_status.as_ref().is_some_and(|status| status.success()) {
-            CommandStatus::Completed
-        } else {
-            CommandStatus::Failed
-        };
+        let status = classify_command_status(
+            timed_out,
+            exit_status.as_ref().is_some_and(|status| status.success()),
+        );
 
         Ok(CommandRecord {
             id: command_id.to_string(),
@@ -824,15 +955,184 @@ fn run_resolved_preset(
             stdout,
             stderr,
             output_truncated: stdout_truncated || stderr_truncated,
-            error: timed_out.then(|| {
-                format!(
+            error: if timed_out {
+                Some(format!(
                     "Command exceeded the {} second timeout.",
                     preset.public.timeout_seconds
-                )
-            }),
+                ))
+            } else {
+                None
+            },
         })
     })();
 
+    let _ = fs::remove_dir_all(&temp_root);
+    result
+}
+
+#[cfg(not(target_os = "linux"))]
+fn run_resolved_preset(
+    workspace: &Workspace,
+    preset: &ResolvedPreset,
+    command_id: &str,
+) -> Result<CommandRecord, String> {
+    if !execution_status().sandbox_available {
+        return Err(execution_status()
+            .message
+            .unwrap_or_else(|| "The native OS command sandbox is unavailable.".to_string()));
+    }
+    let source_root = Path::new(&workspace.path)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the approved workspace: {error}"))?;
+    let working_directory = Path::new(&preset.working_directory);
+    if working_directory.is_absolute()
+        || working_directory.components().any(|component| {
+            !matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::Normal(_)
+            )
+        })
+    {
+        return Err("The validation preset working directory is invalid.".to_string());
+    }
+    let source_working_directory = source_root
+        .join(working_directory)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the validation working directory: {error}"))?;
+    if !source_working_directory.starts_with(&source_root) || !source_working_directory.is_dir() {
+        return Err(
+            "The validation preset working directory is outside the approved project.".to_string(),
+        );
+    }
+
+    let temp_root = env::temp_dir().join(format!("repotunnel-{command_id}"));
+    if temp_root.exists() {
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+    fs::create_dir_all(&temp_root)
+        .map_err(|error| format!("Could not create the disposable command workspace: {error}"))?;
+    let mut dependency_links = Vec::<PathBuf>::new();
+
+    let result = (|| {
+        let mut budget = CopyBudget::default();
+        copy_workspace_tree(
+            workspace,
+            &source_root,
+            &source_root,
+            &temp_root,
+            &mut budget,
+        )?;
+
+        let mut read_roots = Vec::<PathBuf>::new();
+        let mut dependency_roots = vec![(PathBuf::new(), source_root.clone())];
+        if preset.working_directory != "." {
+            dependency_roots.push((
+                working_directory.to_path_buf(),
+                source_working_directory.clone(),
+            ));
+        }
+        for (relative_root, source_directory) in dependency_roots {
+            for dependency in ["node_modules", ".venv", "venv"] {
+                let source = source_directory.join(dependency);
+                if !source.is_dir() {
+                    continue;
+                }
+                let destination = temp_root.join(&relative_root).join(dependency);
+                if destination.exists() {
+                    continue;
+                }
+                platform_sandbox::link_read_only_dependency(&source, &destination)?;
+                dependency_links.push(destination);
+                read_roots.push(source);
+            }
+        }
+
+        let program_path = find_program(&preset.program)?;
+        let sandbox_working_directory = temp_root.join(working_directory);
+        if !sandbox_working_directory.is_dir() {
+            return Err("The disposable validation working directory was not created.".to_string());
+        }
+        let env_overrides = std::collections::BTreeMap::new();
+        let mut command = platform_sandbox::configure_program_command(
+            &program_path,
+            &preset.args,
+            &sandbox_working_directory,
+            &temp_root,
+            &source_root,
+            &env_overrides,
+            NetworkPolicy::Deny,
+            &read_roots,
+            &[],
+        )?;
+        let started = Instant::now();
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("Could not start the native OS command sandbox: {error}"))?;
+        let stdout_handle = child.stdout.take().map(collect_output);
+        let stderr_handle = child.stderr.take().map(collect_output);
+        let timeout = Duration::from_secs(preset.public.timeout_seconds.min(MAX_TIMEOUT_SECONDS));
+        let mut timed_out = false;
+        let exit_status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() >= timeout => {
+                    timed_out = true;
+                    break terminate_validation_process(&mut child);
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(error) => {
+                    let _ = terminate_validation_process(&mut child);
+                    return Err(format!(
+                        "Could not monitor the native sandboxed command: {error}"
+                    ));
+                }
+            }
+        };
+        let (stdout, stdout_truncated) = stdout_handle
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let (stderr, stderr_truncated) = stderr_handle
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let updated_at = now_millis();
+        let exit_code = exit_status.as_ref().and_then(|status| status.code());
+        let status = classify_command_status(
+            timed_out,
+            exit_status.as_ref().is_some_and(|status| status.success()),
+        );
+
+        Ok(CommandRecord {
+            id: command_id.to_string(),
+            workspace_id: workspace.id.clone(),
+            workspace_name: workspace.name.clone(),
+            preset_id: preset.public.id.clone(),
+            label: preset.public.label.clone(),
+            command: preset.public.command.clone(),
+            status,
+            created_at: updated_at.saturating_sub(duration_ms),
+            updated_at,
+            duration_ms: Some(duration_ms),
+            exit_code,
+            stdout,
+            stderr,
+            output_truncated: stdout_truncated || stderr_truncated,
+            error: if timed_out {
+                Some(format!(
+                    "Command exceeded the {} second timeout.",
+                    preset.public.timeout_seconds
+                ))
+            } else {
+                None
+            },
+        })
+    })();
+
+    // Remove platform dependency links before recursively deleting the disposable copy so a
+    // junction/symlink can never make cleanup walk into the real dependency directory.
+    for link in dependency_links.into_iter().rev() {
+        let _ = fs::remove_dir(&link).or_else(|_| fs::remove_file(&link));
+    }
     let _ = fs::remove_dir_all(&temp_root);
     result
 }
@@ -858,11 +1158,7 @@ fn pending_record(workspace: &Workspace, preset: &ResolvedPreset, id: String) ->
     }
 }
 
-pub(crate) fn request_command(
-    app: &AppHandle,
-    workspace: &Workspace,
-    preset_id: &str,
-) -> Result<CommandOutcome, String> {
+fn ensure_execution_allowed(workspace: &Workspace) -> Result<(), String> {
     if workspace.command_policy == CommandPolicy::Disabled {
         return Err("Command execution is disabled for this project.".to_string());
     }
@@ -872,13 +1168,15 @@ pub(crate) fn request_command(
                 .to_string(),
         );
     }
+    Ok(())
+}
 
-    let preset = discover_resolved_presets(workspace)?
-        .into_iter()
-        .find(|preset| preset.public.id == preset_id)
-        .ok_or_else(|| "That command preset is not available for this project.".to_string())?;
+fn request_resolved_command(
+    app: &AppHandle,
+    workspace: &Workspace,
+    preset: ResolvedPreset,
+) -> Result<CommandOutcome, String> {
     let command_id = new_command_id();
-
     if workspace.command_policy == CommandPolicy::Review {
         let record = pending_record(workspace, &preset, command_id);
         let mut commands = load_stored_commands(app)?;
@@ -915,6 +1213,19 @@ pub(crate) fn request_command(
         queued: false,
         command: record,
     })
+}
+
+pub(crate) fn request_command(
+    app: &AppHandle,
+    workspace: &Workspace,
+    preset_id: &str,
+) -> Result<CommandOutcome, String> {
+    ensure_execution_allowed(workspace)?;
+    let preset = discover_resolved_presets(workspace)?
+        .into_iter()
+        .find(|preset| preset.public.id == preset_id)
+        .ok_or_else(|| "That command preset is not available for this project.".to_string())?;
+    request_resolved_command(app, workspace, preset)
 }
 
 pub(crate) fn clear_workspace_history(
@@ -1029,7 +1340,10 @@ pub(crate) fn reject_command(app: &AppHandle, command_id: &str) -> Result<Comman
 
 #[cfg(test)]
 mod tests {
-    use super::safe_script_name;
+    use super::{
+        classify_command_status, safe_script_name, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS,
+    };
+    use crate::models::CommandStatus;
 
     #[test]
     fn only_build_test_and_validation_scripts_are_discovered() {
@@ -1039,5 +1353,17 @@ mod tests {
         assert!(!safe_script_name("deploy"));
         assert!(!safe_script_name("publish"));
         assert!(!safe_script_name("dev"));
+    }
+
+    #[test]
+    fn normal_command_limits_and_statuses_stay_bounded() {
+        assert_eq!(DEFAULT_TIMEOUT_SECONDS, 180);
+        assert_eq!(MAX_TIMEOUT_SECONDS, 4 * 60 * 60);
+        assert_eq!(classify_command_status(true, true), CommandStatus::TimedOut);
+        assert_eq!(
+            classify_command_status(false, true),
+            CommandStatus::Completed
+        );
+        assert_eq!(classify_command_status(false, false), CommandStatus::Failed);
     }
 }

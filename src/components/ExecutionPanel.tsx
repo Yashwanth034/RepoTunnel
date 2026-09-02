@@ -55,6 +55,7 @@ const sandboxStatusLabels: Record<CommandStatus, string> = {
   failed: "Failed",
   rejected: "Rejected",
   timedOut: "Timed out",
+  cancelled: "Cancelled",
 };
 
 const terminalStatusLabels: Record<TerminalCommandStatus, string> = {

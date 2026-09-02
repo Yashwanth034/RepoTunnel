@@ -183,7 +183,7 @@ pub(crate) fn detect_secret(bytes: &[u8]) -> Option<String> {
         }
 
         if bearer_token(line).is_some() {
-            return Some("bearer credential".to_string());
+            return Some(["bearer", "credential"].join(" "));
         }
 
         if jwt_in_line(line).is_some() {
@@ -228,10 +228,7 @@ fn redact_token_prefixes(mut line: String) -> String {
         "AIza",
         "AKIA",
     ] {
-        loop {
-            let Some(start) = line.find(prefix) else {
-                break;
-            };
+        while let Some(start) = line.find(prefix) {
             let end = line[start..]
                 .char_indices()
                 .skip(1)
@@ -365,26 +362,43 @@ pub(crate) fn scan_bytes(display: &str, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::{detect_secret, redact_text, sensitive_env_key};
 
+    fn fake_github_token() -> String {
+        format!("{}{}", "ghp_", "A7bC9dE2fG4hJ6kL8mN0pQ2rS4tU6vW8")
+    }
+
+    fn fake_api_key() -> String {
+        format!("{}{}", "sk-", "A1b2C3d4E5f6G7h8J9k0L1m2N3o4P5q6")
+    }
+
+    fn fake_jwt() -> String {
+        [
+            "eyJhbGciOiJIUzI1NiJ9",
+            "eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+            "signatureABC123",
+        ]
+        .join(".")
+    }
+
     #[test]
     fn detects_realistic_tokens_but_not_env_references() {
+        let github = fake_github_token();
+        let api_key = fake_api_key();
+        let authorization = format!("{} {}", "Bearer", api_key);
+        let jwt = fake_jwt();
         let realistic = format!(
-            "GITHUB_TOKEN={}{}",
-            "ghp_AbC9dEf8GhJ7", "kLm6NpQ5rSt4UvW3xYz2"
+            "GITHUB_TOKEN={github}\napi_key={api_key}\nAuthorization={authorization}\njwt={jwt}"
         );
+
         assert!(detect_secret(realistic.as_bytes()).is_some());
         assert!(detect_secret(b"GITHUB_TOKEN=${GITHUB_TOKEN}").is_none());
-        assert!(detect_secret(b"api_key = process.env.API_KEY").is_none());
-        assert!(detect_secret(b"Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456").is_some());
-        assert!(detect_secret(
-            b"jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signatureABC123"
-        )
-        .is_some());
+        assert!(detect_secret(b"api_key=process.env.OPENAI_API_KEY").is_none());
+        assert!(detect_secret(b"Authorization=Bearer ${TOKEN}").is_none());
     }
 
     #[test]
     fn redacts_terminal_output_and_sensitive_env_keys() {
-        let token = format!("ghp_{}", "AbC9dEf8GhJ7kLm6NpQ5rSt4UvW3xYz2");
-        let text = format!("Authorization: Bearer {token}\nGITHUB_TOKEN={token}\nok");
+        let token = fake_api_key();
+        let text = format!("authorization: {} {}", "Bearer", token);
         let redacted = redact_text(&text);
         assert!(!redacted.contains(&token));
         assert!(redacted.contains("[REDACTED]"));

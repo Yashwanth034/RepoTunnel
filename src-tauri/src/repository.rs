@@ -94,9 +94,12 @@ fn parse_repository(input: &str) -> Result<GithubRepository, String> {
 }
 
 fn projects_root() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-        "RepoTunnel could not resolve your home directory for automatic cloning.".to_string()
-    })?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "RepoTunnel could not resolve your home directory for project creation.".to_string()
+        })?;
     Ok(home.join("Projects"))
 }
 
@@ -148,6 +151,44 @@ fn clone_with_git(repository: &GithubRepository, destination: &Path) -> Result<(
         detail.chars().take(1_200).collect()
     };
     Err(format!("Could not clone the GitHub repository. {detail}"))
+}
+
+pub(crate) fn create_and_register(app: &AppHandle, name: &str) -> Result<Workspace, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err("Project name must be between 1 and 80 characters.".to_string());
+    }
+    if name == "."
+        || name == ".."
+        || name.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
+        })
+    {
+        return Err("Project name contains unsupported path characters.".to_string());
+    }
+
+    let root = projects_root()?;
+    fs::create_dir_all(&root)
+        .map_err(|error| format!("Could not create the local Projects folder: {error}"))?;
+    let destination = root.join(name);
+    if destination.exists() {
+        return Err(format!(
+            "~/Projects/{name} already exists. Choose a different project name."
+        ));
+    }
+    fs::create_dir(&destination)
+        .map_err(|error| format!("Could not create the new project folder: {error}"))?;
+    match register_workspace_path(app, destination.to_string_lossy().into_owned()) {
+        Ok(workspace) => Ok(workspace),
+        Err(error) => {
+            let _ = fs::remove_dir(&destination);
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn clone_and_register(

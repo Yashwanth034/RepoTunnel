@@ -1,15 +1,21 @@
 # Security Policy
 
-RepoTunnel is intentionally designed around least-privilege access to local source code.
+RepoTunnel is designed around least-privilege access to explicitly approved local projects.
 
 ## Reporting a vulnerability
 
-Do not include API keys, private repository contents, personal filesystem paths, or other secrets in a public issue. Use the repository owner's private security-reporting channel when one is configured. Until a private reporting channel is published, provide only a minimal non-sensitive reproduction description publicly and wait for a private contact path before sharing exploit details.
+Do not post secrets, private repository content, or personal filesystem paths in a public issue. Use the repository owner's private security-reporting channel when available; otherwise publish only a minimal non-sensitive reproduction and wait for a private contact path before sharing exploit details.
 
 ## Security boundaries
 
-RepoTunnel does not claim to sandbox the desktop application itself or software the user launches manually. Its security guarantees are scoped to operations performed through RepoTunnel's approved workspace, MCP, command, and Git interfaces. AI-triggered terminal/process commands and disposable verification commands are isolated with Bubblewrap and are blocked rather than silently falling back to unrestricted host access when the required sandbox is unavailable.
+RepoTunnel's guarantees apply to operations performed through its approved workspace, MCP, command, Git, and AI Workspace interfaces. They do not sandbox software that the user launches manually.
 
-A supported deployment should keep RepoTunnel and its dependencies updated and should not modify the application to expose the loopback MCP server publicly.
+AI-triggered command execution is fail-closed: Bubblewrap on Linux, AppContainer + Job Object isolation on Windows, and a Seatbelt `sandbox-exec` compatibility backend on macOS. If the required sandbox is unavailable, RepoTunnel blocks the operation instead of falling back to unrestricted host execution.
 
-See `docs/security.md` for the full technical model and `docs/acceptance.md` for the release security test.
+Keep RepoTunnel and its dependencies updated, and do not expose the loopback MCP server directly to untrusted networks.
+
+## Dependency audits
+
+Releases run npm and RustSec dependency audits. Security vulnerabilities block release. Informational, unmaintained, unsound, or yanked transitive dependency notices are reviewed separately and are not hidden to produce a clean-looking report. Some Linux notices currently originate in Tauri's GTK3/WebKit dependency stack and remain tracked until upstream replacements are available.
+
+See `docs/security.md` for the technical model and `docs/acceptance.md` for release-security verification.

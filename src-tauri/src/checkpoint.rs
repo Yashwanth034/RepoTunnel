@@ -16,8 +16,13 @@ use crate::{
 };
 
 const MAX_CHECKPOINT_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_CHECKPOINT_ENTRIES: usize = 4000;
+const MAX_CHECKPOINT_ENTRIES: usize = 25_000;
 const MAX_COMPARISON_PATHS: usize = 120;
+
+pub(crate) fn is_capacity_error(message: &str) -> bool {
+    message.starts_with("This project is too large for a one-click checkpoint")
+        || message == "This project is larger than the 256 MB one-click checkpoint limit."
+}
 
 fn now_millis() -> u64 {
     SystemTime::now()

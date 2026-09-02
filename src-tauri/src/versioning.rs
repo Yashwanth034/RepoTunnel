@@ -21,8 +21,10 @@ use crate::{
 const VERSION_HISTORY_FILE: &str = "version-history.json";
 const VERSION_STATE_FILE: &str = "version-state.json";
 const VERSION_DIRECTORY: &str = "version-snapshots";
-const MAX_VERSION_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_VERSION_ENTRIES: usize = 4000;
+const SNAPSHOT_SCOPE_FILE: &str = "scope.json";
+const MAX_VERSION_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_VERSION_CHANGE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_VERSION_ENTRIES: usize = 25_000;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedVersion {
@@ -30,8 +32,21 @@ pub(crate) struct PreparedVersion {
     pub(crate) parent_id: Option<String>,
     pub(crate) edit_group_id: Option<String>,
     pub(crate) before_snapshot_id: String,
+    pub(crate) previous_before_snapshot_id: Option<String>,
     pub(crate) previous_after_snapshot_id: Option<String>,
+    pub(crate) tracked_paths: Vec<String>,
     pub(crate) grouping_existing: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct SnapshotScope {
+    paths: Vec<String>,
+}
+
+#[derive(Default)]
+struct SnapshotBudget {
+    entries: usize,
+    bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -145,52 +160,333 @@ fn new_id(prefix: &str) -> String {
     format!("{prefix}-{millis:x}-{nanos:x}")
 }
 
-fn create_snapshot(app: &AppHandle, workspace: &Workspace) -> Result<String, String> {
-    let snapshot = project_index::project_snapshot(workspace, MAX_VERSION_ENTRIES)?;
-    if snapshot.overview.truncated {
+fn scope_manifest(root: &Path) -> PathBuf {
+    root.join(SNAPSHOT_SCOPE_FILE)
+}
+
+fn read_snapshot_scope(root: &Path) -> Result<Option<SnapshotScope>, String> {
+    let path = scope_manifest(root);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read version snapshot scope: {error}"))?;
+    let scope: SnapshotScope = serde_json::from_str(&text)
+        .map_err(|error| format!("Version snapshot scope is invalid: {error}"))?;
+    Ok(Some(scope))
+}
+
+fn path_is_within(root: &str, candidate: &str) -> bool {
+    candidate == root
+        || candidate
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn normalize_paths(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut paths = paths
+        .into_iter()
+        .filter(|path| !path.trim().is_empty())
+        .collect::<Vec<_>>();
+    paths.sort_by(|left, right| {
+        left.matches('/')
+            .count()
+            .cmp(&right.matches('/').count())
+            .then_with(|| left.cmp(right))
+    });
+    paths.dedup();
+    let mut roots = Vec::<String>::new();
+    for path in paths {
+        if !roots.iter().any(|root| path_is_within(root, &path)) {
+            roots.push(path);
+        }
+    }
+    roots
+}
+
+fn change_paths(change: &ChangeRecord) -> Vec<String> {
+    normalize_paths(
+        std::iter::once(change.primary_path.clone()).chain(change.secondary_path.clone()),
+    )
+}
+
+fn version_file_paths(files: &[VersionFileChange]) -> Vec<String> {
+    normalize_paths(files.iter().flat_map(|change| {
+        std::iter::once(change.primary_path.clone()).chain(change.secondary_path.clone())
+    }))
+}
+
+fn ensure_snapshot_budget(
+    path: &str,
+    metadata: &fs::Metadata,
+    budget: &mut SnapshotBudget,
+) -> Result<(), String> {
+    budget.entries = budget.entries.saturating_add(1);
+    if budget.entries > MAX_VERSION_ENTRIES {
         return Err(format!(
-            "This project is too large for automatic version history (more than {MAX_VERSION_ENTRIES} indexed entries)."
+            "This change touches more than {MAX_VERSION_ENTRIES} versionable entries. RepoTunnel left the rest of the project history available; split this change into a smaller operation."
         ));
     }
-    if snapshot.overview.total_bytes > MAX_VERSION_BYTES {
-        return Err(
-            "This project is larger than the 256 MB automatic version-history limit.".to_string(),
-        );
+    if metadata.is_file() {
+        let bytes = metadata.len();
+        if bytes > MAX_VERSION_FILE_BYTES {
+            return Err(format!(
+                "RepoTunnel cannot safely version {path} because it is larger than {} MiB. Only this change was refused; normal History remains available for other source files.",
+                MAX_VERSION_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        budget.bytes = budget.bytes.saturating_add(bytes);
+        if budget.bytes > MAX_VERSION_CHANGE_BYTES {
+            return Err(format!(
+                "This change would save more than {} MiB into automatic History. Only this change was refused; split it into smaller source changes.",
+                MAX_VERSION_CHANGE_BYTES / (1024 * 1024)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn capture_live_entry(
+    workspace: &Workspace,
+    path: &Path,
+    relative: &str,
+    files_root: &Path,
+    directories: &mut BTreeSet<String>,
+    budget: &mut SnapshotBudget,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect {relative} for version history: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "RepoTunnel cannot version {relative} because it is a symbolic link. Only this change was refused."
+        ));
+    }
+    ensure_snapshot_budget(relative, &metadata, budget)?;
+    if metadata.is_file() {
+        let destination = files_root.join(relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Could not prepare version snapshot folders: {error}"))?;
+        }
+        fs::copy(path, &destination)
+            .map_err(|error| format!("Could not save {relative} in version history: {error}"))?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "RepoTunnel cannot version unsupported filesystem entry {relative}."
+        ));
     }
 
+    directories.insert(relative.to_string());
+    for entry in fs::read_dir(path)
+        .map_err(|error| format!("Could not inspect {relative} for version history: {error}"))?
+    {
+        let entry = entry.map_err(|error| {
+            format!("Could not inspect {relative} for version history: {error}")
+        })?;
+        let child = entry.path();
+        let child_metadata = fs::symlink_metadata(&child)
+            .map_err(|error| format!("Could not inspect a History entry: {error}"))?;
+        if child_metadata.file_type().is_symlink() {
+            continue;
+        }
+        let child_relative = Path::new(relative)
+            .join(entry.file_name())
+            .to_string_lossy()
+            .replace('\\', "/");
+        if !project_index::should_include_entry(workspace, path, &child, child_metadata.is_dir())? {
+            continue;
+        }
+        if resolve_workspace_path(workspace, &child_relative, AccessOperation::Read, true).is_err()
+        {
+            // Protected credentials remain outside History even when a parent directory is changed.
+            continue;
+        }
+        capture_live_entry(
+            workspace,
+            &child,
+            &child_relative,
+            files_root,
+            directories,
+            budget,
+        )?;
+    }
+    Ok(())
+}
+
+fn capture_live_root(
+    workspace: &Workspace,
+    relative: &str,
+    files_root: &Path,
+    directories: &mut BTreeSet<String>,
+    budget: &mut SnapshotBudget,
+) -> Result<(), String> {
+    let path = resolve_workspace_path(workspace, relative, AccessOperation::Read, false)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Could not resolve History path {relative}."))?;
+    let is_directory = path.is_dir();
+    if !project_index::should_include_entry(workspace, parent, &path, is_directory)? {
+        return Err(format!(
+            "RepoTunnel cannot protect {relative} with automatic History because that path is ignored or generated. Only this change was refused."
+        ));
+    }
+    if !path.exists() {
+        return Ok(());
+    }
+    capture_live_entry(workspace, &path, relative, files_root, directories, budget)
+}
+
+fn create_scoped_snapshot(
+    app: &AppHandle,
+    workspace: &Workspace,
+    paths: Vec<String>,
+) -> Result<String, String> {
+    let paths = normalize_paths(paths);
+    if paths.is_empty() {
+        return Err("Automatic History requires at least one changed workspace path.".to_string());
+    }
     let snapshot_id = new_id("version-snapshot");
     let root = snapshot_root(app, &workspace.id, &snapshot_id)?;
     let files_root = root.join("files");
     fs::create_dir_all(&files_root)
         .map_err(|error| format!("Could not create automatic version snapshot: {error}"))?;
 
-    let directories = snapshot
-        .entries
-        .iter()
-        .filter(|entry| entry.kind == "directory")
-        .map(|entry| entry.path.clone())
-        .collect::<Vec<_>>();
-    save_json(
-        &directories_manifest(&root),
-        &directories,
-        "version snapshot directories",
-    )?;
+    let result = (|| {
+        save_json(
+            &scope_manifest(&root),
+            &SnapshotScope {
+                paths: paths.clone(),
+            },
+            "version snapshot scope",
+        )?;
+        let mut directories = BTreeSet::new();
+        let mut budget = SnapshotBudget::default();
+        for path in &paths {
+            capture_live_root(workspace, path, &files_root, &mut directories, &mut budget)?;
+        }
+        save_json(
+            &directories_manifest(&root),
+            &directories.into_iter().collect::<Vec<_>>(),
+            "version snapshot directories",
+        )
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&root);
+        return Err(error);
+    }
+    Ok(snapshot_id)
+}
 
-    for entry in &snapshot.entries {
-        if entry.kind != "file" {
-            continue;
-        }
-        let source = resolve_workspace_path(workspace, &entry.path, AccessOperation::Read, true)?;
-        let destination = files_root.join(&entry.path);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("Could not prepare version snapshot folders: {error}"))?;
-        }
-        fs::copy(&source, &destination).map_err(|error| {
-            format!("Could not save {} in version history: {error}", entry.path)
-        })?;
+fn remove_snapshot_root(root: &Path, relative: &str) -> Result<(), String> {
+    let path = root.join("files").join(relative);
+    if !path.exists() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        format!("Could not inspect grouped History baseline {relative}: {error}")
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err("Version snapshot contains an unexpected symbolic link.".to_string());
+    }
+    if metadata.is_dir() {
+        fs::remove_dir_all(&path).map_err(|error| {
+            format!("Could not update grouped History baseline {relative}: {error}")
+        })
+    } else {
+        fs::remove_file(&path).map_err(|error| {
+            format!("Could not update grouped History baseline {relative}: {error}")
+        })
+    }
+}
+
+fn create_group_before_snapshot(
+    app: &AppHandle,
+    workspace: &Workspace,
+    existing_snapshot_id: &str,
+    existing_paths: &[String],
+    tracked_paths: Vec<String>,
+) -> Result<String, String> {
+    let tracked_paths = normalize_paths(tracked_paths);
+    if tracked_paths
+        .iter()
+        .all(|path| existing_paths.iter().any(|root| path_is_within(root, path)))
+    {
+        return Ok(existing_snapshot_id.to_string());
     }
 
+    let source_root = snapshot_root(app, &workspace.id, existing_snapshot_id)?;
+    if !source_root.is_dir() {
+        return Err(
+            "The active version group's original snapshot is no longer available.".to_string(),
+        );
+    }
+
+    // Start from the live state before this new grouped edit, then replace every path that was
+    // already changed earlier in the group with its original baseline. This preserves the group's
+    // true "before" state even when a later operation adds a parent directory or overlapping path.
+    let snapshot_id = create_scoped_snapshot(app, workspace, tracked_paths.clone())?;
+    let root = snapshot_root(app, &workspace.id, &snapshot_id)?;
+    let files_root = root.join("files");
+    let source_files = snapshot_files(&source_root)?;
+    let source_directories = read_snapshot_directories(&source_root)?;
+    let mut directories = read_snapshot_directories(&root)?;
+
+    let result = (|| {
+        for existing in existing_paths {
+            remove_snapshot_root(&root, existing)?;
+            directories.retain(|candidate| !path_is_within(existing, candidate));
+
+            for directory in source_directories
+                .iter()
+                .filter(|candidate| path_is_within(existing, candidate))
+            {
+                directories.insert(directory.clone());
+            }
+            for saved in source_files
+                .iter()
+                .filter(|candidate| path_is_within(existing, candidate))
+            {
+                let source = source_root.join("files").join(saved);
+                let destination = files_root.join(saved);
+                if let Some(parent) = destination.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!("Could not prepare grouped version snapshot folders: {error}")
+                    })?;
+                }
+                fs::copy(&source, &destination).map_err(|error| {
+                    format!("Could not preserve {saved} in grouped version history: {error}")
+                })?;
+            }
+        }
+
+        let mut budget = SnapshotBudget::default();
+        for _ in &directories {
+            budget.entries = budget.entries.saturating_add(1);
+            if budget.entries > MAX_VERSION_ENTRIES {
+                return Err(format!(
+                    "This grouped change touches more than {MAX_VERSION_ENTRIES} versionable entries. Split it into a smaller change."
+                ));
+            }
+        }
+        for saved in snapshot_files(&root)? {
+            let metadata = fs::metadata(files_root.join(&saved)).map_err(|error| {
+                format!("Could not inspect grouped History entry {saved}: {error}")
+            })?;
+            ensure_snapshot_budget(&saved, &metadata, &mut budget)?;
+        }
+        save_json(
+            &directories_manifest(&root),
+            &directories.into_iter().collect::<Vec<_>>(),
+            "version snapshot directories",
+        )
+    })();
+
+    if let Err(error) = result {
+        delete_snapshot(app, &workspace.id, &snapshot_id);
+        return Err(error);
+    }
     Ok(snapshot_id)
 }
 
@@ -264,7 +560,208 @@ fn snapshot_files(root: &Path) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+fn collect_current_scoped_entry(
+    workspace: &Workspace,
+    path: &Path,
+    relative: &str,
+    files: &mut BTreeSet<String>,
+    directories: &mut BTreeSet<String>,
+    entries: &mut usize,
+) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect {relative} before version restore: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Version restore refused because tracked path {relative} is now a symbolic link."
+        ));
+    }
+    *entries = entries.saturating_add(1);
+    if *entries > MAX_VERSION_ENTRIES {
+        return Err(format!(
+            "The tracked change now contains more than {MAX_VERSION_ENTRIES} entries, so RepoTunnel refused only this restore operation."
+        ));
+    }
+    if metadata.is_file() {
+        files.insert(relative.to_string());
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    directories.insert(relative.to_string());
+    for entry in fs::read_dir(path)
+        .map_err(|error| format!("Could not inspect {relative} before version restore: {error}"))?
+    {
+        let entry = entry.map_err(|error| {
+            format!("Could not inspect {relative} before version restore: {error}")
+        })?;
+        let child = entry.path();
+        let child_metadata = fs::symlink_metadata(&child)
+            .map_err(|error| format!("Could not inspect a tracked History entry: {error}"))?;
+        if child_metadata.file_type().is_symlink() {
+            continue;
+        }
+        if !project_index::should_include_entry(workspace, path, &child, child_metadata.is_dir())? {
+            continue;
+        }
+        let child_relative = Path::new(relative)
+            .join(entry.file_name())
+            .to_string_lossy()
+            .replace('\\', "/");
+        if resolve_workspace_path(workspace, &child_relative, AccessOperation::Write, true).is_err()
+        {
+            continue;
+        }
+        collect_current_scoped_entry(
+            workspace,
+            &child,
+            &child_relative,
+            files,
+            directories,
+            entries,
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_current_scoped_entries(
+    workspace: &Workspace,
+    paths: &[String],
+) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let mut files = BTreeSet::new();
+    let mut directories = BTreeSet::new();
+    let mut entries = 0usize;
+    for relative in paths {
+        let path = resolve_workspace_path(workspace, relative, AccessOperation::Write, false)?;
+        if path.exists() {
+            collect_current_scoped_entry(
+                workspace,
+                &path,
+                relative,
+                &mut files,
+                &mut directories,
+                &mut entries,
+            )?;
+        }
+    }
+    Ok((files, directories))
+}
+
+fn restore_scoped_snapshot(
+    root: &Path,
+    workspace: &Workspace,
+    scope: SnapshotScope,
+) -> Result<(usize, usize), String> {
+    let saved_files: BTreeSet<String> = snapshot_files(root)?.into_iter().collect();
+    let saved_directories = read_snapshot_directories(root)?;
+    let (current_files, current_directories) =
+        collect_current_scoped_entries(workspace, &scope.paths)?;
+
+    let mut removed_files = 0usize;
+    for path in current_files.difference(&saved_files) {
+        let destination = resolve_workspace_path(workspace, path, AccessOperation::Write, true)?;
+        let metadata = fs::symlink_metadata(&destination)
+            .map_err(|error| format!("Could not inspect {path} before version restore: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Version restore refused because {path} is a symbolic link."
+            ));
+        }
+        if metadata.is_file() {
+            fs::remove_file(&destination).map_err(|error| {
+                format!("Could not remove {path} during version restore: {error}")
+            })?;
+            removed_files = removed_files.saturating_add(1);
+        }
+    }
+
+    let mut directories = saved_directories.iter().cloned().collect::<Vec<_>>();
+    directories.sort_by_key(|path| path.matches('/').count());
+    for path in &directories {
+        let destination = resolve_workspace_path(workspace, path, AccessOperation::Write, false)?;
+        if destination.exists() {
+            let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+                format!("Could not inspect {path} before version restore: {error}")
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Version restore refused because {path} is a symbolic link."
+                ));
+            }
+            if metadata.is_file() {
+                fs::remove_file(&destination).map_err(|error| {
+                    format!("Could not replace file {path} with its saved directory: {error}")
+                })?;
+                removed_files = removed_files.saturating_add(1);
+            }
+        }
+        fs::create_dir_all(&destination)
+            .map_err(|error| format!("Could not restore directory {path}: {error}"))?;
+    }
+
+    let mut restored_files = 0usize;
+    for path in &saved_files {
+        let source = root.join("files").join(path);
+        let destination = resolve_workspace_path(workspace, path, AccessOperation::Write, false)?;
+        if destination.exists() {
+            let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+                format!("Could not inspect {path} before version restore: {error}")
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "Version restore refused because {path} is a symbolic link."
+                ));
+            }
+            if metadata.is_dir() {
+                fs::remove_dir(&destination).map_err(|error| {
+                    format!("Could not replace directory {path} with its saved file without touching ignored/protected contents: {error}")
+                })?;
+            }
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!("Could not prepare {path} for version restore: {error}")
+            })?;
+        }
+        fs::copy(&source, &destination)
+            .map_err(|error| format!("Could not restore {path}: {error}"))?;
+        restored_files = restored_files.saturating_add(1);
+    }
+
+    let mut removable = current_directories
+        .difference(&saved_directories)
+        .cloned()
+        .collect::<Vec<_>>();
+    removable.sort_by_key(|path| std::cmp::Reverse(path.matches('/').count()));
+    for path in removable {
+        if let Ok(directory) =
+            resolve_workspace_path(workspace, &path, AccessOperation::Write, true)
+        {
+            // Never recurse here: ignored/generated/protected contents keep the directory alive.
+            let _ = fs::remove_dir(directory);
+        }
+    }
+
+    Ok((restored_files, removed_files))
+}
+
 fn restore_snapshot(
+    app: &AppHandle,
+    workspace: &Workspace,
+    snapshot_id: &str,
+) -> Result<(usize, usize), String> {
+    let root = snapshot_root(app, &workspace.id, snapshot_id)?;
+    if !root.is_dir() {
+        return Err("That version snapshot is no longer available.".to_string());
+    }
+    if let Some(scope) = read_snapshot_scope(&root)? {
+        restore_scoped_snapshot(&root, workspace, scope)
+    } else {
+        restore_legacy_snapshot(app, workspace, snapshot_id)
+    }
+}
+
+fn restore_legacy_snapshot(
     app: &AppHandle,
     workspace: &Workspace,
     snapshot_id: &str,
@@ -374,6 +871,7 @@ pub(crate) fn prepare_change(
     app: &AppHandle,
     workspace: &Workspace,
     edit_group_id: Option<&str>,
+    change: &ChangeRecord,
 ) -> Result<PreparedVersion, String> {
     let history = load_history(app)?;
     let state = load_state(app)?;
@@ -382,6 +880,7 @@ pub(crate) fn prepare_change(
         .get(&workspace.id)
         .cloned()
         .flatten();
+    let requested_paths = change_paths(change);
 
     if let Some(current_id) = current_id.as_deref() {
         if let Some(current) = history.iter().find(|version| version.id == current_id) {
@@ -392,24 +891,42 @@ pub(crate) fn prepare_change(
                 .map(|version| version.id.as_str())
                 == Some(current.id.as_str());
             if is_workspace_tip && should_group_with_current(current, edit_group_id) {
+                let existing_paths = version_file_paths(&current.files);
+                let tracked_paths =
+                    normalize_paths(existing_paths.iter().cloned().chain(requested_paths));
+                let before_snapshot_id = create_group_before_snapshot(
+                    app,
+                    workspace,
+                    &current.before_snapshot_id,
+                    &existing_paths,
+                    tracked_paths.clone(),
+                )?;
+                let previous_before_snapshot_id = (before_snapshot_id
+                    != current.before_snapshot_id)
+                    .then(|| current.before_snapshot_id.clone());
                 return Ok(PreparedVersion {
                     version_id: current.id.clone(),
                     parent_id: current.parent_id.clone(),
                     edit_group_id: current.edit_group_id.clone(),
-                    before_snapshot_id: current.before_snapshot_id.clone(),
+                    before_snapshot_id,
+                    previous_before_snapshot_id,
                     previous_after_snapshot_id: Some(current.after_snapshot_id.clone()),
+                    tracked_paths,
                     grouping_existing: true,
                 });
             }
         }
     }
 
+    let before_snapshot_id = create_scoped_snapshot(app, workspace, requested_paths.clone())?;
     Ok(PreparedVersion {
         version_id: new_id("version"),
         parent_id: current_id,
         edit_group_id: edit_group_id.map(str::to_owned),
-        before_snapshot_id: create_snapshot(app, workspace)?,
+        before_snapshot_id,
+        previous_before_snapshot_id: None,
         previous_after_snapshot_id: None,
+        tracked_paths: requested_paths,
         grouping_existing: false,
     })
 }
@@ -420,7 +937,7 @@ pub(crate) fn commit_change(
     prepared: PreparedVersion,
     change: &ChangeRecord,
 ) -> Result<VersionRecord, String> {
-    let after_snapshot_id = create_snapshot(app, workspace)?;
+    let after_snapshot_id = create_scoped_snapshot(app, workspace, prepared.tracked_paths.clone())?;
     let mut history = load_history(app)?;
     let file_change = VersionFileChange {
         operation: change.operation,
@@ -436,6 +953,7 @@ pub(crate) fn commit_change(
             .iter_mut()
             .find(|version| version.id == prepared.version_id)
             .ok_or_else(|| "The active version group is no longer available.".to_string())?;
+        existing.before_snapshot_id = prepared.before_snapshot_id.clone();
         existing.after_snapshot_id = after_snapshot_id.clone();
         existing.updated_at = now;
         existing.files.push(file_change);
@@ -470,6 +988,11 @@ pub(crate) fn commit_change(
     save_state(app, &state)?;
     let _ = app.emit("repotunnel://changes-updated", ());
 
+    if let Some(previous) = prepared.previous_before_snapshot_id {
+        if previous != prepared.before_snapshot_id {
+            delete_snapshot(app, &workspace.id, &previous);
+        }
+    }
     if let Some(previous) = prepared.previous_after_snapshot_id {
         if previous != after_snapshot_id {
             delete_snapshot(app, &workspace.id, &previous);
@@ -486,8 +1009,32 @@ pub(crate) fn commit_change(
 }
 
 pub(crate) fn abort_change(app: &AppHandle, workspace: &Workspace, prepared: &PreparedVersion) {
-    if !prepared.grouping_existing {
+    if !prepared.grouping_existing || prepared.previous_before_snapshot_id.is_some() {
         delete_snapshot(app, &workspace.id, &prepared.before_snapshot_id);
+    }
+}
+
+fn snapshot_is_scoped(
+    app: &AppHandle,
+    workspace_id: &str,
+    snapshot_id: &str,
+) -> Result<bool, String> {
+    let root = snapshot_root(app, workspace_id, snapshot_id)?;
+    Ok(scope_manifest(&root).is_file())
+}
+
+fn expand_ancestor_closure(
+    keep_ids: &mut BTreeSet<String>,
+    parent_by_id: &HashMap<String, Option<String>>,
+) {
+    let mut pending = keep_ids.iter().cloned().collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        let Some(Some(parent_id)) = parent_by_id.get(&id) else {
+            continue;
+        };
+        if keep_ids.insert(parent_id.clone()) {
+            pending.push(parent_id.clone());
+        }
     }
 }
 
@@ -523,11 +1070,25 @@ pub(crate) fn apply_retention(
         .min_by_key(|record| record.created_at)
         .map(|record| record.id.clone())
         .or_else(|| workspace_records.first().map(|record| record.id.clone()));
+    let parent_by_id = workspace_records
+        .iter()
+        .map(|record| (record.id.clone(), record.parent_id.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let uses_scoped_history =
+        workspace_records
+            .iter()
+            .try_fold(false, |scoped, record| -> Result<bool, String> {
+                if scoped {
+                    return Ok(true);
+                }
+                Ok(
+                    snapshot_is_scoped(app, workspace_id, &record.before_snapshot_id)?
+                        || snapshot_is_scoped(app, workspace_id, &record.after_snapshot_id)?,
+                )
+            })?;
 
     let mut keep_ids = BTreeSet::new();
-    if let Some(root_id) = root_id.as_ref() {
-        keep_ids.insert(root_id.clone());
-    }
     if let Some(current_id) = current_id.as_ref() {
         if workspace_records
             .iter()
@@ -543,27 +1104,36 @@ pub(crate) fn apply_retention(
         keep_ids.insert(record.id.clone());
     }
 
-    let parent_by_id = workspace_records
-        .iter()
-        .map(|record| (record.id.clone(), record.parent_id.clone()))
-        .collect::<HashMap<_, _>>();
-
-    for record in history
-        .iter_mut()
-        .filter(|record| record.workspace_id == workspace_id && keep_ids.contains(&record.id))
-    {
-        if root_id.as_deref() == Some(record.id.as_str()) {
-            record.parent_id = None;
-            continue;
+    if uses_scoped_history {
+        // Scoped snapshots are deltas over the paths touched by each version. A retained
+        // descendant therefore needs its real ancestor chain so Previous/Next/Revert can
+        // replay every required delta. Keep that ancestry rather than rewiring across a
+        // deleted delta and silently producing an incomplete restore. The configured count
+        // remains a retention target; correctness wins when extra ancestors are required.
+        expand_ancestor_closure(&mut keep_ids, &parent_by_id);
+    } else {
+        // Legacy snapshots are full-project states, so retained records can safely skip over
+        // deleted metadata while preserving the historical behavior for existing projects.
+        if let Some(root_id) = root_id.as_ref() {
+            keep_ids.insert(root_id.clone());
         }
-        let mut cursor = record.parent_id.clone();
-        while let Some(parent_id) = cursor.clone() {
-            if keep_ids.contains(&parent_id) {
-                break;
+        for record in history
+            .iter_mut()
+            .filter(|record| record.workspace_id == workspace_id && keep_ids.contains(&record.id))
+        {
+            if root_id.as_deref() == Some(record.id.as_str()) {
+                record.parent_id = None;
+                continue;
             }
-            cursor = parent_by_id.get(&parent_id).cloned().flatten();
+            let mut cursor = record.parent_id.clone();
+            while let Some(parent_id) = cursor.clone() {
+                if keep_ids.contains(&parent_id) {
+                    break;
+                }
+                cursor = parent_by_id.get(&parent_id).cloned().flatten();
+            }
+            record.parent_id = cursor;
         }
-        record.parent_id = cursor;
     }
 
     let removed = history
@@ -621,31 +1191,183 @@ pub(crate) fn timeline(
     })
 }
 
+fn version_ancestry(
+    records: &HashMap<String, VersionRecord>,
+    start: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut ancestry = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut current = start.map(str::to_owned);
+    while let Some(id) = current {
+        if !seen.insert(id.clone()) {
+            return Err("Saved version history contains a parent cycle.".to_string());
+        }
+        let record = records
+            .get(&id)
+            .ok_or_else(|| "Saved version history is missing a parent version.".to_string())?;
+        ancestry.push(id);
+        current = record.parent_id.clone();
+    }
+    Ok(ancestry)
+}
+
+fn restore_plan(
+    records: &HashMap<String, VersionRecord>,
+    current_id: Option<&str>,
+    target_id: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let current = version_ancestry(records, current_id)?;
+    let target = version_ancestry(records, target_id)?;
+    let target_set = target.iter().cloned().collect::<BTreeSet<_>>();
+    let common = current.iter().find(|id| target_set.contains(*id)).cloned();
+
+    let mut snapshots = Vec::new();
+    for id in &current {
+        if common.as_deref() == Some(id.as_str()) {
+            break;
+        }
+        snapshots.push(
+            records
+                .get(id)
+                .ok_or_else(|| "Saved version history is incomplete.".to_string())?
+                .before_snapshot_id
+                .clone(),
+        );
+    }
+
+    let mut forward = Vec::new();
+    for id in &target {
+        if common.as_deref() == Some(id.as_str()) {
+            break;
+        }
+        forward.push(
+            records
+                .get(id)
+                .ok_or_else(|| "Saved version history is incomplete.".to_string())?
+                .after_snapshot_id
+                .clone(),
+        );
+    }
+    forward.reverse();
+    snapshots.extend(forward);
+    Ok(snapshots)
+}
+
+fn scoped_restore_paths(
+    app: &AppHandle,
+    workspace_id: &str,
+    snapshots: &[String],
+) -> Result<Option<Vec<String>>, String> {
+    let mut paths = Vec::new();
+    for snapshot_id in snapshots {
+        let root = snapshot_root(app, workspace_id, snapshot_id)?;
+        let Some(scope) = read_snapshot_scope(&root)? else {
+            return Ok(None);
+        };
+        paths.extend(scope.paths);
+    }
+    Ok(Some(normalize_paths(paths)))
+}
+
 pub(crate) fn restore_version(
     app: &AppHandle,
     workspace: &Workspace,
     version_id: Option<&str>,
-    recovery_checkpoint_id: String,
+    recovery_checkpoint_id: Option<String>,
 ) -> Result<VersionRestoreResult, String> {
     let history = load_history(app)?;
-    let (snapshot_id, restored_version_id) = if let Some(version_id) = version_id {
-        let record = history
-            .iter()
-            .find(|record| record.id == version_id && record.workspace_id == workspace.id)
-            .ok_or_else(|| "That saved version is no longer available.".to_string())?;
-        (record.after_snapshot_id.clone(), Some(record.id.clone()))
+    let records = history
+        .into_iter()
+        .filter(|record| record.workspace_id == workspace.id)
+        .map(|record| (record.id.clone(), record))
+        .collect::<HashMap<_, _>>();
+    if records.is_empty() {
+        return Err("This project does not have version history yet.".to_string());
+    }
+
+    let restored_version_id = match version_id {
+        Some(id) => {
+            if !records.contains_key(id) {
+                return Err("That saved version is no longer available.".to_string());
+            }
+            Some(id.to_string())
+        }
+        None => None,
+    };
+    let state = load_state(app)?;
+    let current_version_id = state
+        .current_by_workspace
+        .get(&workspace.id)
+        .cloned()
+        .flatten();
+    if current_version_id
+        .as_ref()
+        .is_some_and(|id| !records.contains_key(id))
+    {
+        return Err("The current version pointer no longer exists in saved History.".to_string());
+    }
+
+    let plan = restore_plan(
+        &records,
+        current_version_id.as_deref(),
+        restored_version_id.as_deref(),
+    )?;
+    if plan.is_empty() {
+        return Ok(VersionRestoreResult {
+            current_version_id: restored_version_id,
+            recovery_checkpoint_id,
+            restored_files: 0,
+            removed_files: 0,
+        });
+    }
+
+    let scoped_paths = scoped_restore_paths(app, &workspace.id, &plan)?;
+    if scoped_paths.is_none() && recovery_checkpoint_id.is_none() {
+        return Err(
+            "This older History entry uses the legacy full-project snapshot format. A recovery checkpoint is required before restoring it."
+                .to_string(),
+        );
+    }
+
+    let recovery_snapshot_id = if let Some(paths) = scoped_paths {
+        Some(create_scoped_snapshot(app, workspace, paths)?)
     } else {
-        let root = history
-            .iter()
-            .filter(|record| record.workspace_id == workspace.id && record.parent_id.is_none())
-            .min_by_key(|record| record.created_at)
-            .ok_or_else(|| {
-                "This project does not have an original version snapshot yet.".to_string()
-            })?;
-        (root.before_snapshot_id.clone(), None)
+        None
     };
 
-    let (restored_files, removed_files) = restore_snapshot(app, workspace, &snapshot_id)?;
+    let mut restored_files = 0usize;
+    let mut removed_files = 0usize;
+    for snapshot_id in &plan {
+        match restore_snapshot(app, workspace, snapshot_id) {
+            Ok((restored, removed)) => {
+                restored_files = restored_files.saturating_add(restored);
+                removed_files = removed_files.saturating_add(removed);
+            }
+            Err(error) => {
+                if let Some(recovery_snapshot_id) = recovery_snapshot_id.as_deref() {
+                    match restore_snapshot(app, workspace, recovery_snapshot_id) {
+                        Ok(_) => {
+                            delete_snapshot(app, &workspace.id, recovery_snapshot_id);
+                            return Err(format!(
+                                "Version restore failed and RepoTunnel restored the pre-restore source state: {error}"
+                            ));
+                        }
+                        Err(recovery_error) => {
+                            delete_snapshot(app, &workspace.id, recovery_snapshot_id);
+                            return Err(format!(
+                                "Version restore failed: {error}. RepoTunnel also could not restore its temporary recovery snapshot: {recovery_error}"
+                            ));
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
+    if let Some(recovery_snapshot_id) = recovery_snapshot_id.as_deref() {
+        delete_snapshot(app, &workspace.id, recovery_snapshot_id);
+    }
+
     let mut state = load_state(app)?;
     state
         .current_by_workspace
@@ -662,8 +1384,21 @@ pub(crate) fn restore_version(
 
 #[cfg(test)]
 mod tests {
-    use super::should_group_with_current;
-    use crate::models::{ChangeOperation, VersionFileChange, VersionRecord};
+    use std::{
+        fs::{self, File},
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        capture_live_root, expand_ancestor_closure, read_snapshot_scope, restore_plan,
+        restore_scoped_snapshot, save_json, scope_manifest, should_group_with_current,
+        snapshot_files, SnapshotBudget, SnapshotScope,
+    };
+    use crate::models::{
+        ChangeOperation, CommandPolicy, VersionFileChange, VersionRecord, Workspace,
+        WorkspaceAccessMode, WorkspaceChangePolicy,
+    };
 
     fn record(group: Option<&str>) -> VersionRecord {
         VersionRecord {
@@ -687,6 +1422,57 @@ mod tests {
         }
     }
 
+    fn temp_workspace(label: &str) -> (PathBuf, Workspace) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-versioning-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        let workspace = Workspace {
+            id: format!("test-{label}"),
+            name: format!("test-{label}"),
+            path: root.to_string_lossy().into_owned(),
+            added_at: 0,
+            access_mode: WorkspaceAccessMode::ReadWrite,
+            change_policy: WorkspaceChangePolicy::Automatic,
+            command_policy: CommandPolicy::Automatic,
+        };
+        (root, workspace)
+    }
+
+    fn write_scoped_test_snapshot(snapshot_root: &Path, workspace: &Workspace, path: &str) {
+        fs::create_dir_all(snapshot_root.join("files")).unwrap();
+        let scope = SnapshotScope {
+            paths: vec![path.to_string()],
+        };
+        save_json(
+            &scope_manifest(snapshot_root),
+            &scope,
+            "test version snapshot scope",
+        )
+        .unwrap();
+        let mut directories = std::collections::BTreeSet::new();
+        let mut budget = SnapshotBudget::default();
+        capture_live_root(
+            workspace,
+            path,
+            &snapshot_root.join("files"),
+            &mut directories,
+            &mut budget,
+        )
+        .unwrap();
+        save_json(
+            &snapshot_root.join("directories.json"),
+            &directories.into_iter().collect::<Vec<_>>(),
+            "test version directories",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn groups_only_when_request_group_matches() {
         let current = record(Some("trace-a"));
@@ -700,5 +1486,94 @@ mod tests {
         let current = record(None);
         assert!(!should_group_with_current(&current, Some("trace-a")));
         assert!(!should_group_with_current(&current, None));
+    }
+
+    #[test]
+    fn restore_plan_moves_backward_then_forward_through_history() {
+        let mut one = record(None);
+        one.id = "one".to_string();
+        one.before_snapshot_id = "one-before".to_string();
+        one.after_snapshot_id = "one-after".to_string();
+        let mut two = one.clone();
+        two.id = "two".to_string();
+        two.parent_id = Some("one".to_string());
+        two.before_snapshot_id = "two-before".to_string();
+        two.after_snapshot_id = "two-after".to_string();
+        let mut three = two.clone();
+        three.id = "three".to_string();
+        three.parent_id = Some("two".to_string());
+        three.before_snapshot_id = "three-before".to_string();
+        three.after_snapshot_id = "three-after".to_string();
+        let records = [one, two, three]
+            .into_iter()
+            .map(|record| (record.id.clone(), record))
+            .collect();
+
+        assert_eq!(
+            restore_plan(&records, Some("three"), Some("one")).unwrap(),
+            vec!["three-before".to_string(), "two-before".to_string()]
+        );
+        assert_eq!(
+            restore_plan(&records, Some("one"), Some("three")).unwrap(),
+            vec!["two-after".to_string(), "three-after".to_string()]
+        );
+    }
+
+    #[test]
+    fn scoped_retention_keeps_required_delta_ancestry() {
+        let parents = [
+            ("one".to_string(), None),
+            ("two".to_string(), Some("one".to_string())),
+            ("three".to_string(), Some("two".to_string())),
+            ("four".to_string(), Some("three".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        let mut keep = ["four".to_string()].into_iter().collect();
+
+        expand_ancestor_closure(&mut keep, &parents);
+
+        assert_eq!(
+            keep,
+            ["four", "one", "three", "two"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn workspace_over_256_mb_still_versions_and_restores_small_source_file() {
+        let (root, workspace) = temp_workspace("large-workspace");
+        let source = root.join("src/main.rs");
+        fs::write(&source, "fn main() { println!(\"before\"); }\n").unwrap();
+
+        let archive = root.join("large-build-artifact.zip");
+        let archive_file = File::create(&archive).unwrap();
+        archive_file.set_len(257 * 1024 * 1024).unwrap();
+        assert!(fs::metadata(&archive).unwrap().len() > 256 * 1024 * 1024);
+
+        let snapshot_root = root.with_extension("history-before");
+        write_scoped_test_snapshot(&snapshot_root, &workspace, "src/main.rs");
+        assert_eq!(
+            snapshot_files(&snapshot_root).unwrap(),
+            vec!["src/main.rs".to_string()]
+        );
+        let scope = read_snapshot_scope(&snapshot_root).unwrap().unwrap();
+        assert_eq!(scope.paths, vec!["src/main.rs".to_string()]);
+
+        fs::write(&source, "fn main() { println!(\"after\"); }\n").unwrap();
+        let (restored, removed) =
+            restore_scoped_snapshot(&snapshot_root, &workspace, scope).unwrap();
+        assert_eq!(restored, 1);
+        assert_eq!(removed, 0);
+        assert_eq!(
+            fs::read_to_string(&source).unwrap(),
+            "fn main() { println!(\"before\"); }\n"
+        );
+        assert_eq!(fs::metadata(&archive).unwrap().len(), 257 * 1024 * 1024);
+
+        let _ = fs::remove_dir_all(snapshot_root);
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -9,26 +9,34 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     access::{resolve_workspace_path, validate_workspace_root, AccessOperation},
-    activity,
+    activity, ai_workspace,
     app_state::AppState,
-    browser, changes, checkpoint, execution, filesystem, git, hardening, launcher, mcp_auth,
+    browser, changes, checkpoint, conversation, desktop_control, execution, filesystem, git,
+    hardening, integrations, launcher, mcp_auth,
+    model_hub::{
+        self, ModelHubSnapshot, ModelProviderId, ModelSelection, ModelTestResult, RuntimeStatus,
+    },
+    model_trial::{self, ModelTrialSnapshot, TrialMode},
     models::{
         AccessCheck, ActivityKind, ActivityStatus, ActivityTimeline, AiAccessStatus,
         BrowserActionOutcome, BrowserActionRecord, BrowserApplication, BrowserAutomationStatus,
-        BrowserDiagnostics, BrowserPageInspection, BrowserScreenshot, BrowserTab, ChangeOutcome,
-        ChangeRecord, ChatConnectionStatus, CheckpointClearResult, CheckpointComparison,
-        CheckpointRestoreResult, CheckpointSummary, CommandOutcome, CommandPolicy, CommandPreset,
-        CommandRecord, DirectoryEntry, ExecutionStatus, FileContent, FileInfo, GatewayStatus,
-        GitActionRecord, GitCommitSummary, GitDiff, GitRepositoryStatus, HistoryClearResult,
-        HistorySettings, ImagePreview, LaunchActionOutcome, LaunchActionRecord, LaunchApplication,
-        ManagedProcessOutcome, ManagedProcessOutput, ManagedProcessRecord, MonitoringFileEvent,
-        MonitoringSnapshot, MonitoringStatus, ProjectSnapshot, PublicTunnelStatus,
-        RuntimeDiagnostics, SafetyScanCheck, SafetyScanResult, SearchMatch, TeamSessionSummary,
-        TeamSnapshot, TerminalCommandOutcome, TerminalCommandRecord, VersionRestoreResult,
-        VersionTimeline, WorkflowReadiness, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy,
-        WorkspaceHealth,
+        BrowserDiagnostics, BrowserPageInspection, BrowserScreenshot, BrowserTab,
+        BrowserVisualSelection, ChangeOutcome, ChangeRecord, ChatConnectionStatus,
+        CheckpointClearResult, CheckpointComparison, CheckpointRestoreResult, CheckpointSummary,
+        CommandOutcome, CommandPolicy, CommandPreset, CommandRecord, DirectoryEntry,
+        ExecutionStatus, FileContent, FileInfo, GatewayStatus, GitActionRecord, GitCommitSummary,
+        GitDiff, GitRepositoryStatus, HistoryClearResult, HistorySettings, ImagePreview,
+        LaunchActionOutcome, LaunchActionRecord, LaunchApplication, ManagedProcessOutcome,
+        ManagedProcessOutput, ManagedProcessRecord, MonitoringFileEvent, MonitoringSnapshot,
+        MonitoringStatus, ProjectMemory, ProjectSetupOutcome, ProjectSetupStatus, ProjectSnapshot,
+        PublicTunnelStatus, RuntimeDiagnostics, SafetyScanCheck, SafetyScanResult, SearchMatch,
+        TeamSessionSummary, TeamSnapshot, TerminalCommandOutcome, TerminalCommandRecord,
+        VersionRestoreResult, VersionTimeline, WorkflowReadiness, Workspace, WorkspaceAccessMode,
+        WorkspaceChangePolicy, WorkspaceHealth,
     },
-    monitoring, project_index,
+    monitoring, project_context, project_index, project_memory, project_setup,
+    public_tunnel::PublicTunnelProvider,
+    repository,
     storage::{
         load_history_settings, load_workspaces, save_ai_access_paused, save_history_settings,
         save_workspaces,
@@ -207,7 +215,16 @@ pub fn add_workspace(app: AppHandle, path: String) -> Result<Workspace, String> 
 }
 
 #[tauri::command]
-pub fn remove_workspace(app: AppHandle, id: String) -> Result<Vec<Workspace>, String> {
+pub fn create_project(app: AppHandle, name: String) -> Result<Workspace, String> {
+    repository::create_and_register(&app, &name)
+}
+
+#[tauri::command]
+pub fn remove_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<Workspace>, String> {
     let mut workspaces = load_workspaces(&app)?;
     let original_count = workspaces.len();
     workspaces.retain(|workspace| workspace.id != id);
@@ -218,7 +235,11 @@ pub fn remove_workspace(app: AppHandle, id: String) -> Result<Vec<Workspace>, St
 
     save_workspaces(&app, &workspaces)?;
     monitoring::forget_workspace(&app, &id);
+    project_memory::forget(&app, &id);
     team::forget_workspace(&app, &id);
+    integrations::forget_workspace(&app, &id);
+    desktop_control::forget_workspace(&app, &id);
+    state.ai_workspace.forget_workspace(&id);
     hardening::log_event(
         &app,
         "INFO",
@@ -550,7 +571,7 @@ fn image_mime_type(path: &Path) -> Option<&'static str> {
 
 fn encode_base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut index = 0usize;
     while index < bytes.len() {
         let a = bytes[index];
@@ -611,22 +632,81 @@ pub fn open_workspace_path_local(
 }
 
 #[tauri::command]
-pub fn inspect_project(
+pub fn get_project_setup(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<ProjectSetupStatus, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    project_setup::detect(&workspace)
+}
+
+#[tauri::command]
+pub async fn prepare_project(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<ProjectSetupOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app, &workspace_id)?;
+        let result = project_setup::prepare(&app, &workspace)?;
+        activity::sync_terminal(&app, &result.command);
+        Ok(result)
+    })
+    .await
+    .map_err(|error| format!("Project setup task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub fn get_project_memory(app: AppHandle, workspace_id: String) -> Result<ProjectMemory, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    project_memory::get(&app, &workspace)
+}
+
+#[tauri::command]
+pub fn update_project_memory(
+    app: AppHandle,
+    workspace_id: String,
+    summary: String,
+    goals: Vec<String>,
+    decisions: Vec<String>,
+    preferences: Vec<String>,
+    next_steps: Vec<String>,
+) -> Result<ProjectMemory, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    project_memory::update(
+        &app,
+        &workspace,
+        summary,
+        goals,
+        decisions,
+        preferences,
+        next_steps,
+    )
+}
+
+#[tauri::command]
+pub async fn inspect_project(
     app: AppHandle,
     workspace_id: String,
     entry_limit: Option<usize>,
 ) -> Result<ProjectSnapshot, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    project_index::project_snapshot(&workspace, entry_limit.unwrap_or(800))
+    let entry_limit = entry_limit.unwrap_or(800);
+    tauri::async_runtime::spawn_blocking(move || {
+        project_index::project_snapshot(&workspace, entry_limit)
+    })
+    .await
+    .map_err(|error| format!("Project inspection worker could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn get_workflow_readiness(
+pub async fn get_workflow_readiness(
     app: AppHandle,
     workspace_id: String,
 ) -> Result<WorkflowReadiness, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    Ok(workflow::readiness(&workspace))
+    tauri::async_runtime::spawn_blocking(move || workflow::readiness(&workspace))
+        .await
+        .map_err(|error| format!("Workflow readiness worker could not complete: {error}"))
 }
 
 #[tauri::command]
@@ -871,11 +951,24 @@ pub fn restore_version(
     let was_paused = state.ai_access_paused();
     state.set_ai_access_paused(true);
     let result = (|| {
-        let recovery =
-            checkpoint::create_named_checkpoint(&app, &workspace, Some("Before version restore"))?;
-        let restored =
-            versioning::restore_version(&app, &workspace, version_id.as_deref(), recovery.id)?;
-        checkpoint::apply_configured_retention(&app, &workspace.id);
+        let recovery_checkpoint_id = match checkpoint::create_named_checkpoint(
+            &app,
+            &workspace,
+            Some("Before version restore"),
+        ) {
+            Ok(recovery) => Some(recovery.id),
+            Err(error) if checkpoint::is_capacity_error(&error) => None,
+            Err(error) => return Err(error),
+        };
+        let restored = versioning::restore_version(
+            &app,
+            &workspace,
+            version_id.as_deref(),
+            recovery_checkpoint_id.clone(),
+        )?;
+        if recovery_checkpoint_id.is_some() {
+            checkpoint::apply_configured_retention(&app, &workspace.id);
+        }
         Ok(restored)
     })();
     state.set_ai_access_paused(was_paused);
@@ -1159,6 +1252,144 @@ pub fn list_launchable_applications(
 }
 
 #[tauri::command]
+pub fn list_deep_integrations(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<Vec<integrations::DeepIntegration>, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    integrations::list(&app, &workspace_id)
+}
+
+#[tauri::command]
+pub fn set_deep_integration_enabled(
+    app: AppHandle,
+    workspace_id: String,
+    integration_id: String,
+    enabled: bool,
+) -> Result<Vec<integrations::DeepIntegration>, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    integrations::set_enabled(&app, &workspace_id, &integration_id, enabled)
+}
+
+#[tauri::command]
+pub fn list_desktop_control_applications(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<Vec<desktop_control::DesktopControlApplication>, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    desktop_control::list(&app, &workspace_id)
+}
+
+#[tauri::command]
+pub fn get_desktop_control_enabled(app: AppHandle, workspace_id: String) -> Result<bool, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    desktop_control::is_enabled(&app, &workspace_id)
+}
+
+#[tauri::command]
+pub fn set_desktop_control_enabled(
+    app: AppHandle,
+    workspace_id: String,
+    enabled: bool,
+) -> Result<bool, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    desktop_control::set_global_enabled(&app, &workspace_id, enabled)
+}
+
+#[tauri::command]
+pub fn get_ai_workspace_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<ai_workspace::AiWorkspaceStatus, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    state.ai_workspace.status(&app, &workspace_id)
+}
+
+#[tauri::command]
+pub fn start_ai_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+    application_id: String,
+    target: Option<String>,
+) -> Result<ai_workspace::AiWorkspaceStatus, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    state
+        .ai_workspace
+        .start(&app, &workspace, &application_id, target.as_deref())
+}
+
+#[tauri::command]
+pub fn stop_ai_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<ai_workspace::AiWorkspaceStatus, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    state.ai_workspace.stop(&app, &workspace_id)
+}
+
+#[tauri::command]
+pub fn get_ai_workspace_frame(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+    max_width: Option<u32>,
+) -> Result<ai_workspace::AiWorkspaceFrame, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    state
+        .ai_workspace
+        .frame(&app, &workspace_id, None, max_width.unwrap_or(1440), true)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn ai_workspace_action(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+    action: String,
+    window_id: Option<String>,
+    x_ratio: Option<f64>,
+    y_ratio: Option<f64>,
+    click_count: Option<u8>,
+    shortcut: Option<String>,
+    text: Option<String>,
+    delta_x: Option<i32>,
+    delta_y: Option<i32>,
+) -> Result<serde_json::Value, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    state.ai_workspace.action(
+        &app,
+        &workspace_id,
+        &action,
+        window_id.as_deref(),
+        x_ratio,
+        y_ratio,
+        click_count,
+        shortcut.as_deref(),
+        text.as_deref(),
+        delta_x,
+        delta_y,
+    )
+}
+
+#[tauri::command]
+pub fn ai_workspace_sequence(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+    window_id: Option<String>,
+    steps: Vec<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    state
+        .ai_workspace
+        .sequence(&app, &workspace_id, window_id.as_deref(), &steps)
+}
+
+#[tauri::command]
 pub fn open_url(
     app: AppHandle,
     workspace_id: String,
@@ -1436,6 +1667,32 @@ pub async fn browser_inspect_page(
 }
 
 #[tauri::command]
+pub async fn browser_pick_element(
+    app: AppHandle,
+    workspace_id: String,
+    tab_id: String,
+    x_ratio: f64,
+    y_ratio: f64,
+) -> Result<BrowserVisualSelection, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        browser::pick_visual_element(&app_for_task, &workspace, &tab_id, x_ratio, y_ratio)
+    })
+    .await
+    .map_err(|error| format!("Browser visual selection task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub fn get_browser_visual_selection(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<Option<BrowserVisualSelection>, String> {
+    let _workspace = approved_workspace(&app, &workspace_id)?;
+    browser::get_visual_selection(&workspace_id)
+}
+
+#[tauri::command]
 pub async fn browser_take_screenshot(
     app: AppHandle,
     workspace_id: String,
@@ -1508,30 +1765,36 @@ pub fn get_monitoring_status(
 }
 
 #[tauri::command]
-pub fn start_workspace_monitoring(
+pub async fn start_workspace_monitoring(
     app: AppHandle,
     workspace_id: String,
 ) -> Result<MonitoringStatus, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    monitoring::start_monitoring(&app, &workspace)
+    tauri::async_runtime::spawn_blocking(move || monitoring::start_monitoring(&app, &workspace))
+        .await
+        .map_err(|error| format!("Monitoring start worker could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn stop_workspace_monitoring(
+pub async fn stop_workspace_monitoring(
     app: AppHandle,
     workspace_id: String,
 ) -> Result<MonitoringStatus, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    monitoring::stop_monitoring(&app, &workspace)
+    tauri::async_runtime::spawn_blocking(move || monitoring::stop_monitoring(&app, &workspace))
+        .await
+        .map_err(|error| format!("Monitoring stop worker could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn get_monitoring_snapshot(
+pub async fn get_monitoring_snapshot(
     app: AppHandle,
     workspace_id: String,
 ) -> Result<MonitoringSnapshot, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    monitoring::snapshot(&app, &workspace)
+    tauri::async_runtime::spawn_blocking(move || monitoring::snapshot(&app, &workspace))
+        .await
+        .map_err(|error| format!("Monitoring snapshot worker could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -1884,11 +2147,11 @@ pub fn run_safety_scan(app: AppHandle, workspace_id: String) -> Result<SafetySca
             title: "Command sandbox".to_string(),
             status: if sandbox.sandbox_available { "pass" } else { "warning" }.to_string(),
             detail: sandbox.message.clone().unwrap_or_else(|| if sandbox.sandbox_available {
-                "Bubblewrap is available for isolated, network-disabled project checks.".to_string()
+                "The native OS sandbox is available for isolated project checks.".to_string()
             } else {
-                "Bubblewrap is unavailable, so project commands will be refused.".to_string()
+                "The native OS sandbox is unavailable, so project commands will be refused.".to_string()
             }),
-            items: vec![sandbox.sandbox_version.clone().map(|version| format!("Bubblewrap {version}")).unwrap_or_else(|| "Bubblewrap not detected".to_string()), "Network disabled for project command runs".to_string(), "Commands run in a disposable project copy".to_string()],
+            items: vec![sandbox.sandbox_version.clone().unwrap_or_else(|| "Native OS sandbox not detected".to_string()), "Network disabled for disposable project checks".to_string(), "Checks run in a disposable project copy".to_string()],
         },
         SafetyScanCheck {
             key: "git".to_string(),
@@ -2023,14 +2286,19 @@ pub fn get_public_tunnel_status(
 pub fn configure_public_tunnel(
     app: AppHandle,
     state: State<'_, AppState>,
-    authtoken: String,
+    provider: PublicTunnelProvider,
+    credential: String,
+    public_url: Option<String>,
 ) -> Result<PublicTunnelStatus, String> {
-    let status = state.configure_public_tunnel(app.clone(), authtoken)?;
+    let status = state.configure_public_tunnel(app.clone(), provider, credential, public_url)?;
     hardening::log_event(
         &app,
         "INFO",
         "public_tunnel.configure",
-        "User-specific ngrok public connection configured and started.",
+        &format!(
+            "User-specific {} public connection configured and started.",
+            status.provider
+        ),
     );
     Ok(status)
 }
@@ -2052,6 +2320,31 @@ pub async fn restart_public_tunnel(app: AppHandle) -> Result<PublicTunnelStatus,
     })
     .await
     .map_err(|error| format!("Public connection restart task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn provision_direct_https_certificate(
+    app: AppHandle,
+    staging: bool,
+) -> Result<PublicTunnelStatus, String> {
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_for_task.state::<AppState>();
+        let status = state.provision_direct_certificate(app_for_task.clone(), staging)?;
+        hardening::log_event(
+            &app_for_task,
+            "INFO",
+            "public_tunnel.direct_certificate",
+            if staging {
+                "Direct HTTPS Let's Encrypt staging certificate provisioned."
+            } else {
+                "Direct HTTPS Let's Encrypt trusted certificate provisioned."
+            },
+        );
+        Ok::<PublicTunnelStatus, String>(status)
+    })
+    .await
+    .map_err(|error| format!("Direct HTTPS certificate task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -2126,6 +2419,154 @@ pub fn stop_chat_connection(
 }
 
 #[tauri::command]
+pub async fn get_model_hub(app: AppHandle) -> Result<ModelHubSnapshot, String> {
+    model_hub::snapshot(&app).await
+}
+
+#[tauri::command]
+pub async fn refresh_model_runtime(
+    app: AppHandle,
+    provider: ModelProviderId,
+) -> Result<RuntimeStatus, String> {
+    let endpoint = model_hub::configured_endpoint(&app, provider)?;
+    Ok(model_hub::discover_provider(provider, endpoint).await)
+}
+
+#[tauri::command]
+pub fn update_model_runtime_endpoint(
+    app: AppHandle,
+    provider: ModelProviderId,
+    endpoint: String,
+) -> Result<String, String> {
+    model_hub::update_endpoint(&app, provider, endpoint)
+}
+
+#[tauri::command]
+pub fn set_selected_local_model(
+    app: AppHandle,
+    selection: Option<ModelSelection>,
+) -> Result<Option<ModelSelection>, String> {
+    model_hub::set_selected_model(&app, selection)
+}
+
+#[tauri::command]
+pub async fn test_local_model(
+    app: AppHandle,
+    selection: ModelSelection,
+) -> Result<ModelTestResult, String> {
+    let configured = model_hub::configured_endpoint(&app, selection.provider)?;
+    let requested = model_hub::validate_loopback_endpoint(&selection.endpoint)?;
+    if requested != configured {
+        return Err("This model no longer matches the configured local runtime. Refresh Model Hub and try again.".to_string());
+    }
+    model_hub::test_model(selection).await
+}
+
+#[tauri::command]
+pub async fn get_model_trial(app: AppHandle) -> Result<ModelTrialSnapshot, String> {
+    model_trial::snapshot(&app).await
+}
+
+#[tauri::command]
+pub async fn run_model_trial(
+    app: AppHandle,
+    mode: TrialMode,
+    selections: Vec<ModelSelection>,
+) -> Result<ModelTrialSnapshot, String> {
+    model_trial::run_trial(&app, mode, selections).await
+}
+
+#[tauri::command]
+pub fn cancel_model_trial(app: AppHandle) -> Result<bool, String> {
+    model_trial::cancel_trial(&app)
+}
+
+#[tauri::command]
+pub fn list_home_conversations(
+    app: AppHandle,
+    workspace_id: Option<String>,
+) -> Result<Vec<conversation::ConversationSummary>, String> {
+    if let Some(workspace_id) = workspace_id {
+        let _workspace = approved_workspace(&app, &workspace_id)?;
+        conversation::list(&app, Some(&workspace_id))
+    } else {
+        conversation::list(&app, Some(conversation::GENERAL_WORKSPACE_ID))
+    }
+}
+
+#[tauri::command]
+pub fn get_home_conversation(
+    app: AppHandle,
+    conversation_id: String,
+) -> Result<conversation::HomeConversation, String> {
+    let conversation = conversation::get(&app, &conversation_id)?;
+    if conversation.workspace_id != conversation::GENERAL_WORKSPACE_ID {
+        let _workspace = approved_workspace(&app, &conversation.workspace_id)?;
+    }
+    Ok(conversation)
+}
+
+#[tauri::command]
+pub fn create_home_conversation(
+    app: AppHandle,
+    workspace_id: Option<String>,
+) -> Result<conversation::HomeConversation, String> {
+    let workspace = workspace_id
+        .as_deref()
+        .map(|workspace_id| approved_workspace(&app, workspace_id))
+        .transpose()?;
+    conversation::create(&app, workspace.as_ref())
+}
+
+#[tauri::command]
+pub fn delete_home_conversation(app: AppHandle, conversation_id: String) -> Result<(), String> {
+    let existing = conversation::get(&app, &conversation_id)?;
+    if existing.workspace_id != conversation::GENERAL_WORKSPACE_ID {
+        let _workspace = approved_workspace(&app, &existing.workspace_id)?;
+    }
+    conversation::delete(&app, &conversation_id)
+}
+
+#[tauri::command]
+pub fn list_home_context_files(
+    app: AppHandle,
+    workspace_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<crate::models::ProjectEntry>, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    project_context::safe_attachment_candidates(&workspace, limit.unwrap_or(250))
+}
+
+#[tauri::command]
+pub async fn begin_home_chat(
+    app: AppHandle,
+    workspace_id: Option<String>,
+    conversation_id: String,
+    question: String,
+    context: project_context::ProjectContextRequest,
+    allow_changes: bool,
+) -> Result<conversation::HomeChatStartResult, String> {
+    let workspace = workspace_id
+        .as_deref()
+        .map(|workspace_id| approved_workspace(&app, workspace_id))
+        .transpose()?;
+    conversation::begin(
+        app,
+        workspace,
+        conversation_id,
+        question,
+        context,
+        allow_changes,
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn cancel_home_chat(generation_id: String) -> Result<bool, String> {
+    conversation::cancel(&generation_id)
+}
+
+#[tauri::command]
 pub fn get_runtime_diagnostics(app: AppHandle) -> Result<RuntimeDiagnostics, String> {
     hardening::diagnostics(&app)
 }
@@ -2150,6 +2591,7 @@ pub fn get_team_session(app: AppHandle, session_id: String) -> Result<TeamSnapsh
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn create_team_session(
     app: AppHandle,
     workspace_id: String,

@@ -30,7 +30,7 @@ use crate::{
 const STATE_FILE: &str = "monitoring-state.json";
 const EVENT_FILE: &str = "monitoring-file-events.json";
 const BASELINE_DIRECTORY: &str = "monitoring/baselines";
-const SCAN_INTERVAL_MS: u64 = 2_000;
+const SCAN_INTERVAL_MS: u64 = 5_000;
 const MAX_FILE_EVENTS: usize = 600;
 const MAX_SNAPSHOT_FILE_EVENTS: usize = 60;
 const MAX_MONITORED_FILES: usize = 4_000;
@@ -289,36 +289,22 @@ fn save_baseline(
         .map_err(|error| format!("Could not save RepoTunnel monitoring baseline: {error}"))
 }
 
-fn modified_nanos(metadata: &fs::Metadata) -> u128 {
-    metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0)
-}
-
 fn scan_workspace(workspace: &Workspace) -> Result<(HashMap<String, FileSignature>, bool), String> {
-    let snapshot = project_index::project_snapshot(workspace, MAX_MONITORED_FILES)?;
-    let root = Path::new(&workspace.path);
-    let mut files = HashMap::new();
-    for entry in snapshot.entries.iter().filter(|entry| entry.kind == "file") {
-        let path = root.join(&entry.path);
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            continue;
-        }
-        files.insert(
-            entry.path.clone(),
-            FileSignature {
-                size: metadata.len(),
-                modified_nanos: modified_nanos(&metadata),
-            },
-        );
-    }
-    Ok((files, snapshot.overview.truncated))
+    let (entries, truncated) =
+        project_index::project_file_metadata(workspace, MAX_MONITORED_FILES)?;
+    let files = entries
+        .into_iter()
+        .map(|entry| {
+            (
+                entry.path,
+                FileSignature {
+                    size: entry.size,
+                    modified_nanos: entry.modified_nanos,
+                },
+            )
+        })
+        .collect();
+    Ok((files, truncated))
 }
 
 fn compare_file_states(

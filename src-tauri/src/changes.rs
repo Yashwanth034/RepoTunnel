@@ -243,7 +243,7 @@ fn remove_file_if_present(path: &Path) {
     }
 }
 
-fn fingerprint(content: &str) -> String {
+pub(crate) fn content_fingerprint(content: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in content.as_bytes() {
         hash ^= u64::from(*byte);
@@ -327,6 +327,28 @@ fn diff_preview(before: &str, after: &str) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextChangePreview {
+    pub(crate) diff: Option<String>,
+    pub(crate) added_lines: usize,
+    pub(crate) removed_lines: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn preview_text_change(before: &str, after: &str) -> Option<TextChangePreview> {
+    let diff = diff_preview(before, after)?;
+    let before_lines = before.split('\n').collect::<Vec<_>>();
+    let after_lines = after.split('\n').collect::<Vec<_>>();
+    let (start, before_end, after_end) = changed_region(&before_lines, &after_lines);
+    Some(TextChangePreview {
+        diff: Some(diff),
+        added_lines: after_end.saturating_sub(start),
+        removed_lines: before_end.saturating_sub(start),
+    })
+}
+
 fn ensure_not_workspace_root(relative_path: &str) -> Result<(), String> {
     if relative_path.trim().is_empty() || relative_path == "." {
         return Err("The workspace root cannot be modified or deleted.".to_string());
@@ -347,7 +369,11 @@ fn validate_single_name(new_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn patch_result(current: &str, expected: &str, replacement: &str) -> Result<String, String> {
+pub(crate) fn patch_result(
+    current: &str,
+    expected: &str,
+    replacement: &str,
+) -> Result<String, String> {
     if expected.is_empty() {
         return Err("Patch expected text cannot be empty.".to_string());
     }
@@ -513,7 +539,7 @@ fn payload_signature(workspace: &Workspace, payload: &ChangePayload) -> Result<S
             content,
         } => Ok(format!(
             "file-result:{relative_path}:{}",
-            fingerprint(content)
+            content_fingerprint(content)
         )),
         ChangePayload::WriteFile {
             relative_path,
@@ -521,7 +547,7 @@ fn payload_signature(workspace: &Workspace, payload: &ChangePayload) -> Result<S
             ..
         } => Ok(format!(
             "file-result:{relative_path}:{}",
-            fingerprint(content)
+            content_fingerprint(content)
         )),
         ChangePayload::PatchFile {
             relative_path,
@@ -533,7 +559,7 @@ fn payload_signature(workspace: &Workspace, payload: &ChangePayload) -> Result<S
             let updated = patch_result(&current.content, expected, replacement)?;
             Ok(format!(
                 "file-result:{relative_path}:{}",
-                fingerprint(&updated)
+                content_fingerprint(&updated)
             ))
         }
         ChangePayload::CreateDirectory {
@@ -591,7 +617,7 @@ fn find_duplicate_pending_change(
 }
 
 fn current_file_fingerprint(workspace: &Workspace, relative_path: &str) -> Result<String, String> {
-    filesystem::read_file(workspace, relative_path).map(|file| fingerprint(&file.content))
+    filesystem::read_file(workspace, relative_path).map(|file| content_fingerprint(&file.content))
 }
 
 fn verify_expected_fingerprint(
@@ -619,7 +645,7 @@ fn prepare_undo(
             content,
         } => Ok(Some(UndoPayload::DeleteCreatedFile {
             relative_path: relative_path.clone(),
-            expected_fingerprint: fingerprint(content),
+            expected_fingerprint: content_fingerprint(content),
         })),
         ChangePayload::WriteFile {
             relative_path,
@@ -631,7 +657,7 @@ fn prepare_undo(
             Ok(Some(UndoPayload::RestoreFile {
                 relative_path: relative_path.clone(),
                 previous_content: current.content,
-                expected_fingerprint: fingerprint(content),
+                expected_fingerprint: content_fingerprint(content),
             }))
         }
         ChangePayload::PatchFile {
@@ -646,7 +672,7 @@ fn prepare_undo(
             Ok(Some(UndoPayload::RestoreFile {
                 relative_path: relative_path.clone(),
                 previous_content: current.content,
-                expected_fingerprint: fingerprint(&updated),
+                expected_fingerprint: content_fingerprint(&updated),
             }))
         }
         ChangePayload::CreateDirectory { relative_path, .. } => {
@@ -682,7 +708,7 @@ fn prepare_undo(
                 return Ok(None);
             };
             if let Some(expected) = expected_fingerprint {
-                if fingerprint(&current.content) != expected.as_str() {
+                if content_fingerprint(&current.content) != expected.as_str() {
                     return Err(
                         "The file changed after this deletion was prepared. Review it again before deleting."
                             .to_string(),
@@ -805,6 +831,7 @@ fn apply_record(
             persist_record(app, &record)?;
             Ok(ChangeOutcome {
                 applied: true,
+                queued: false,
                 change: record,
                 file,
             })
@@ -833,6 +860,7 @@ fn submit_payload_with_review(
         if let Some(existing) = find_duplicate_pending_change(app, workspace, &payload)? {
             return Ok(ChangeOutcome {
                 applied: false,
+                queued: true,
                 change: existing,
                 file: None,
             });
@@ -870,12 +898,13 @@ fn submit_payload_with_review(
         }
         return Ok(ChangeOutcome {
             applied: false,
+            queued: true,
             change: record,
             file: None,
         });
     }
 
-    let prepared_version = versioning::prepare_change(app, workspace, edit_group_id)?;
+    let prepared_version = versioning::prepare_change(app, workspace, edit_group_id, &record)?;
     persist_record(app, &record)?;
     match apply_record(app, workspace, record, &payload) {
         Ok(outcome) => {
@@ -940,7 +969,7 @@ pub(crate) fn write_file(
         ChangePayload::WriteFile {
             relative_path,
             content,
-            expected_fingerprint: fingerprint(&current.content),
+            expected_fingerprint: content_fingerprint(&current.content),
         },
         edit_group_id,
     )
@@ -962,7 +991,7 @@ pub(crate) fn patch_file(
             relative_path,
             expected,
             replacement,
-            expected_fingerprint: fingerprint(&current.content),
+            expected_fingerprint: content_fingerprint(&current.content),
         },
         edit_group_id,
     )
@@ -1033,7 +1062,7 @@ pub(crate) fn delete_entry(
         .ok()
         .filter(|info| info.kind == "file")
         .and_then(|_| filesystem::read_file(workspace, &relative_path).ok())
-        .map(|file| fingerprint(&file.content));
+        .map(|file| content_fingerprint(&file.content));
 
     submit_payload(
         app,
@@ -1114,8 +1143,12 @@ pub(crate) fn approve_change(app: &AppHandle, change_id: &str) -> Result<ChangeO
         .ok_or_else(|| "The project for this change is no longer approved.".to_string())?;
     let request = request_path(app, change_id)?;
     let pending_request = read_pending_change_request(&request)?;
-    let prepared_version =
-        versioning::prepare_change(app, &workspace, pending_request.edit_group_id.as_deref())?;
+    let prepared_version = versioning::prepare_change(
+        app,
+        &workspace,
+        pending_request.edit_group_id.as_deref(),
+        &record,
+    )?;
     let result = match apply_record(app, &workspace, record, &pending_request.payload) {
         Ok(outcome) => {
             if let Err(error) = versioning::commit_change(
@@ -1161,6 +1194,31 @@ pub(crate) fn reject_change(app: &AppHandle, change_id: &str) -> Result<ChangeRe
     remove_file_if_present(&request_path(app, change_id)?);
     notify_change_update(app);
     Ok(updated)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangeRollbackDisposition {
+    Reject,
+    Undo,
+    AlreadySafe,
+}
+
+#[cfg(test)]
+pub(crate) fn rollback_disposition(
+    status: ChangeStatus,
+    can_undo: bool,
+) -> Result<ChangeRollbackDisposition, String> {
+    match status {
+        ChangeStatus::Pending => Ok(ChangeRollbackDisposition::Reject),
+        ChangeStatus::Applied if can_undo => Ok(ChangeRollbackDisposition::Undo),
+        ChangeStatus::Applied => {
+            Err("An applied History change does not have a safe undo point.".to_string())
+        }
+        ChangeStatus::Rejected | ChangeStatus::Undone | ChangeStatus::Failed => {
+            Ok(ChangeRollbackDisposition::AlreadySafe)
+        }
+    }
 }
 
 fn undo_payload(workspace: &Workspace, undo: &UndoPayload) -> Result<(), String> {
@@ -1245,7 +1303,11 @@ pub(crate) fn undo_change(app: &AppHandle, change_id: &str) -> Result<ChangeReco
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_preview, fingerprint, patch_result};
+    use super::{
+        content_fingerprint, diff_preview, patch_result, preview_text_change, rollback_disposition,
+        ChangeRollbackDisposition,
+    };
+    use crate::models::ChangeStatus;
 
     #[test]
     fn diff_marks_removed_and_added_lines() {
@@ -1261,7 +1323,38 @@ mod tests {
     }
 
     #[test]
+    fn builder_preview_reuses_history_diff_counts_without_writing() {
+        let preview = preview_text_change("one\ntwo\n", "one\nchanged\n").unwrap();
+        assert_eq!(preview.added_lines, 1);
+        assert_eq!(preview.removed_lines, 1);
+        assert!(preview.diff.unwrap().contains("+ changed"));
+    }
+
+    #[test]
     fn fingerprint_changes_with_content() {
-        assert_ne!(fingerprint("before"), fingerprint("after"));
+        assert_ne!(content_fingerprint("before"), content_fingerprint("after"));
+    }
+
+    #[test]
+    fn rollback_disposition_is_idempotent_and_never_forces_non_undoable_state() {
+        assert_eq!(
+            rollback_disposition(ChangeStatus::Pending, false).unwrap(),
+            ChangeRollbackDisposition::Reject
+        );
+        assert_eq!(
+            rollback_disposition(ChangeStatus::Applied, true).unwrap(),
+            ChangeRollbackDisposition::Undo
+        );
+        for status in [
+            ChangeStatus::Rejected,
+            ChangeStatus::Undone,
+            ChangeStatus::Failed,
+        ] {
+            assert_eq!(
+                rollback_disposition(status, false).unwrap(),
+                ChangeRollbackDisposition::AlreadySafe
+            );
+        }
+        assert!(rollback_disposition(ChangeStatus::Applied, false).is_err());
     }
 }

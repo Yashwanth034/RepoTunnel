@@ -12,6 +12,37 @@ export type Workspace = {
   commandPolicy: CommandPolicy;
 };
 
+export type ProjectSetupStatus = {
+  workspaceId: string;
+  workspaceName: string;
+  projectKind: string;
+  framework: string;
+  packageManager: string | null;
+  dependenciesReady: boolean;
+  setupNeeded: boolean;
+  setupCommand: string | null;
+  devCommand: string | null;
+  devUrl: string | null;
+  detectedPort: number | null;
+  notes: string[];
+};
+
+export type ProjectSetupOutcome = {
+  setup: ProjectSetupStatus;
+  command: TerminalCommandRecord;
+};
+
+export type ProjectMemory = {
+  workspaceId: string;
+  workspaceName: string;
+  summary: string;
+  goals: string[];
+  decisions: string[];
+  preferences: string[];
+  nextSteps: string[];
+  updatedAt: number;
+};
+
 export type WorkspaceHealth = {
   workspaceId: string;
   available: boolean;
@@ -91,6 +122,204 @@ export type GatewayStatus = {
   workspaceCount: number;
 };
 
+export type ModelProviderId = "ollama" | "lmStudio" | "llamaCpp";
+export type CapabilitySource = "detected" | "reported" | "unknown";
+
+export type BooleanCapability = {
+  value: boolean | null;
+  source: CapabilitySource;
+};
+
+export type NumberCapability = {
+  value: number | null;
+  source: CapabilitySource;
+};
+
+export type ModelCapabilities = {
+  chat: BooleanCapability;
+  toolCalling: BooleanCapability;
+  structuredOutput: BooleanCapability;
+  vision: BooleanCapability;
+  contextWindow: NumberCapability;
+};
+
+export type LocalModelInfo = {
+  id: string;
+  name: string;
+  provider: ModelProviderId;
+  runtimeLabel: string;
+  sizeBytes: number | null;
+  parameterSize: string | null;
+  quantization: string | null;
+  loaded: boolean | null;
+  capabilities: ModelCapabilities;
+};
+
+export type ModelSelection = {
+  provider: ModelProviderId;
+  modelId: string;
+  endpoint: string;
+};
+
+export type RuntimeStatus = {
+  provider: ModelProviderId;
+  label: string;
+  endpoint: string;
+  reachable: boolean;
+  models: LocalModelInfo[];
+  version: string | null;
+  message: string;
+  diagnostics: string | null;
+  checkedAt: number;
+};
+
+export type ModelHubSnapshot = {
+  runtimes: RuntimeStatus[];
+  selectedModel: ModelSelection | null;
+  availableModelCount: number;
+  connectedRuntimeCount: number;
+  refreshedAt: number;
+};
+
+export type ModelTestResult = {
+  success: boolean;
+  provider: ModelProviderId;
+  runtimeLabel: string;
+  modelId: string;
+  latencyMs: number;
+  message: string;
+  responseExcerpt: string | null;
+};
+
+export type TrialMode = "quick" | "full";
+export type TrialCategory =
+  | "instructionFollowing"
+  | "structuredJson"
+  | "codeUnderstanding"
+  | "planning"
+  | "patchReasoning"
+  | "reviewQuality"
+  | "securityReasoning"
+  | "testReasoning"
+  | "researchSummarization"
+  | "contextHandling"
+  | "responseSpeed"
+  | "reliability";
+export type TrialModelStatus = "completed" | "failed" | "cancelled";
+export type ModelIdentity = {
+  provider: ModelProviderId;
+  modelId: string;
+  endpoint: string;
+  runtimeVersion: string | null;
+  metadataFingerprint: string;
+};
+export type TrialCategoryScore = { category: TrialCategory; score: number; evidence: string };
+export type ModelTrialResultView = {
+  identity: ModelIdentity;
+  runtimeLabel: string;
+  modelName: string;
+  suiteVersion: string;
+  testedAt: number;
+  mode: TrialMode;
+  status: TrialModelStatus;
+  categoryScores: TrialCategoryScore[];
+  averageLatencyMs: number;
+  attemptedCases: number;
+  failedCases: number;
+  malformedCases: number;
+  failureReason: string | null;
+  current: boolean;
+  staleReason: string | null;
+};
+export type ModelTrialSnapshot = {
+  suiteVersion: string;
+  running: boolean;
+  activeModel: ModelIdentity | null;
+  results: ModelTrialResultView[];
+  lastCancelledAt: number | null;
+};
+
+export type HomeContextTextInput = {
+  path: string;
+  content: string;
+};
+
+export type HomeContextErrorInput = {
+  path: string | null;
+  line: number | null;
+  column: number | null;
+  message: string;
+  source: string;
+};
+
+export type HomeContextSource = {
+  kind: string;
+  path: string | null;
+  label: string;
+  lineStart: number | null;
+  lineEnd: number | null;
+};
+
+export type HomeProjectContextRequest = {
+  includeProject: boolean;
+  attachments: string[];
+  currentFile: HomeContextTextInput | null;
+  selection: HomeContextTextInput | null;
+  error: HomeContextErrorInput | null;
+  errors?: HomeContextErrorInput[];
+  history: Array<{ role: string; content: string }>;
+  contextWindow: number | null;
+};
+
+export type HomeConversationMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: number;
+  state: "complete" | "cancelled" | "failed";
+  contextSources: HomeContextSource[];
+};
+
+export type HomeConversation = {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  selectedModel: ModelSelection | null;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: HomeConversationMessage[];
+};
+
+export type HomeConversationSummary = {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  selectedModel: ModelSelection | null;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messageCount: number;
+};
+
+export type HomeChatStartResult = {
+  generationId: string;
+  conversation: HomeConversation;
+  contextSources: HomeContextSource[];
+  contextWarnings: string[];
+  contextReduced: boolean;
+  contextBudgetChars: number;
+};
+
+export type HomeChatStreamEvent = {
+  generationId: string;
+  conversationId: string;
+  kind: "chunk" | "complete" | "cancelled" | "failed";
+  delta: string | null;
+  message: string | null;
+  contextSources: HomeContextSource[];
+};
+
 export type AccessCheck = {
   allowed: boolean;
   reason: string | null;
@@ -133,8 +362,20 @@ export type SearchMatch = {
   preview: string;
 };
 
+export type PublicTunnelProvider = "ngrok" | "cloudflare" | "direct";
+
 export type PublicTunnelStatus = {
   configured: boolean;
+  provider: PublicTunnelProvider;
+  providerAvailable: boolean;
+  cloudflaredAvailable: boolean;
+  cloudflareOriginPort: number;
+  directHttpsPort: number;
+  directHttpChallengePort: number;
+  certbotAvailable: boolean;
+  certbotVersion: string | null;
+  tlsTrusted: boolean;
+  publicReachable: boolean;
   running: boolean;
   ready: boolean;
   publicUrl: string | null;
@@ -142,6 +383,9 @@ export type PublicTunnelStatus = {
   autoStart: boolean;
   requestCount: number;
   lastRemoteRequestAt: number | null;
+  usageLabel: string;
+  usageUrl: string;
+  originPort: number | null;
   message: string | null;
 };
 
@@ -184,6 +428,7 @@ export type ChangeRecord = {
 
 export type ChangeOutcome = {
   applied: boolean;
+  queued: boolean;
   change: ChangeRecord;
   file: FileInfo | null;
 };
@@ -265,7 +510,7 @@ export type ActivityTimeline = {
 
 export type VersionRestoreResult = {
   currentVersionId: string | null;
-  recoveryCheckpointId: string;
+  recoveryCheckpointId: string | null;
   restoredFiles: number;
   removedFiles: number;
 };
@@ -367,7 +612,8 @@ export type CommandStatus =
   | "completed"
   | "failed"
   | "rejected"
-  | "timedOut";
+  | "timedOut"
+  | "cancelled";
 
 export type CommandPreset = {
   id: string;
@@ -493,6 +739,51 @@ export type LaunchApplication = {
   supportsPaths: boolean;
 };
 
+export type DesktopControlApplication = {
+  id: string;
+  name: string;
+  running: boolean;
+  accessibility: boolean;
+  windowCount: number;
+  enabled: boolean;
+  message: string;
+};
+
+export type AiWorkspaceStatus = {
+  sessionId: string | null;
+  workspaceId: string;
+  running: boolean;
+  ready: boolean;
+  applicationId: string | null;
+  applicationName: string | null;
+  display: string | null;
+  width: number;
+  height: number;
+  startedAt: number | null;
+  message: string | null;
+};
+
+export type AiWorkspaceFrame = {
+  sessionId: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  sizeBytes: number;
+  activeTitle: string;
+  dataBase64: string;
+};
+
+export type DeepIntegration = {
+  id: string;
+  name: string;
+  available: boolean;
+  enabled: boolean;
+  actions: string[];
+  message: string | null;
+};
+
 export type LaunchActionRecord = {
   id: string;
   workspaceId: string;
@@ -583,6 +874,17 @@ export type BrowserPageInspection = {
   tag: string | null;
   text: string;
   html: string;
+};
+
+export type BrowserVisualSelection = {
+  workspaceId: string;
+  tabId: string;
+  url: string;
+  selector: string;
+  tag: string;
+  text: string;
+  html: string;
+  selectedAt: number;
 };
 
 export type BrowserScreenshot = {

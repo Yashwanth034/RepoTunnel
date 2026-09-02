@@ -353,8 +353,10 @@ pub(crate) fn diagnostics(app: &AppHandle) -> Result<RuntimeDiagnostics, String>
     let mut warnings = Vec::new();
 
     if !execution.sandbox_available {
-        warnings
-            .push("Bubblewrap is unavailable; sandboxed project commands cannot run.".to_string());
+        warnings.push(
+            "The native OS sandbox is unavailable; sandboxed project commands cannot run."
+                .to_string(),
+        );
     }
     if tunnel_client.is_none() {
         warnings.push(

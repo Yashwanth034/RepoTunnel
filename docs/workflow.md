@@ -20,7 +20,7 @@ RepoTunnel is designed around one repeatable development loop rather than unrela
 ## Readiness levels
 
 - **Ready**: inspection, safe editing, sandboxed verification, and Git completion are all available.
-- **Limited**: inspection works, but one or more later steps are intentionally unavailable or need setup. Examples include read-only access, disabled commands, missing Bubblewrap, no discovered command preset, or no supported Git repository.
+- **Limited**: inspection works, but one or more later steps are intentionally unavailable or need setup. Examples include read-only access, disabled commands, an unavailable native OS sandbox, no discovered command preset, or no supported Git repository.
 - **Blocked**: the approved workspace itself cannot be validated safely.
 
 The readiness check is read-only. It does not create test files, execute project code, stage files, or make Git commits.

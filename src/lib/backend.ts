@@ -17,9 +17,25 @@ import type {
   ManagedProcessOutcome,
   ManagedProcessOutput,
   ManagedProcessRecord,
+  ModelHubSnapshot,
+  ModelTrialSnapshot,
+  TrialMode,
+  ModelProviderId,
+  ModelSelection,
+  ModelTestResult,
+  RuntimeStatus,
+  HomeChatStartResult,
+  HomeConversation,
+  HomeConversationSummary,
+  HomeProjectContextRequest,
+  ProjectEntry,
   LaunchActionOutcome,
   LaunchActionRecord,
   LaunchApplication,
+  DeepIntegration,
+  DesktopControlApplication,
+  AiWorkspaceFrame,
+  AiWorkspaceStatus,
   BrowserActionOutcome,
   BrowserActionRecord,
   BrowserApplication,
@@ -28,6 +44,7 @@ import type {
   BrowserPageInspection,
   BrowserScreenshot,
   BrowserTab,
+  BrowserVisualSelection,
   MonitoringFileEvent,
   MonitoringSnapshot,
   MonitoringStatus,
@@ -41,7 +58,11 @@ import type {
   GitRepositoryStatus,
   HistoryClearResult,
   HistorySettings,
+  ProjectMemory,
+  ProjectSetupOutcome,
+  ProjectSetupStatus,
   ProjectSnapshot,
+  PublicTunnelProvider,
   PublicTunnelStatus,
   Workspace,
   WorkspaceHealth,
@@ -74,6 +95,10 @@ export async function relocateWorkspace(workspaceId: string, path: string): Prom
 
 export async function addWorkspace(path: string): Promise<Workspace> {
   return invoke<Workspace>("add_workspace", { path });
+}
+
+export async function createProject(name: string): Promise<Workspace> {
+  return invoke<Workspace>("create_project", { name });
 }
 
 export async function removeWorkspace(id: string): Promise<Workspace[]> {
@@ -114,6 +139,25 @@ export async function checkWorkspaceAccess(
     write,
     mustExist,
   });
+}
+
+export async function getProjectSetup(workspaceId: string): Promise<ProjectSetupStatus> {
+  return invoke<ProjectSetupStatus>("get_project_setup", { workspaceId });
+}
+
+export async function prepareProject(workspaceId: string): Promise<ProjectSetupOutcome> {
+  return invoke<ProjectSetupOutcome>("prepare_project", { workspaceId });
+}
+
+export async function getProjectMemory(workspaceId: string): Promise<ProjectMemory> {
+  return invoke<ProjectMemory>("get_project_memory", { workspaceId });
+}
+
+export async function updateProjectMemory(
+  workspaceId: string,
+  memory: Pick<ProjectMemory, "summary" | "goals" | "decisions" | "preferences" | "nextSteps">,
+): Promise<ProjectMemory> {
+  return invoke<ProjectMemory>("update_project_memory", { workspaceId, ...memory });
 }
 
 export async function inspectProject(
@@ -340,6 +384,88 @@ export async function listLaunchableApplications(workspaceId: string): Promise<L
   return invoke<LaunchApplication[]>("list_launchable_applications", { workspaceId });
 }
 
+export async function listDeepIntegrations(workspaceId: string): Promise<DeepIntegration[]> {
+  return invoke<DeepIntegration[]>("list_deep_integrations", { workspaceId });
+}
+
+export async function setDeepIntegrationEnabled(
+  workspaceId: string,
+  integrationId: string,
+  enabled: boolean,
+): Promise<DeepIntegration[]> {
+  return invoke<DeepIntegration[]>("set_deep_integration_enabled", { workspaceId, integrationId, enabled });
+}
+
+export async function listDesktopControlApplications(workspaceId: string): Promise<DesktopControlApplication[]> {
+  return invoke<DesktopControlApplication[]>("list_desktop_control_applications", { workspaceId });
+}
+
+export async function getDesktopControlEnabled(workspaceId: string): Promise<boolean> {
+  return invoke<boolean>("get_desktop_control_enabled", { workspaceId });
+}
+
+export async function setDesktopControlEnabled(
+  workspaceId: string,
+  enabled: boolean,
+): Promise<boolean> {
+  return invoke<boolean>("set_desktop_control_enabled", { workspaceId, enabled });
+}
+
+export async function getAiWorkspaceStatus(workspaceId: string): Promise<AiWorkspaceStatus> {
+  return invoke<AiWorkspaceStatus>("get_ai_workspace_status", { workspaceId });
+}
+
+export async function startAiWorkspace(
+  workspaceId: string,
+  applicationId: string,
+  target?: string,
+): Promise<AiWorkspaceStatus> {
+  return invoke<AiWorkspaceStatus>("start_ai_workspace", {
+    workspaceId,
+    applicationId,
+    target: target?.trim() || null,
+  });
+}
+
+export async function stopAiWorkspace(workspaceId: string): Promise<AiWorkspaceStatus> {
+  return invoke<AiWorkspaceStatus>("stop_ai_workspace", { workspaceId });
+}
+
+export async function getAiWorkspaceFrame(
+  workspaceId: string,
+  maxWidth = 1440,
+): Promise<AiWorkspaceFrame> {
+  return invoke<AiWorkspaceFrame>("get_ai_workspace_frame", { workspaceId, maxWidth });
+}
+
+export async function aiWorkspaceAction(
+  workspaceId: string,
+  action: "activate" | "click" | "key" | "type" | "scroll",
+  options: {
+    windowId?: string;
+    xRatio?: number;
+    yRatio?: number;
+    clickCount?: number;
+    shortcut?: string;
+    text?: string;
+    deltaX?: number;
+    deltaY?: number;
+  } = {},
+): Promise<Record<string, unknown>> {
+  return invoke<Record<string, unknown>>("ai_workspace_action", {
+    workspaceId,
+    action,
+    windowId: options.windowId ?? null,
+    xRatio: options.xRatio ?? null,
+    yRatio: options.yRatio ?? null,
+    clickCount: options.clickCount ?? null,
+    shortcut: options.shortcut ?? null,
+    text: options.text ?? null,
+    deltaX: options.deltaX ?? null,
+    deltaY: options.deltaY ?? null,
+  });
+}
+
 export async function openUrl(
   workspaceId: string,
   url: string,
@@ -475,6 +601,21 @@ export async function browserInspectPage(
     selector: selector?.trim() ? selector.trim() : null,
     maxChars,
   });
+}
+
+export async function browserPickElement(
+  workspaceId: string,
+  tabId: string,
+  xRatio: number,
+  yRatio: number,
+): Promise<BrowserVisualSelection> {
+  return invoke<BrowserVisualSelection>("browser_pick_element", { workspaceId, tabId, xRatio, yRatio });
+}
+
+export async function getBrowserVisualSelection(
+  workspaceId: string,
+): Promise<BrowserVisualSelection | null> {
+  return invoke<BrowserVisualSelection | null>("get_browser_visual_selection", { workspaceId });
 }
 
 export async function browserTakeScreenshot(
@@ -676,12 +817,24 @@ export async function getPublicTunnelStatus(): Promise<PublicTunnelStatus> {
   return invoke<PublicTunnelStatus>("get_public_tunnel_status");
 }
 
-export async function configurePublicTunnel(authtoken: string): Promise<PublicTunnelStatus> {
-  return invoke<PublicTunnelStatus>("configure_public_tunnel", { authtoken });
+export async function configurePublicTunnel(
+  provider: PublicTunnelProvider,
+  credential: string,
+  publicUrl?: string,
+): Promise<PublicTunnelStatus> {
+  return invoke<PublicTunnelStatus>("configure_public_tunnel", {
+    provider,
+    credential,
+    publicUrl: publicUrl?.trim() ? publicUrl.trim() : null,
+  });
 }
 
 export async function restartPublicTunnel(): Promise<PublicTunnelStatus> {
   return invoke<PublicTunnelStatus>("restart_public_tunnel");
+}
+
+export async function provisionDirectHttpsCertificate(staging = false): Promise<PublicTunnelStatus> {
+  return invoke<PublicTunnelStatus>("provision_direct_https_certificate", { staging });
 }
 
 export async function clearPublicTunnel(): Promise<PublicTunnelStatus> {
@@ -707,6 +860,86 @@ export async function stopChatConnection(): Promise<ChatConnectionStatus> {
   return invoke<ChatConnectionStatus>("stop_chat_connection");
 }
 
+
+export async function getModelHub(): Promise<ModelHubSnapshot> {
+  return invoke<ModelHubSnapshot>("get_model_hub");
+}
+
+export async function refreshModelRuntime(provider: ModelProviderId): Promise<RuntimeStatus> {
+  return invoke<RuntimeStatus>("refresh_model_runtime", { provider });
+}
+
+export async function updateModelRuntimeEndpoint(
+  provider: ModelProviderId,
+  endpoint: string,
+): Promise<string> {
+  return invoke<string>("update_model_runtime_endpoint", { provider, endpoint });
+}
+
+export async function setSelectedLocalModel(
+  selection: ModelSelection | null,
+): Promise<ModelSelection | null> {
+  return invoke<ModelSelection | null>("set_selected_local_model", { selection });
+}
+
+export async function testLocalModel(selection: ModelSelection): Promise<ModelTestResult> {
+  return invoke<ModelTestResult>("test_local_model", { selection });
+}
+
+export async function getModelTrial(): Promise<ModelTrialSnapshot> {
+  return invoke<ModelTrialSnapshot>("get_model_trial");
+}
+
+export async function runModelTrial(mode: TrialMode, selections: ModelSelection[]): Promise<ModelTrialSnapshot> {
+  return invoke<ModelTrialSnapshot>("run_model_trial", { mode, selections });
+}
+
+export async function cancelModelTrial(): Promise<boolean> {
+  return invoke<boolean>("cancel_model_trial");
+}
+
+export async function listHomeConversations(workspaceId: string | null): Promise<HomeConversationSummary[]> {
+  return invoke<HomeConversationSummary[]>("list_home_conversations", { workspaceId });
+}
+
+export async function getHomeConversation(conversationId: string): Promise<HomeConversation> {
+  return invoke<HomeConversation>("get_home_conversation", { conversationId });
+}
+
+export async function createHomeConversation(workspaceId: string | null): Promise<HomeConversation> {
+  return invoke<HomeConversation>("create_home_conversation", { workspaceId });
+}
+
+export async function deleteHomeConversation(conversationId: string): Promise<void> {
+  return invoke<void>("delete_home_conversation", { conversationId });
+}
+
+export async function listHomeContextFiles(
+  workspaceId: string,
+  limit = 250,
+): Promise<ProjectEntry[]> {
+  return invoke<ProjectEntry[]>("list_home_context_files", { workspaceId, limit });
+}
+
+export async function beginHomeChat(
+  workspaceId: string | null,
+  conversationId: string,
+  question: string,
+  context: HomeProjectContextRequest,
+  allowChanges = false,
+): Promise<HomeChatStartResult> {
+  return invoke<HomeChatStartResult>("begin_home_chat", {
+    workspaceId,
+    conversationId,
+    question,
+    context,
+    allowChanges,
+  });
+}
+
+export async function cancelHomeChat(generationId: string): Promise<boolean> {
+  return invoke<boolean>("cancel_home_chat", { generationId });
+}
 
 export async function getRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
   return invoke<RuntimeDiagnostics>("get_runtime_diagnostics");

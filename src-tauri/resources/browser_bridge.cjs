@@ -383,6 +383,63 @@ async function main() {
       out(await evaluate(tabId, expression));
       return;
     }
+    case "pick-element": {
+      const [tabId] = args;
+      const xRatio = Math.min(Math.max(Number(args[1] || 0), 0), 1);
+      const yRatio = Math.min(Math.max(Number(args[2] || 0), 0), 1);
+      const expression = `(() => {
+        const x = Math.max(0, Math.min(window.innerWidth - 1, ${xRatio} * window.innerWidth));
+        const y = Math.max(0, Math.min(window.innerHeight - 1, ${yRatio} * window.innerHeight));
+        const el = document.elementFromPoint(x, y);
+        if (!el) return {found:false};
+        const esc = (value) => (window.CSS && CSS.escape) ? CSS.escape(value) : String(value).replace(/[^a-zA-Z0-9_-]/g, '\\\\$&');
+        const unique = (selector) => { try { return document.querySelectorAll(selector).length === 1; } catch { return false; } };
+        let selector = '';
+        if (el.id) {
+          const candidate = '#' + esc(el.id);
+          if (unique(candidate)) selector = candidate;
+        }
+        if (!selector) {
+          for (const attr of ['data-testid','data-test','data-cy','name','aria-label']) {
+            const value = el.getAttribute(attr);
+            if (!value) continue;
+            const candidate = el.tagName.toLowerCase() + '[' + attr + '=' + JSON.stringify(value) + ']';
+            if (unique(candidate)) { selector = candidate; break; }
+          }
+        }
+        if (!selector) {
+          const parts = [];
+          let node = el;
+          while (node && node.nodeType === 1 && node !== document.documentElement) {
+            let part = node.tagName.toLowerCase();
+            const useful = Array.from(node.classList || []).filter((name) => /^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(name)).slice(0, 2);
+            if (useful.length) part += '.' + useful.map(esc).join('.');
+            const parent = node.parentElement;
+            if (parent) {
+              const same = Array.from(parent.children).filter((child) => child.tagName === node.tagName);
+              if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(node) + 1) + ')';
+            }
+            parts.unshift(part);
+            const candidate = parts.join(' > ');
+            if (unique(candidate)) { selector = candidate; break; }
+            node = parent;
+          }
+          if (!selector) selector = parts.join(' > ') || el.tagName.toLowerCase();
+        }
+        return {
+          found:true,
+          url:location.href,
+          selector,
+          tag:el.tagName,
+          text:(el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim().slice(0,2000),
+          html:el.outerHTML.slice(0,12000)
+        };
+      })()`;
+      const result = await evaluate(tabId, expression);
+      if (!result?.found) throw new Error("No page element was found at that preview position.");
+      out(result);
+      return;
+    }
     case "screenshot": {
       const [tabId] = args;
       const fullPage = decodeJsonArg(1, false) === true;

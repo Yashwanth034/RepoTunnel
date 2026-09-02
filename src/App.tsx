@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import AppHeader from "./components/AppHeader";
 import AppErrorBoundary from "./components/AppErrorBoundary";
@@ -14,7 +14,11 @@ import GitPanel from "./components/GitPanel";
 import ProductionPanel from "./components/ProductionPanel";
 import HelpPanel from "./components/HelpPanel";
 import HomeWorkspace from "./components/HomeWorkspace";
+import ModelHub from "./components/ModelHub";
 import HomeFeatureDialog from "./components/HomeFeatureDialog";
+import NewProjectDialog from "./components/NewProjectDialog";
+import ProjectSetupPanel from "./components/ProjectSetupPanel";
+import ProjectMemoryPanel from "./components/ProjectMemoryPanel";
 import ProjectRail from "./components/ProjectRail";
 import TeamPanel from "./components/TeamPanel";
 import WindowChrome from "./components/WindowChrome";
@@ -22,7 +26,8 @@ import ProjectOverviewPanel from "./components/ProjectOverviewPanel";
 import PublicTunnelPanel from "./components/PublicTunnelPanel";
 import WorkspaceList from "./components/WorkspaceList";
 import WorkflowPanel from "./components/WorkflowPanel";
-import WorkspaceEditor, { type EditorDocument, type EditorRevealLocation } from "./components/WorkspaceEditor";
+import WorkspaceEditor, { type EditorDocument, type EditorRevealLocation, type EditorSelectionContext } from "./components/WorkspaceEditor";
+import type { EditorProblem } from "./components/DeveloperDock";
 import WorkspaceProductivity from "./components/WorkspaceProductivity";
 import {
   getFileInfo,
@@ -33,12 +38,14 @@ import {
 } from "./lib/filesystem";
 import {
   addWorkspace,
+  createProject,
   approveChange,
   createCheckpoint,
   clearVersionHistory,
   getAiAccessStatus,
   getChatConnectionStatus,
   getGatewayStatus,
+  getModelHub,
   getWorkspaceHealth,
   getActivityTimeline,
   getGitStatus,
@@ -52,6 +59,7 @@ import {
   removeWorkspace,
   relocateWorkspace,
   restartPublicTunnel,
+  provisionDirectHttpsCertificate,
   clearPublicTunnel,
   revokeMcpAccess,
   configurePublicTunnel,
@@ -74,6 +82,10 @@ import type {
   DirectoryEntry,
   GatewayStatus,
   GitRepositoryStatus,
+  HomeContextErrorInput,
+  HomeContextTextInput,
+  ModelHubSnapshot,
+  PublicTunnelProvider,
   PublicTunnelStatus,
   SafetyScanResult,
   Workspace,
@@ -92,6 +104,16 @@ const initialStatus: GatewayStatus = {
 
 const initialPublicTunnelStatus: PublicTunnelStatus = {
   configured: false,
+  provider: "ngrok",
+  providerAvailable: true,
+  cloudflaredAvailable: false,
+  cloudflareOriginPort: 43182,
+  directHttpsPort: 43183,
+  directHttpChallengePort: 43184,
+  certbotAvailable: false,
+  certbotVersion: null,
+  tlsTrusted: false,
+  publicReachable: false,
   running: false,
   ready: false,
   publicUrl: null,
@@ -99,6 +121,9 @@ const initialPublicTunnelStatus: PublicTunnelStatus = {
   autoStart: false,
   requestCount: 0,
   lastRemoteRequestAt: null,
+  usageLabel: "0 authenticated MCP requests this launch",
+  usageUrl: "https://dashboard.ngrok.com/usage",
+  originPort: null,
   message: null,
 };
 
@@ -256,6 +281,8 @@ function App() {
     initialConnectionStatus,
   );
   const [publicTunnelStatus, setPublicTunnelStatus] = useState<PublicTunnelStatus>(initialPublicTunnelStatus);
+  const [modelHub, setModelHub] = useState<ModelHubSnapshot | null>(null);
+  const [modelHubLoading, setModelHubLoading] = useState(true);
   const [publicTunnelBusy, setPublicTunnelBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
@@ -271,6 +298,8 @@ function App() {
   const [workspaceHealth, setWorkspaceHealth] = useState<Record<string, WorkspaceHealth>>({});
   const [relocatingWorkspaceId, setRelocatingWorkspaceId] = useState<string | null>(null);
   const [pendingWorkspaceSelection, setPendingWorkspaceSelection] = useState<string | null>(null);
+  const [showNewProject, setShowNewProject] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const [confirmStopGateway, setConfirmStopGateway] = useState(false);
   const [confirmForgetPublicTunnel, setConfirmForgetPublicTunnel] = useState(false);
   const [confirmRevokeMcpAccess, setConfirmRevokeMcpAccess] = useState(false);
@@ -286,6 +315,8 @@ function App() {
   const [projectTreeRefreshToken, setProjectTreeRefreshToken] = useState(0);
   const [gitStatus, setGitStatus] = useState<GitRepositoryStatus | null>(null);
   const [editorRevealLocation, setEditorRevealLocation] = useState<EditorRevealLocation | null>(null);
+  const [editorSelectionContext, setEditorSelectionContext] = useState<EditorSelectionContext | null>(null);
+  const [editorProblems, setEditorProblems] = useState<EditorProblem[]>([]);
   const [secondaryEditorKey, setSecondaryEditorKey] = useState<string | null>(null);
   const [closedEditorTabs, setClosedEditorTabs] = useState<Array<{ workspaceId: string; path: string }>>([]);
   const editorTabsRef = useRef<EditorDocument[]>([]);
@@ -301,6 +332,28 @@ function App() {
     () => editorTabs.find((tab) => tab.key === activeEditorKey) ?? null,
     [editorTabs, activeEditorKey],
   );
+
+  const homeCurrentFile = useMemo<HomeContextTextInput | null>(() => {
+    if (!activeEditorDocument || activeEditorDocument.workspaceId !== selectedWorkspaceId || activeEditorDocument.kind !== "text") return null;
+    return { path: activeEditorDocument.path, content: activeEditorDocument.content };
+  }, [activeEditorDocument, selectedWorkspaceId]);
+
+  const homeSelection = useMemo<HomeContextTextInput | null>(() => {
+    if (!editorSelectionContext || editorSelectionContext.workspaceId !== selectedWorkspaceId) return null;
+    if (!activeEditorDocument || activeEditorDocument.path !== editorSelectionContext.path) return null;
+    return { path: editorSelectionContext.path, content: editorSelectionContext.content };
+  }, [editorSelectionContext, selectedWorkspaceId, activeEditorDocument?.path]);
+
+  const homeErrors = useMemo<HomeContextErrorInput[]>(() => {
+    if (!activeEditorDocument || activeEditorDocument.workspaceId !== selectedWorkspaceId) return [];
+    return editorProblems.slice(0, 30).map((problem) => ({
+      path: problem.path || null,
+      line: problem.line || null,
+      column: problem.column || null,
+      message: problem.message,
+      source: problem.source,
+    }));
+  }, [editorProblems, activeEditorDocument?.workspaceId, selectedWorkspaceId]);
 
   const workspacePathById = useMemo(
     () => Object.fromEntries(workspaces.map((workspace) => [workspace.id, workspace.path])),
@@ -319,9 +372,12 @@ function App() {
     setNotice(`Command execution: ${message}`);
   }, []);
 
+  const refreshPendingChanges = useCallback(async () => {
+    setChanges(await listChanges(undefined, 100));
+  }, []);
+
   const refreshChanges = useCallback(async () => {
-    const savedChanges = await listChanges(undefined, 100);
-    setChanges(savedChanges);
+    await refreshPendingChanges();
     if (selectedWorkspaceId) {
       const [versions, activities] = await Promise.all([
         getVersionTimeline(selectedWorkspaceId),
@@ -333,7 +389,7 @@ function App() {
       setVersionTimeline({ records: [], currentVersionId: null });
       setActivityTimeline({ groups: [] });
     }
-  }, [selectedWorkspaceId]);
+  }, [selectedWorkspaceId, refreshPendingChanges]);
 
   const refresh = useCallback(async () => {
     const [savedWorkspaces, status, publicStatus, chatStatus, savedChanges, aiStatus] = await Promise.all([
@@ -350,6 +406,17 @@ function App() {
     setConnectionStatus(chatStatus);
     setChanges(savedChanges);
     setAiAccessPausedState(aiStatus.paused);
+  }, []);
+
+  const refreshModelHub = useCallback(async (showLoading = true) => {
+    if (showLoading) setModelHubLoading(true);
+    try {
+      setModelHub(await getModelHub());
+    } catch {
+      // Keep the last known local-model snapshot during a transient runtime restart.
+    } finally {
+      if (showLoading) setModelHubLoading(false);
+    }
   }, []);
 
   const refreshWorkspaceHealth = useCallback(async () => {
@@ -448,7 +515,19 @@ function App() {
     refresh()
       .catch((error) => setNotice(`RepoTunnel could not initialize: ${errorMessage(error)}`))
       .finally(() => setLoading(false));
-  }, [refresh]);
+    void refreshModelHub(true);
+  }, [refresh, refreshModelHub]);
+
+  useEffect(() => {
+    if (activeView !== "overview") return;
+    const refreshDetectedModels = () => void refreshModelHub(false);
+    const timer = window.setInterval(refreshDetectedModels, 10_000);
+    window.addEventListener("focus", refreshDetectedModels);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshDetectedModels);
+    };
+  }, [activeView, refreshModelHub]);
 
   useEffect(() => {
     if (!notice) return;
@@ -497,7 +576,7 @@ function App() {
   useEffect(() => {
     void refreshWorkspaceHealth();
     if (workspaces.length === 0) return;
-    const timer = window.setInterval(() => void refreshWorkspaceHealth(), 12_000);
+    const timer = window.setInterval(() => void refreshWorkspaceHealth(), 30_000);
     return () => window.clearInterval(timer);
   }, [workspaces.length, refreshWorkspaceHealth]);
 
@@ -508,9 +587,7 @@ function App() {
     }
 
     setSelectedWorkspaceId((current) =>
-      current && workspaces.some((workspace) => workspace.id === current)
-        ? current
-        : workspaces[0].id,
+      current && workspaces.some((workspace) => workspace.id === current) ? current : null,
     );
   }, [workspaces]);
 
@@ -590,35 +667,41 @@ function App() {
 
   useEffect(() => {
     if (!editorSessionRestoredRef.current) return;
-    const persisted: PersistedEditorSession = {
-      tabs: editorTabs.slice(0, MAX_RESTORED_TABS).map((tab) => {
-        const keepDraft = tab.kind === "text" && tab.dirty && new Blob([tab.content]).size <= MAX_DRAFT_BYTES;
-        return {
-          workspaceId: tab.workspaceId,
-          path: tab.path,
-          dirty: keepDraft,
-          draftContent: keepDraft ? tab.content : undefined,
-          savedContent: keepDraft ? tab.savedContent : undefined,
-        };
-      }),
-      activeKey: activeEditorKey,
-      secondaryKey: secondaryEditorKey,
-    };
-    try {
-      if (persisted.tabs.length === 0) window.localStorage.removeItem(EDITOR_SESSION_KEY);
-      else window.localStorage.setItem(EDITOR_SESSION_KEY, JSON.stringify(persisted));
-    } catch {
-      // Storage quotas should not interfere with editing; fall back to restoring file paths next time.
+    // Persist drafts after a short idle window instead of serializing large files
+    // synchronously on every keystroke. This keeps typing independent from storage I/O.
+    const timer = window.setTimeout(() => {
+      const persisted: PersistedEditorSession = {
+        tabs: editorTabs.slice(0, MAX_RESTORED_TABS).map((tab) => {
+          const keepDraft = tab.kind === "text" && tab.dirty && new Blob([tab.content]).size <= MAX_DRAFT_BYTES;
+          return {
+            workspaceId: tab.workspaceId,
+            path: tab.path,
+            dirty: keepDraft,
+            draftContent: keepDraft ? tab.content : undefined,
+            savedContent: keepDraft ? tab.savedContent : undefined,
+          };
+        }),
+        activeKey: activeEditorKey,
+        secondaryKey: secondaryEditorKey,
+      };
       try {
-        const lightweight = { ...persisted, tabs: persisted.tabs.map((tab) => ({ workspaceId: tab.workspaceId, path: tab.path, dirty: false })) };
-        window.localStorage.setItem(EDITOR_SESSION_KEY, JSON.stringify(lightweight));
+        if (persisted.tabs.length === 0) window.localStorage.removeItem(EDITOR_SESSION_KEY);
+        else window.localStorage.setItem(EDITOR_SESSION_KEY, JSON.stringify(persisted));
       } catch {
-        // Ignore unavailable local storage.
+        // Storage quotas should not interfere with editing; fall back to restoring file paths next time.
+        try {
+          const lightweight = { ...persisted, tabs: persisted.tabs.map((tab) => ({ workspaceId: tab.workspaceId, path: tab.path, dirty: false })) };
+          window.localStorage.setItem(EDITOR_SESSION_KEY, JSON.stringify(lightweight));
+        } catch {
+          // Ignore unavailable local storage.
+        }
       }
-    }
+    }, 320);
+    return () => window.clearTimeout(timer);
   }, [editorTabs, activeEditorKey, secondaryEditorKey]);
 
   useEffect(() => {
+    if (activeView !== "changes") return;
     if (!selectedWorkspaceId) {
       setVersionTimeline({ records: [], currentVersionId: null });
       setActivityTimeline({ groups: [] });
@@ -630,14 +713,16 @@ function App() {
         setActivityTimeline(activities);
       })
       .catch((error) => setNotice(`Could not load history: ${errorMessage(error)}`));
-  }, [selectedWorkspaceId]);
+  }, [activeView, selectedWorkspaceId]);
 
   useEffect(() => {
+    if (activeView !== "git" && activeView !== "editor") return;
     void refreshGitStatus();
     if (!selectedWorkspaceId) return;
-    const timer = window.setInterval(() => void refreshGitStatus(), 3000);
+    const intervalMs = activeView === "git" ? 3000 : 10_000;
+    const timer = window.setInterval(() => void refreshGitStatus(), intervalMs);
     return () => window.clearInterval(timer);
-  }, [selectedWorkspaceId, refreshGitStatus]);
+  }, [activeView, selectedWorkspaceId, refreshGitStatus]);
 
   useEffect(() => {
     if (!connectionStatus.running) return;
@@ -684,7 +769,7 @@ function App() {
     let unlisten: (() => void) | null = null;
 
     listen("repotunnel://activity-updated", () => {
-      if (!selectedWorkspaceId) return;
+      if (activeView !== "changes" || !selectedWorkspaceId) return;
       getActivityTimeline(selectedWorkspaceId).then(setActivityTimeline).catch(() => undefined);
     })
       .then((stopListening) => {
@@ -697,17 +782,17 @@ function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [selectedWorkspaceId]);
+  }, [activeView, selectedWorkspaceId]);
 
   useEffect(() => {
     if (!gatewayStatus.running) return;
 
     const timer = window.setInterval(() => {
-      refreshChanges().catch(() => undefined);
-    }, 5000);
+      refreshPendingChanges().catch(() => undefined);
+    }, 10_000);
 
     return () => window.clearInterval(timer);
-  }, [gatewayStatus.running, refreshChanges]);
+  }, [gatewayStatus.running, refreshPendingChanges]);
 
   useEffect(() => {
     if (editorTabs.length === 0) return;
@@ -731,6 +816,24 @@ function App() {
       setNotice(`Could not add that project: ${errorMessage(error)}`);
     } finally {
       setAdding(false);
+    }
+  }
+
+  async function handleCreateProject(name: string) {
+    setNotice(null);
+    setCreatingProject(true);
+    try {
+      const workspace = await createProject(name);
+      await refresh();
+      setSelectedWorkspaceId(workspace.id);
+      setShowNewProject(false);
+      setActiveView("projects");
+      setNotice(`Created ${workspace.name}. The project is ready for AI work.`);
+    } catch (error) {
+      setNotice(`Could not create that project: ${errorMessage(error)}`);
+      throw error;
+    } finally {
+      setCreatingProject(false);
     }
   }
 
@@ -859,17 +962,34 @@ function App() {
     }
   }
 
-  async function handlePublicTunnelConfigure(authtoken: string) {
+  async function handlePublicTunnelConfigure(provider: PublicTunnelProvider, credential: string, publicUrl?: string) {
     setNotice(null);
     setPublicTunnelBusy(true);
     try {
-      setPublicTunnelStatus(await configurePublicTunnel(authtoken));
+      setPublicTunnelStatus(await configurePublicTunnel(provider, credential, publicUrl));
       setGatewayStatus(await getGatewayStatus());
-      setNotice("Public ChatGPT connection is ready. Copy the MCP URL and connect it in ChatGPT once.");
+      setNotice(provider === "direct"
+        ? "Direct HTTPS is prepared locally. The public route becomes usable after a routable IPv4/IPv6, router forwarding, and trusted TLS are in place."
+        : `${provider === "cloudflare" ? "Cloudflare" : "ngrok"} public connection is ready. Copy the MCP URL and connect it in ChatGPT once.`);
     } catch (error) {
       setNotice(`Public connection failed: ${errorMessage(error)}`);
       setPublicTunnelStatus(await getPublicTunnelStatus().catch(() => initialPublicTunnelStatus));
       throw error;
+    } finally {
+      setPublicTunnelBusy(false);
+    }
+  }
+
+  async function handleDirectCertificateProvision() {
+    setNotice(null);
+    setPublicTunnelBusy(true);
+    try {
+      setPublicTunnelStatus(await provisionDirectHttpsCertificate(false));
+      setGatewayStatus(await getGatewayStatus());
+      setNotice("Trusted Let’s Encrypt certificate loaded for Direct HTTPS.");
+    } catch (error) {
+      setNotice(`Could not provision the Direct HTTPS certificate: ${errorMessage(error)}`);
+      setPublicTunnelStatus(await getPublicTunnelStatus().catch(() => initialPublicTunnelStatus));
     } finally {
       setPublicTunnelBusy(false);
     }
@@ -881,7 +1001,7 @@ function App() {
     try {
       setPublicTunnelStatus(await restartPublicTunnel());
       setGatewayStatus(await getGatewayStatus());
-      setNotice("Public ChatGPT connection restarted.");
+      setNotice("Public MCP connection restarted.");
     } catch (error) {
       setNotice(`Could not restart public connection: ${errorMessage(error)}`);
       setPublicTunnelStatus(await getPublicTunnelStatus().catch(() => initialPublicTunnelStatus));
@@ -953,8 +1073,8 @@ function App() {
   }
 
   function selectedWorkspace(): Workspace | null {
-    if (!selectedWorkspaceId) return workspaces[0] ?? null;
-    return workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? workspaces[0] ?? null;
+    if (!selectedWorkspaceId) return null;
+    return workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
   }
 
   async function handleCreateCheckpoint() {
@@ -1134,9 +1254,13 @@ function App() {
   }
 
   function handleEditorChange(key: string, content: string) {
-    setEditorTabs((current) => current.map((tab) => tab.key === key && !tab.readonly
+    const next = editorTabsRef.current.map((tab) => tab.key === key && !tab.readonly
       ? { ...tab, content, dirty: content !== tab.savedContent, updatedExternally: false }
-      : tab));
+      : tab);
+    // Keep the authoritative draft synchronous for save/external-change safety,
+    // but render the surrounding app as a transition so keystrokes stay native-fast.
+    editorTabsRef.current = next;
+    startTransition(() => setEditorTabs(next));
   }
 
   async function handleEditorSave(key: string): Promise<boolean> {
@@ -1221,7 +1345,10 @@ function App() {
   }
 
   function handleSelectWorkspaceSafe(workspaceId: string) {
-    if (workspaceId === selectedWorkspaceId) return;
+    if (workspaceId === selectedWorkspaceId) {
+      if (activeView === "overview") setSelectedWorkspaceId(null);
+      return;
+    }
     const dirty = editorTabsRef.current.filter((tab) => tab.workspaceId === selectedWorkspaceId && tab.dirty);
     if (dirty.length > 0) {
       setPendingWorkspaceSelection(workspaceId);
@@ -1355,6 +1482,8 @@ function App() {
             onRelocate={(workspace) => void handleRelocateWorkspace(workspace)}
             onRetryHealth={(workspaceId) => void handleWorkspaceHealthRetry(workspaceId)}
           />
+          <ProjectSetupPanel workspaces={workspaces} selectedWorkspaceId={selectedWorkspaceId} onNotice={setNotice} />
+          <ProjectMemoryPanel workspaces={workspaces} selectedWorkspaceId={selectedWorkspaceId} onNotice={setNotice} />
           <ProjectOverviewPanel workspaces={workspaces} />
         </div>
       );
@@ -1366,6 +1495,17 @@ function App() {
           workspaces={workspaces}
           selectedWorkspaceId={selectedWorkspaceId}
           onSelectWorkspace={handleSelectWorkspaceSafe}
+          onNotice={setNotice}
+        />
+      );
+    }
+
+    if (activeView === "models") {
+      return (
+        <ModelHub
+          snapshot={modelHub}
+          loading={modelHubLoading}
+          onSnapshotChange={setModelHub}
           onNotice={setNotice}
         />
       );
@@ -1458,6 +1598,7 @@ function App() {
             busy={publicTunnelBusy}
             onConfigure={handlePublicTunnelConfigure}
             onRestart={handlePublicTunnelRestart}
+            onProvisionCertificate={handleDirectCertificateProvision}
             onRevoke={handleRevokeMcpAccess}
             onForget={handlePublicTunnelForget}
           />
@@ -1544,15 +1685,21 @@ function App() {
               connection={connectionStatus}
               publicTunnel={publicTunnelStatus}
               workspaces={workspaces}
-              changes={changes}
+              selectedWorkspace={selectedWorkspace()}
+              modelHub={modelHub}
+              currentFile={homeCurrentFile}
+              selection={homeSelection}
+              errors={homeErrors}
               gatewayBusy={gatewayBusy}
               adding={adding}
               checkpointBusy={checkpointBusy}
               safetyBusy={safetyBusy}
               aiAccessBusy={aiAccessBusy}
               aiAccessPaused={aiAccessPaused}
+              onModelHubChange={setModelHub}
               onToggleGateway={handleGatewayToggle}
               onAddProject={handleAddWorkspace}
+              onCreateProject={() => setShowNewProject(true)}
               onCreateCheckpoint={handleCreateCheckpoint}
               onSafetyScan={handleSafetyScan}
               onToggleAiAccess={handleAiAccessToggle}
@@ -1577,6 +1724,8 @@ function App() {
               onKeepLocal={handleKeepLocal}
               onDismissExternalNotice={(key) => setEditorTabs((current) => current.map((tab) => tab.key === key ? { ...tab, updatedExternally: false } : tab))}
               onOpenProblem={(workspaceId, path, line, column) => void handleOpenEditorProblem(workspaceId, path, line, column)}
+              onSelectionContext={setEditorSelectionContext}
+              onProblemsChange={setEditorProblems}
               canReopenClosed={closedEditorTabs.length > 0}
               onReopenClosed={() => void handleReopenClosedEditor()}
               onNotice={setNotice}
@@ -1629,6 +1778,14 @@ function App() {
         />
       ) : null}
 
+      {showNewProject ? (
+        <NewProjectDialog
+          busy={creatingProject}
+          onCancel={() => setShowNewProject(false)}
+          onCreate={handleCreateProject}
+        />
+      ) : null}
+
       {confirmStopGateway ? (
         <ConfirmationDialog
           title="Stop the MCP gateway?"
@@ -1644,7 +1801,7 @@ function App() {
       {confirmRevokeMcpAccess ? (
         <ConfirmationDialog
           title="Revoke MCP access?"
-          message="This immediately invalidates the current MCP access and refresh credentials. Your public endpoint, ngrok setup, projects, and history remain unchanged. ChatGPT will need to sign in with RepoTunnel again when it next connects."
+          message="This immediately invalidates the current MCP access and refresh credentials. Your public endpoint, tunnel-provider setup, projects, and history remain unchanged. ChatGPT will need to sign in with RepoTunnel again when it next connects."
           confirmLabel="Revoke access"
           busy={publicTunnelBusy}
           busyLabel="Revoking…"
@@ -1656,7 +1813,7 @@ function App() {
       {confirmForgetPublicTunnel ? (
         <ConfirmationDialog
           title="Forget public connection setup?"
-          message="This removes the saved ngrok authtoken and stable public endpoint identity from this device. Your project files and RepoTunnel history are not affected."
+          message="This removes the saved public-tunnel credential and endpoint configuration from this device. Your project files and RepoTunnel history are not affected."
           confirmLabel="Forget setup"
           busy={publicTunnelBusy}
           busyLabel="Removing…"

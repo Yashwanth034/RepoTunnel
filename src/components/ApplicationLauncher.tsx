@@ -2,13 +2,19 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   approveLaunchAction,
   launchApplication,
+  getDesktopControlEnabled,
+  listDeepIntegrations,
   listLaunchHistory,
   listLaunchableApplications,
   openUrl,
   openWorkspacePath,
   rejectLaunchAction,
+  setDeepIntegrationEnabled,
+  setDesktopControlEnabled,
 } from "../lib/backend";
-import type { LaunchActionRecord, LaunchActionStatus, LaunchApplication, Workspace } from "../types";
+import { detectedProductivityFamilies, isProductivityApplication } from "../lib/applicationFamilies";
+import type { DeepIntegration, LaunchActionRecord, LaunchActionStatus, LaunchApplication, Workspace } from "../types";
+import AIWorkspacePanel from "./ai-workspace/AIWorkspacePanel";
 
 type ApplicationLauncherProps = {
   workspace: Workspace | null;
@@ -36,12 +42,16 @@ function launchEnabled(workspace: Workspace | null): boolean {
 
 function ApplicationLauncher({ workspace, gatewayRunning, onError }: ApplicationLauncherProps) {
   const [applications, setApplications] = useState<LaunchApplication[]>([]);
+  const [integrations, setIntegrations] = useState<DeepIntegration[]>([]);
+  const [desktopEnabled, setDesktopEnabled] = useState(false);
   const [history, setHistory] = useState<LaunchActionRecord[]>([]);
   const [url, setUrl] = useState("");
   const [browserId, setBrowserId] = useState("");
   const [relativePath, setRelativePath] = useState("");
   const [pathApplicationId, setPathApplicationId] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [integrationBusyId, setIntegrationBusyId] = useState<string | null>(null);
+  const [desktopBusyId, setDesktopBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const browsers = useMemo(
@@ -52,6 +62,14 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     () => applications.filter((application) => application.supportsPaths),
     [applications],
   );
+  const productivityFamilies = useMemo(
+    () => detectedProductivityFamilies(applications),
+    [applications],
+  );
+  const standaloneApplications = useMemo(
+    () => applications.filter((application) => !isProductivityApplication(application)),
+    [applications],
+  );
   const workspaceHistory = useMemo(
     () => history.filter((action) => !workspace || action.workspaceId === workspace.id),
     [history, workspace],
@@ -60,16 +78,22 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
   const refresh = useCallback(async () => {
     if (!workspace) {
       setApplications([]);
+      setIntegrations([]);
+      setDesktopEnabled(false);
       setHistory([]);
       return;
     }
     setLoading(true);
     try {
-      const [availableApplications, actions] = await Promise.all([
+      const [availableApplications, deepIntegrations, desktopControlEnabled, actions] = await Promise.all([
         listLaunchableApplications(workspace.id),
+        listDeepIntegrations(workspace.id),
+        getDesktopControlEnabled(workspace.id),
         listLaunchHistory(workspace.id, 60),
       ]);
       setApplications(availableApplications);
+      setIntegrations(deepIntegrations);
+      setDesktopEnabled(desktopControlEnabled);
       setHistory(actions);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -129,6 +153,30 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
       onError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyId(null);
+    }
+  }
+
+  async function toggleIntegration(integration: DeepIntegration) {
+    if (!workspace || !integration.available || integrationBusyId) return;
+    setIntegrationBusyId(integration.id);
+    try {
+      setIntegrations(await setDeepIntegrationEnabled(workspace.id, integration.id, !integration.enabled));
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIntegrationBusyId(null);
+    }
+  }
+
+  async function toggleDesktopControl() {
+    if (!workspace || desktopBusyId) return;
+    setDesktopBusyId("desktop");
+    try {
+      setDesktopEnabled(await setDesktopControlEnabled(workspace.id, !desktopEnabled));
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDesktopBusyId(null);
     }
   }
 
@@ -219,6 +267,43 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
             </div>
           </div>
 
+          <div className="launcher-integration-row" aria-label="AI application integrations">
+            {integrations.map((integration) => (
+              <button
+                key={integration.id}
+                type="button"
+                className={`launcher-integration-name ${integration.enabled ? "enabled" : ""} ${!integration.available ? "unavailable" : ""}`}
+                disabled={!integration.available || integrationBusyId !== null}
+                onClick={() => void toggleIntegration(integration)}
+                title={integration.message ?? integration.name}
+                aria-pressed={integration.enabled}
+              >
+                <i aria-hidden="true" />
+                <span>{integration.name}</span>
+              </button>
+            ))}
+            <button
+              type="button"
+              className={`launcher-integration-name ${desktopEnabled ? "enabled" : ""}`}
+              disabled={desktopBusyId !== null}
+              onClick={() => void toggleDesktopControl()}
+              title={desktopEnabled
+                ? "ChatGPT desktop control enabled for all applications in this project"
+                : "Allow ChatGPT to inspect and control desktop applications for this project"}
+              aria-pressed={desktopEnabled}
+            >
+              <i aria-hidden="true" />
+              <span>Desktop</span>
+            </button>
+          </div>
+
+          <AIWorkspacePanel
+            workspace={workspace}
+            applications={applications}
+            desktopEnabled={desktopEnabled}
+            onError={onError}
+          />
+
           <div className="launcher-apps">
             <div className="launcher-subheading">
               <strong>Allowed applications</strong>
@@ -228,7 +313,28 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
               <div className="command-empty"><p>No supported desktop applications were detected on PATH.</p></div>
             ) : (
               <div className="launcher-app-grid">
-                {applications.map((application) => (
+                {productivityFamilies.map((family) => (
+                  <section className="launcher-app-family" key={family.id} aria-label={family.name}>
+                    <div className="launcher-app-family-heading">
+                      <strong>{family.name}</strong>
+                      <small>{family.description}</small>
+                    </div>
+                    <div className="launcher-app-family-actions">
+                      {family.detectedMembers.map((member) => (
+                        <button
+                          key={member.id}
+                          type="button"
+                          disabled={busyId !== null}
+                          onClick={() => submitApplication(member.application)}
+                          title={member.application.executable}
+                        >
+                          {busyId === member.id ? "Opening…" : member.label}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+                {standaloneApplications.map((application) => (
                   <button
                     key={application.id}
                     className="launcher-app-button"

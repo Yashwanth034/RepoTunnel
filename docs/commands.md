@@ -23,9 +23,19 @@ The sandbox path does not accept arbitrary command strings. It derives bounded p
 
 Deployment, release, publish, development-server, and arbitrary shell presets are not discovered.
 
-## Linux sandbox
+## Native OS sandbox
 
-Command execution requires Bubblewrap. RepoTunnel probes Bubblewrap before enabling commands and refuses execution if the required Linux namespaces are unavailable.
+RepoTunnel refuses AI command execution when the required native sandbox is unavailable. The backend is OS-specific:
+
+- **Linux:** the existing Bubblewrap namespace/mount sandbox remains unchanged.
+- **Windows:** an ephemeral AppContainer profile is attached to a kill-on-close Job Object. The AppContainer SID receives only command-lifetime ACL access to the approved writable/project paths and required read-only tool roots. Cleanup removes those ACEs/profile state after exit; recovery manifests handle abnormal termination without revoking access from a still-running helper.
+- **macOS:** a fail-closed Seatbelt profile is applied with `/usr/bin/sandbox-exec`. This is a compatibility backend because Apple has deprecated that interface; a signed App Sandbox/XPC helper is the long-term backend.
+
+Disposable verification commands deny network access on every supported backend. Live terminal/process commands may use network access. On Windows, AppContainer network isolation still blocks host `localhost` interoperability by default; RepoTunnel does not silently create an administrator-level loopback exemption.
+
+### Linux Bubblewrap details
+
+RepoTunnel probes Bubblewrap before enabling commands and refuses execution if the required Linux namespaces are unavailable.
 
 Each command receives:
 
@@ -62,7 +72,7 @@ MCP exposes command request and history tools, but it intentionally does not exp
 
 ## Live terminal and persistent processes
 
-The separate AI live execution path accepts shell commands against the real approved workspace, but runs them inside RepoTunnel's Bubblewrap filesystem boundary with a cleared/sanitized environment. Project writes and network access persist; the user's general home directory and host filesystem do not. RepoTunnel blocks the AI command if the sandbox is unavailable instead of silently falling back to unrestricted host access. Narrow `gh workflow`/`gh run` operations and explicitly user-authorized normal `git push` use controlled host passthrough so existing GitHub authentication can be used without exposing credential files to the AI shell.
+The separate AI live execution path accepts shell commands against the real approved workspace, but runs them inside RepoTunnel's fail-closed native OS sandbox with a cleared/sanitized environment. Linux uses Bubblewrap, Windows uses AppContainer + Job Object isolation, and macOS uses the Seatbelt compatibility backend described above. Project writes and permitted network access persist while unrelated host files and credential-like environment values remain outside the AI command boundary. RepoTunnel blocks the AI command if the native sandbox is unavailable instead of silently falling back to unrestricted host access. Narrow `gh workflow`/`gh run` operations and explicitly user-authorized normal `git push` use controlled host passthrough so existing GitHub authentication can be used without exposing credential files to the AI shell.
 
 One-shot commands are recorded with bounded output, exit status, duration, and errors. Persistent processes are managed by RepoTunnel, capture stdout/stderr for later reads, expose running/exited/stopped state, and can be stopped or restarted through MCP.
 

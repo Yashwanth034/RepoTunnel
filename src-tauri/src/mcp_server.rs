@@ -11,19 +11,19 @@ use tauri::{AppHandle, Manager};
 use crate::{
     activity,
     app_state::AppState,
-    browser, changes, execution,
+    browser, changes, desktop_control, execution,
     external_access::{self, ExternalFileAction},
-    filesystem, git, launcher,
+    filesystem, git, integrations, launcher,
     models::{
         ActivityKind, ActivityStatus, BrowserScreenshot, CommandPolicy, TeamMessageKind, TeamPhase,
         TeamTaskStatus, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy,
     },
-    monitoring, project_index, repository, secret_guard,
+    monitoring, project_index, project_memory, project_setup, repository, secret_guard,
     storage::load_workspaces,
     team, terminal, workflow,
 };
 
-const SERVER_INSTRUCTIONS: &str = "RepoTunnel provides access only to user-approved local workspaces. If the human explicitly gives you a GitHub repository link or owner/repository shorthand that is not local yet, use clone_repository to clone it into the user's Projects folder and approve that checkout automatically; never clone a repository the human did not explicitly provide. Start with list_workspaces, then call get_workflow_readiness for the chosen workspace before making changes. Use inspect_project and read/search tools to understand the current code before editing. File tools are strictly workspace-relative: never try to browse host files through terminal commands or guessed absolute paths. If a human-supplied external file is needed, request_external_file opens a native RepoTunnel file picker so the user explicitly chooses what may be read once or imported into the workspace. Prefer patch_file for targeted file changes and respect read-only workspaces. RepoTunnel has two command paths: discovered sandbox presets are disposable/offline verification, while run_terminal_command and managed-process tools operate on the real approved workspace with network access inside RepoTunnel's OS filesystem sandbox. AI terminal/process commands do not receive the normal host environment or general home-directory access; credential-like environment variables are rejected and output is redacted. Narrow GitHub Actions commands may use the authenticated host gh CLI without exposing its credential files. Use persistent processes for dev servers, then read_process_output or get_monitoring_snapshot to inspect logs and ports. Use launch_target for structured desktop launching. For browser testing, discover an automation browser, start it with browser_action, then navigate/click/type/reload with browser_action and verify with browser_inspect_page, browser_take_screenshot, and get_browser_diagnostics. Project monitoring is read-only observation and can be enabled with set_workspace_monitoring; get_monitoring_snapshot combines processes, terminal output tails, listeners, browser state/errors, and recent file changes. Team Mode lets two MCP-connected AIs coordinate on one project through one persistent A/B team, shared discussion, distinct task ownership, enforced cross-review, dependencies, explicit handoffs, and task-scoped file/folder claims. The A/B identities join once and remain attached until the user explicitly ends the Team in the desktop app. If a team session is active, call team_status with the assigned agent ID and join first. RepoTunnel enforces a coordination barrier: BOTH AIs must be joined before planning begins; each posts one concise plan, each creates one distinct initial implementation task, and both confirm the split before implementation unlocks. Both AIs then code different scopes in parallel, cross-review each other, discuss/fix review findings through the task owner, and verify the result. Never race ahead alone or duplicate the other engineer's implementation. Claim only one active implementation task at a time with its edit paths, and use handoff_task when primary ownership must move. Reviewers inspect/test and send feedback rather than silently editing the owner's task. Normal MCP file mutations require the caller to own an in-progress task and hold a matching task-scoped path claim. Interactive managed-browser mutations use a Team resource lease: claim `@browser` with team_action lock_paths before clicking/typing/navigating, and release it when done so the other engineer cannot collide in the same shared tab. When the human gives either AI new product work after a request is finished, the receiving AI must post a decision message beginning exactly `USER REQUEST:` followed by the human's request; RepoTunnel reopens the same Team for a new work cycle without a new session or kickoff. team_action complete completes only the current work request after cross-review and verification; it does not end the Team. Team pause/end remain user-controlled from the desktop app. In AI Auto, file changes, live terminal commands, managed processes, launcher actions, and browser mutations execute without local approval. In AI Review, mutating actions may return queued=true and wait for local Accept/Reject; MCP cannot approve pending review actions. Before claiming a fix is complete, run appropriate builds/tests and inspect their actual results, including browser diagnostics when UI behavior matters. For Git work, inspect git_status and git_diff before consequential Git actions. Use RepoTunnel Git stage/commit tools instead of raw git add/git commit; the internal secret guard blocks credential-like content before it can be staged or committed. AI Auto is autonomous inside the approved project, but it is not standing permission to push: call a git push terminal command with user_requested_push=true only when the human explicitly asked to push the current work. Never claim an edit, command, process, launch, browser action, test, stage, or commit completed unless the returned state confirms it. If any tool reports that AI access is paused, stop immediately; Pause AI is the user's emergency master stop.";
+const SERVER_INSTRUCTIONS: &str = "RepoTunnel provides access only to user-approved local workspaces. If the human explicitly asks to create a new project from scratch, use create_project; if the human explicitly gives you a GitHub repository link or owner/repository shorthand that is not local yet, use clone_repository to clone it into the user's Projects folder and approve that checkout automatically. Never create or clone a project the human did not explicitly request. Start with list_workspaces, then read get_project_memory and get_project_setup for the chosen workspace before get_workflow_readiness so you can resume project context and detect setup/dev commands without making the human explain them. When get_project_setup reports setupNeeded=true, use its exact setupCommand through RepoTunnel terminal execution when policy allows instead of asking the human to install dependencies manually. Use inspect_project and read/search tools to understand the current code before editing. File tools are strictly workspace-relative: never try to browse host files through terminal commands or guessed absolute paths. If a human-supplied external file is needed, request_external_file opens a native RepoTunnel file picker so the user explicitly chooses what may be read once or imported into the workspace. Prefer patch_file for targeted file changes and respect read-only workspaces. RepoTunnel has two command paths: discovered sandbox presets are disposable/offline verification, while run_terminal_command and managed-process tools operate on the real approved workspace with network access inside RepoTunnel's OS filesystem sandbox. AI terminal/process commands do not receive the normal host environment or general home-directory access; credential-like environment variables are rejected and output is redacted. Narrow GitHub Actions commands may use the authenticated host gh CLI without exposing its credential files. Use start_process for dev servers/watchers and for any build, test, install, conversion, or verification likely to run longer than about 60 seconds; it returns immediately while the job continues independently of the MCP request. Poll long work with read_process_output/list_processes/get_monitoring_snapshot instead of holding one tool call open. For long multi-step work, keep project memory resumable: after each meaningful verified milestone and before launching a long managed process, update_project_memory with a concise checkpoint in next_steps describing what is complete, what is currently running, and the exact next action. Never store secrets or raw logs there. After any connector reconnect, ChatGPT turn interruption, app restart, or transport interruption, do not restart work from the beginning: call get_resume_snapshot for the active workspace first, then continue from its persisted memory, running-process/output, recent terminal/change/activity, monitoring, and Team state without repeating already-applied mutations. Use launch_target for structured desktop launching. For native desktop-app troubleshooting, prefer AI Workspace when the human wants ChatGPT to work without interrupting their real desktop: use ai_workspace_session action=start with an allowed application, call ai_workspace_inspect before pointer work to get exact isolated window IDs and bounds, use ai_workspace_take_screenshot for visual grounding, and send input with ai_workspace_action. When several consecutive actions are already grounded, prefer ai_workspace_sequence so RepoTunnel can execute them in one bounded request; use its wait steps for short title/window transitions instead of inserting unnecessary screenshots between every action. Keep ai_workspace_action as the reliable single-step fallback. Prefer window_id plus window-relative coordinates over whole-display coordinates; use screenshots to verify meaningful state changes rather than re-guessing geometry after every action. AI Workspace runs one GUI app at a time on a separate virtual display and requires the same locally enabled project-level Desktop permission. Use normal Desktop Control only when interaction with an already-running real desktop app is specifically needed: call list_desktop_applications, inspect_desktop_app before semantic actions, prefer element IDs over coordinate fallback, and use desktop_take_screenshot when visual grounding is necessary. RepoTunnel itself remains excluded and sensitive credential/password typing is blocked. For browser testing, discover an automation browser, start it with browser_action, then navigate/click/type/reload with browser_action and verify with browser_inspect_page, browser_take_screenshot, and get_browser_diagnostics. If the human refers to a visually selected element as “this”, “this button”, “change this”, or similar, call get_visual_selection first and use its selector/text/HTML as the grounded UI target. Project monitoring is read-only observation and can be enabled with set_workspace_monitoring; get_monitoring_snapshot combines processes, terminal output tails, listeners, browser state/errors, and recent file changes. Team Mode lets two MCP-connected AIs coordinate on one project through one persistent A/B team, shared discussion, distinct task ownership, enforced cross-review, dependencies, explicit handoffs, and task-scoped file/folder claims. The A/B identities join once and remain attached until the user explicitly ends the Team in the desktop app. If a team session is active, call team_status with the assigned agent ID and join first. RepoTunnel enforces a coordination barrier: BOTH AIs must be joined before planning begins; each posts one concise plan, each creates one distinct initial implementation task, and both confirm the split before implementation unlocks. Both AIs then code different scopes in parallel, cross-review each other, discuss/fix review findings through the task owner, and verify the result. Never race ahead alone or duplicate the other engineer's implementation. Claim only one active implementation task at a time with its edit paths, and use handoff_task when primary ownership must move. Reviewers inspect/test and send feedback rather than silently editing the owner's task. Normal MCP file mutations require the caller to own an in-progress task and hold a matching task-scoped path claim. Interactive managed-browser mutations use a Team resource lease: claim `@browser` with team_action lock_paths before clicking/typing/navigating, and release it when done so the other engineer cannot collide in the same shared tab. When the human gives either AI new product work after a request is finished, the receiving AI must post a decision message beginning exactly `USER REQUEST:` followed by the human's request; RepoTunnel reopens the same Team for a new work cycle without a new session or kickoff. team_action complete completes only the current work request after cross-review and verification; it does not end the Team. Team pause/end remain user-controlled from the desktop app. In AI Auto, file changes, live terminal commands, managed processes, launcher actions, and browser mutations execute without local approval. In AI Review, mutating actions may return queued=true and wait for local Accept/Reject; MCP cannot approve pending review actions. Before claiming a fix is complete, run appropriate builds/tests and inspect their actual results, including browser diagnostics when UI behavior matters. For Git work, inspect git_status and git_diff before consequential Git actions. Use RepoTunnel Git stage/commit tools instead of raw git add/git commit; the internal secret guard blocks credential-like content before it can be staged or committed. AI Auto is autonomous inside the approved project, but it is not standing permission to push: call a git push terminal command with user_requested_push=true only when the human explicitly asked to push the current work. Never claim an edit, command, process, launch, browser action, test, stage, or commit completed unless the returned state confirms it. For any active multi-step request, do not voluntarily stop midway after partial work: keep using the available RepoTunnel tools until the requested work is completed, blocked on a real human decision, or you have produced the final requested report. In Team Mode, an engineer that finishes its own scope must remain attached, long-poll team_status while waiting when useful, respond to review/verification work, and wait for the teammate rather than treating its turn as Team completion. If any tool reports that AI access is paused, stop immediately; Pause AI is the user's emergency master stop.";
 
 #[derive(Clone)]
 pub(crate) struct RepoTunnelMcp {
@@ -44,6 +44,28 @@ struct WorkspaceSummary {
 struct CloneRepositoryParams {
     /// GitHub repository explicitly provided by the human, as owner/repository or https://github.com/owner/repository.
     repository: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreateProjectParams {
+    /// New local project name explicitly requested by the human. RepoTunnel creates it inside ~/Projects.
+    name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ProjectMemoryUpdateParams {
+    /// Approved workspace whose persistent project memory should be updated.
+    workspace_id: String,
+    /// Concise current project description/context.
+    summary: String,
+    /// Current user/product goals worth carrying into later AI sessions.
+    goals: Vec<String>,
+    /// Important architecture/product decisions already made.
+    decisions: Vec<String>,
+    /// Stable user preferences or constraints for this project.
+    preferences: Vec<String>,
+    /// Useful unfinished work or next steps.
+    next_steps: Vec<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -75,7 +97,7 @@ struct WorkspaceIdParams {
 struct ProjectSnapshotParams {
     /// ID returned by list_workspaces for the approved project.
     workspace_id: String,
-    /// Maximum filtered tree entries to return. Values are clamped to 100..4000.
+    /// Maximum filtered tree entries to return. Values are clamped to 100..25000.
     entry_limit: Option<usize>,
 }
 
@@ -183,7 +205,7 @@ struct TerminalCommandParams {
     command: String,
     /// Optional workspace-relative working directory. Omit or use an empty string for the project root.
     cwd: Option<String>,
-    /// Optional timeout in seconds for this one-shot command. RepoTunnel clamps it to 1..3600.
+    /// Optional timeout in seconds for this one-shot command. RepoTunnel clamps it to 1..43200 (12 hours); persistent processes use start_process and do not inherit this one-shot timeout.
     timeout_seconds: Option<u64>,
     /// Optional environment-variable overrides applied only to this command. Credential-like variable names are rejected for AI commands.
     env: Option<BTreeMap<String, String>>,
@@ -257,6 +279,159 @@ struct LaunchTargetParams {
     target: String,
     /// Optional application ID returned by list_launchable_applications when opening a URL or workspace path with a specific app. Omit to use the desktop default.
     application_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct IntegrationActionParams {
+    /// ID returned by list_workspaces for the approved project.
+    workspace_id: String,
+    /// One of: android-studio, unity, blender, godot, docker.
+    integration_id: String,
+    /// Exact allowlisted action returned by list_deep_integrations for this integration.
+    action: String,
+    /// Optional workspace-relative target. Android Studio accepts a project folder; Blender run_script/render accepts the required file.
+    target: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AiWorkspaceSessionParams {
+    /// ID returned by list_workspaces for the approved project.
+    workspace_id: String,
+    /// One of status, start, or stop.
+    action: String,
+    /// Application ID returned by list_launchable_applications. Required only for action=start.
+    application_id: Option<String>,
+    /// Optional workspace-relative project file or folder opened inside the isolated app session. Productivity files can be opened directly in a detected Word/Excel/PowerPoint, Writer/Calc/Impress, or Pages/Numbers/Keynote app.
+    target: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AiWorkspaceFrameParams {
+    /// ID returned by list_workspaces for the approved project.
+    workspace_id: String,
+    /// Maximum returned image width. RepoTunnel clamps this to the virtual screen width.
+    max_width: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AiWorkspaceInspectParams {
+    /// ID returned by list_workspaces for the approved project.
+    workspace_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AiWorkspaceActionParams {
+    /// ID returned by list_workspaces for the approved project.
+    workspace_id: String,
+    /// One of activate, click, key, type, or scroll.
+    action: String,
+    /// Optional AI Workspace window ID returned by ai_workspace_inspect. When supplied, click/scroll coordinates are relative to that exact isolated window.
+    window_id: Option<String>,
+    /// Horizontal position from 0..1 for click/scroll inside the isolated virtual display or selected window.
+    x_ratio: Option<f64>,
+    /// Vertical position from 0..1 for click/scroll inside the isolated virtual display.
+    y_ratio: Option<f64>,
+    /// Click count 1..3 for action=click.
+    click_count: Option<u8>,
+    /// Safe shortcut for action=key, such as Ctrl+S, Enter, Escape, or F5.
+    shortcut: Option<String>,
+    /// Text for action=type. Credential/authentication windows are blocked.
+    text: Option<String>,
+    /// Horizontal scroll delta.
+    delta_x: Option<i32>,
+    /// Vertical scroll delta.
+    delta_y: Option<i32>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct AiWorkspaceSequenceStep {
+    /// One of activate, click, key, type, scroll, or wait.
+    operation: String,
+    /// Optional per-step window override. Omit to inherit the sequence window_id.
+    window_id: Option<String>,
+    /// Horizontal position from 0..1 for click/scroll.
+    x_ratio: Option<f64>,
+    /// Vertical position from 0..1 for click/scroll.
+    y_ratio: Option<f64>,
+    /// Click count 1..3 for click.
+    count: Option<u8>,
+    /// Safe shortcut for key.
+    shortcut: Option<String>,
+    /// Text for type. Text is never echoed in completed sequence results.
+    text: Option<String>,
+    /// Horizontal scroll delta.
+    delta_x: Option<i32>,
+    /// Vertical scroll delta.
+    delta_y: Option<i32>,
+    /// Optional bounded delay for wait, clamped to 0..2000 ms.
+    wait_ms: Option<u64>,
+    /// Optional wait-condition timeout, clamped to 0..5000 ms.
+    timeout_ms: Option<u64>,
+    /// Wait until the active isolated window title contains this text.
+    title_contains: Option<String>,
+    /// Wait until at least this many isolated windows exist.
+    window_count_at_least: Option<usize>,
+    /// Wait until no more than this many isolated windows exist.
+    window_count_at_most: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct AiWorkspaceSequenceParams {
+    /// ID returned by list_workspaces for the approved project.
+    workspace_id: String,
+    /// Optional default isolated window ID inherited by steps that omit windowId.
+    window_id: Option<String>,
+    /// Ordered fast-path actions. RepoTunnel accepts 1..64 bounded steps per request.
+    steps: Vec<AiWorkspaceSequenceStep>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DesktopInspectParams {
+    /// Approved project whose local desktop permission grants apply.
+    workspace_id: String,
+    /// Running desktop application ID returned by list_desktop_applications.
+    application_id: String,
+    /// Maximum semantic UI elements to return. RepoTunnel clamps this to 20..800.
+    limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DesktopActionParams {
+    /// Approved project whose local desktop permission grants apply.
+    workspace_id: String,
+    /// Enabled application ID returned by list_desktop_applications.
+    application_id: String,
+    /// One of activate, click, type, key, or scroll.
+    action: String,
+    /// Semantic element ID returned by inspect_desktop_app. Required for type; preferred for click.
+    element_id: Option<String>,
+    /// Optional app-owned window ID returned by inspect_desktop_app.
+    window_id: Option<String>,
+    /// Text for action=type. Password/credential fields are blocked by RepoTunnel.
+    text: Option<String>,
+    /// Replace existing field contents for action=type. Defaults to false.
+    clear_first: Option<bool>,
+    /// Safe keyboard shortcut for action=key, such as Ctrl+S, Escape, Enter, or F5.
+    shortcut: Option<String>,
+    /// Window-relative horizontal ratio 0..1 for screenshot-grounded fallback click/scroll.
+    x_ratio: Option<f64>,
+    /// Window-relative vertical ratio 0..1 for screenshot-grounded fallback click/scroll.
+    y_ratio: Option<f64>,
+    /// Horizontal wheel delta for action=scroll.
+    delta_x: Option<i32>,
+    /// Vertical wheel delta for action=scroll.
+    delta_y: Option<i32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct DesktopScreenshotParams {
+    /// Approved project whose local desktop permission grants apply.
+    workspace_id: String,
+    /// Enabled application ID returned by list_desktop_applications.
+    application_id: String,
+    /// Optional app-owned window ID; omit to capture the first current window.
+    window_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -723,6 +898,118 @@ impl RepoTunnelMcp {
 #[tool_router]
 impl RepoTunnelMcp {
     #[tool(
+        description = "Create a new empty local project only when the human explicitly asks to create a project from scratch. RepoTunnel creates a new folder inside ~/Projects, refuses to overwrite an existing folder, and immediately registers it as an approved workspace so normal file tools can build the project from chat."
+    )]
+    async fn create_project(
+        &self,
+        Parameters(params): Parameters<CreateProjectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            ensure_ai_access(&app)?;
+            repository::create_and_register(&app, &params.name)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Detect the approved project's framework, package manager, dependency readiness, safe setup command when preparation is needed, and likely dev command/URL. Use this instead of asking the human which package manager or dev command a project uses.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_project_setup(
+        &self,
+        Parameters(params): Parameters<WorkspaceIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            ensure_ai_access(&app)?;
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            project_setup::detect(&workspace)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read RepoTunnel's persistent project memory for an approved project. It contains concise project context, goals, important decisions, user preferences/constraints, and next steps stored outside the repository so a later AI session can resume without rediscovering everything.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_project_memory(
+        &self,
+        Parameters(params): Parameters<WorkspaceIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            ensure_ai_access(&app)?;
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            project_memory::get(&app, &workspace)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Get one bounded continuation snapshot for an approved project after a ChatGPT turn limit, connector reconnect, app restart, or other interruption. It combines persistent project memory, detected setup, running-process/output state, recent terminal/browser/file observations, recent safe-change history, recent activity groups, and the latest Team Mode snapshot so the AI can resume without repeating already-applied work.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_resume_snapshot(
+        &self,
+        Parameters(params): Parameters<WorkspaceIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let memory = project_memory::get(&app, &workspace)?;
+            let setup = project_setup::detect(&workspace)?;
+            let mut observation = monitoring::snapshot(&app, &workspace)?;
+            observation.processes.truncate(20);
+            observation.terminal.truncate(12);
+            observation.ports.truncate(50);
+            observation.browser.tabs.truncate(20);
+            observation.browser.console_entries.truncate(20);
+            observation.browser.network_failures.truncate(20);
+            observation.file_events.truncate(20);
+            let recent_changes = changes::list_changes(&app, Some(&workspace.id), 20)?;
+            let mut recent_activity = activity::timeline(&app, Some(&workspace.id))?;
+            recent_activity.groups.truncate(12);
+            let team = team::latest_snapshot_for_workspace(&app, &workspace.id, None)?;
+            Ok(serde_json::json!({
+                "workspaceId": workspace.id,
+                "workspaceName": workspace.name,
+                "memory": memory,
+                "setup": setup,
+                "observation": observation,
+                "recentChanges": recent_changes,
+                "recentActivity": recent_activity.groups,
+                "team": team,
+            }))
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Update RepoTunnel's persistent project memory for the approved project after meaningful decisions/progress. Keep it concise and factual; do not store secrets, credentials, raw logs, or temporary chatter. This memory lives in RepoTunnel app data, not in the user's repository."
+    )]
+    async fn update_project_memory(
+        &self,
+        Parameters(params): Parameters<ProjectMemoryUpdateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            ensure_ai_access(&app)?;
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            project_memory::update(
+                &app,
+                &workspace,
+                params.summary,
+                params.goals,
+                params.decisions,
+                params.preferences,
+                params.next_steps,
+            )
+        })
+        .await
+    }
+
+    #[tool(
         description = "Clone a GitHub repository explicitly supplied by the human and register the checkout as an approved RepoTunnel workspace. Accepts owner/repository or an HTTPS github.com repository URL. Clones into ~/Projects using the machine's existing Git/GitHub authentication, never stores credentials, never overwrites an existing unrelated folder, and works for both normal single-AI use and Team Mode bootstrap."
     )]
     async fn clone_repository(
@@ -987,7 +1274,7 @@ impl RepoTunnelMcp {
     }
 
     #[tool(
-        description = "Create a new UTF-8 text file. In review mode this queues a diff for local approval; in automatic mode it applies immediately with history and an undo point. Check the returned applied flag."
+        description = "Create a new UTF-8 text file. In review mode this queues a diff for local approval; in automatic mode it applies immediately with history and an undo point. Check applied and queued in the result: Review mode returns applied=false, queued=true until the user acts locally."
     )]
     async fn create_file(
         &self,
@@ -1002,7 +1289,7 @@ impl RepoTunnelMcp {
             team::assert_paths_available(
                 &app,
                 &workspace.id,
-                &[params.relative_path.clone()],
+                std::slice::from_ref(&params.relative_path),
                 client_key.as_deref(),
             )?;
             let outcome = changes::create_file(
@@ -1024,7 +1311,7 @@ impl RepoTunnelMcp {
     }
 
     #[tool(
-        description = "Replace the complete contents of an existing UTF-8 text file. Prefer patch_file for targeted edits. Review-mode writes are queued locally; automatic-mode writes are backed up and applied immediately. Check applied in the result."
+        description = "Replace the complete contents of an existing UTF-8 text file. Prefer patch_file for targeted edits. Review-mode writes are queued locally; automatic-mode writes are backed up and applied immediately. Check applied and queued in the result: Review mode returns applied=false, queued=true until the user acts locally."
     )]
     async fn write_file(
         &self,
@@ -1039,7 +1326,7 @@ impl RepoTunnelMcp {
             team::assert_paths_available(
                 &app,
                 &workspace.id,
-                &[params.relative_path.clone()],
+                std::slice::from_ref(&params.relative_path),
                 client_key.as_deref(),
             )?;
             let outcome = changes::write_file(
@@ -1076,7 +1363,7 @@ impl RepoTunnelMcp {
             team::assert_paths_available(
                 &app,
                 &workspace.id,
-                &[params.relative_path.clone()],
+                std::slice::from_ref(&params.relative_path),
                 client_key.as_deref(),
             )?;
             let outcome = changes::patch_file(
@@ -1114,7 +1401,7 @@ impl RepoTunnelMcp {
             team::assert_paths_available(
                 &app,
                 &workspace.id,
-                &[params.relative_path.clone()],
+                std::slice::from_ref(&params.relative_path),
                 client_key.as_deref(),
             )?;
             let outcome = changes::create_directory(
@@ -1231,7 +1518,7 @@ impl RepoTunnelMcp {
             team::assert_paths_available(
                 &app,
                 &workspace.id,
-                &[params.relative_path.clone()],
+                std::slice::from_ref(&params.relative_path),
                 client_key.as_deref(),
             )?;
             let outcome = changes::delete_entry(
@@ -1281,7 +1568,7 @@ impl RepoTunnelMcp {
     }
 
     #[tool(
-        description = "Report whether RepoTunnel's Linux command sandbox is available. Command execution requires Bubblewrap and is refused when the sandbox is unavailable.",
+        description = "Report whether RepoTunnel's native OS command sandbox is available. AI command execution is refused when the required platform sandbox is unavailable.",
         annotations(read_only_hint = true)
     )]
     async fn get_execution_status(&self) -> Result<CallToolResult, McpError> {
@@ -1310,7 +1597,7 @@ impl RepoTunnelMcp {
     }
 
     #[tool(
-        description = "Request execution of one exact command preset returned by list_command_presets. Commands run with network disabled in a disposable Bubblewrap copy of the project, so command side effects are discarded. Depending on the project's command policy, the request either queues for local approval, runs automatically, or is blocked."
+        description = "Request execution of one exact command preset returned by list_command_presets. Commands run with network disabled in a disposable project copy inside RepoTunnel's native OS sandbox, so command side effects are discarded. Depending on the project's command policy, the request either queues for local approval, runs automatically, or is blocked."
     )]
     async fn run_command(
         &self,
@@ -1354,7 +1641,7 @@ impl RepoTunnelMcp {
     }
 
     #[tool(
-        description = "Run a one-shot shell command with write access to the approved workspace and network access, but without general access to the user's home directory or host filesystem. RepoTunnel uses an OS sandbox and a sanitized environment for AI commands, redacts credential-like output, and refuses to fall back to unrestricted host access if the sandbox is unavailable. Safe GitHub Actions inspection commands are narrowly passed through to the authenticated gh CLI. Git push is allowed only when user_requested_push=true AND the human explicitly requested the current work be pushed; AI Auto removes approval popups but never grants standing push permission. In AI Review the command may queue for local Accept/Reject. Use start_process for dev servers/watchers."
+        description = "Run a short one-shot shell command with write access to the approved workspace and network access, but without general access to the user's home directory or host filesystem. RepoTunnel uses an OS sandbox and a sanitized environment for AI commands, redacts credential-like output, and refuses to fall back to unrestricted host access if the sandbox is unavailable. Safe GitHub Actions inspection commands are narrowly passed through to the authenticated gh CLI. Git push is allowed only when user_requested_push=true AND the human explicitly requested the current work be pushed; AI Auto removes approval popups but never grants standing push permission. In AI Review the command may queue for local Accept/Reject. For dev servers/watchers and for any build/test/install/verification likely to exceed about 60 seconds, use start_process instead so the MCP request returns immediately; then poll with read_process_output/list_processes. This prevents client/request timeouts from interrupting long work."
     )]
     async fn run_terminal_command(
         &self,
@@ -1606,6 +1893,442 @@ impl RepoTunnelMcp {
     }
 
     #[tool(
+        description = "List the five optional deep local integrations (Android Studio, Unity, Blender, Godot, Docker) for an approved project, including whether each app is detected, whether the human enabled ChatGPT access locally, and the exact allowlisted actions available. This is read-only; MCP cannot enable its own integrations.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_deep_integrations(
+        &self,
+        Parameters(params): Parameters<WorkspaceIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            integrations::list(&app, &workspace.id)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Run one bounded action through a deep local integration that the human explicitly enabled in RepoTunnel. Call list_deep_integrations first and use only an action it returns. RepoTunnel refuses disabled/unavailable integrations, keeps targets inside the approved project, and routes commands through the project's command policy. Editing project files still uses the normal RepoTunnel file tools."
+    )]
+    async fn integration_action(
+        &self,
+        Parameters(params): Parameters<IntegrationActionParams>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        let trace_group_id = request_edit_group_id(&parts);
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let result = integrations::run_action(
+                &app,
+                &workspace,
+                &params.integration_id,
+                &params.action,
+                params.target.as_deref(),
+            )?;
+            if let Some(command) = result.command.as_ref() {
+                let _ = activity::record_terminal_outcome(
+                    &app,
+                    &workspace,
+                    trace_group_id.as_deref(),
+                    command,
+                );
+            }
+            if let Some(launch) = result.launch.as_ref() {
+                let _ = activity::record_launch_record(
+                    &app,
+                    &workspace,
+                    trace_group_id.as_deref(),
+                    &launch.launch,
+                );
+            }
+            Ok(result)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Manage RepoTunnel AI Workspace, an isolated virtual desktop that lets ChatGPT operate one permitted GUI application without stealing the human's real desktop focus. action=status reads state; action=start launches an allowed application into the isolated display and optionally opens a workspace-relative project folder; action=stop terminates the app, window manager, and nested display together. The human must enable the project-level Desktop permission first."
+    )]
+    async fn ai_workspace_session(
+        &self,
+        Parameters(params): Parameters<AiWorkspaceSessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let state = app.state::<AppState>();
+            match params.action.as_str() {
+                "status" => state.ai_workspace.status(&app, &workspace.id),
+                "start" => {
+                    let application_id = params.application_id.as_deref().ok_or_else(|| {
+                        "AI Workspace action=start requires application_id from list_launchable_applications.".to_string()
+                    })?;
+                    state
+                        .ai_workspace
+                        .start(&app, &workspace, application_id, params.target.as_deref())
+                }
+                "stop" => state.ai_workspace.stop(&app, &workspace.id),
+                _ => Err("AI Workspace session action must be status, start, or stop.".to_string()),
+            }
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Inspect the isolated AI Workspace window list and exact bounds. Use the returned window IDs before visual pointer work so click/scroll coordinates can be relative to the intended dialog or application window instead of the whole virtual desktop.",
+        annotations(read_only_hint = true)
+    )]
+    async fn ai_workspace_inspect(
+        &self,
+        Parameters(params): Parameters<AiWorkspaceInspectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let state = app.state::<AppState>();
+            state.ai_workspace.inspect(&app, &workspace.id)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Send input only to the isolated AI Workspace display. Supported actions: activate, click, key, type, scroll. Prefer a window_id from ai_workspace_inspect for click/scroll so normalized coordinates are relative to that exact isolated window; omit it only for full-screen fallback. Credential/authentication-window typing remains blocked."
+    )]
+    async fn ai_workspace_action(
+        &self,
+        Parameters(params): Parameters<AiWorkspaceActionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let state = app.state::<AppState>();
+            state.ai_workspace.action(
+                &app,
+                &workspace.id,
+                &params.action,
+                params.window_id.as_deref(),
+                params.x_ratio,
+                params.y_ratio,
+                params.click_count,
+                params.shortcut.as_deref(),
+                params.text.as_deref(),
+                params.delta_x,
+                params.delta_y,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Run 1..64 already-grounded AI Workspace actions in one bounded fast-path request. Supports activate, click, key, type, scroll, and wait steps; wait can use a short delay, active-title condition, or isolated-window-count condition. Prefer this when several consecutive actions are already known because it avoids repeated MCP/helper startup round trips. The existing ai_workspace_action remains the reliable single-step fallback, and credential/authentication typing protections remain active."
+    )]
+    async fn ai_workspace_sequence(
+        &self,
+        Parameters(params): Parameters<AiWorkspaceSequenceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let steps = params
+                .steps
+                .into_iter()
+                .map(|step| {
+                    serde_json::to_value(step).map_err(|error| {
+                        format!("Could not encode AI Workspace sequence step: {error}")
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let state = app.state::<AppState>();
+            state
+                .ai_workspace
+                .sequence(&app, &workspace.id, params.window_id.as_deref(), &steps)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Capture the current isolated AI Workspace screen for visual grounding. This screenshot comes from RepoTunnel's nested virtual display, not the human's real desktop, so the human can keep using other applications while ChatGPT works.",
+        annotations(read_only_hint = true)
+    )]
+    async fn ai_workspace_take_screenshot(
+        &self,
+        Parameters(params): Parameters<AiWorkspaceFrameParams>,
+    ) -> Result<CallToolResult, McpError> {
+        const MAX_MCP_SCREENSHOT_BYTES: u64 = 8 * 1024 * 1024;
+        let app = self.app.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let state = app.state::<AppState>();
+            state.ai_workspace.frame(
+                &app,
+                &workspace.id,
+                None,
+                params.max_width.unwrap_or(1440),
+                true,
+            )
+        })
+        .await;
+        Ok(match result {
+            Ok(Ok(frame)) if frame.size_bytes <= MAX_MCP_SCREENSHOT_BYTES && !frame.data_base64.is_empty() => {
+                let metadata = serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "sessionId": frame.session_id,
+                        "mimeType": frame.mime_type.clone(),
+                        "sizeBytes": frame.size_bytes,
+                        "width": frame.width,
+                        "height": frame.height,
+                        "sourceWidth": frame.source_width,
+                        "sourceHeight": frame.source_height,
+                        "activeTitle": frame.active_title,
+                    }
+                });
+                CallToolResult::success(vec![
+                    ContentBlock::text(serde_json::to_string(&metadata).unwrap_or_else(|_| "{\"ok\":true}".to_string())),
+                    ContentBlock::image(frame.data_base64, frame.mime_type),
+                ])
+            }
+            Ok(Ok(frame)) => error_result(format!(
+                "The AI Workspace screenshot is {} bytes or empty, so RepoTunnel refused to return it through MCP.",
+                frame.size_bytes
+            )),
+            Ok(Err(error)) => error_result(error),
+            Err(error) => error_result(format!("AI Workspace screenshot task failed: {error}")),
+        })
+    }
+
+    #[tool(
+        description = "List currently running desktop applications available to project-scoped Desktop Control. Shows whether the single local Desktop permission is enabled for this project and whether each app exposes a Linux accessibility tree. RepoTunnel itself is never included and MCP cannot enable the Desktop permission.",
+        annotations(read_only_hint = true)
+    )]
+    async fn list_desktop_applications(
+        &self,
+        Parameters(params): Parameters<WorkspaceIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            let mut applications = desktop_control::list(&app, &workspace.id)?;
+            let state = app.state::<AppState>();
+            let status = state.ai_workspace.status(&app, &workspace.id)?;
+            if status.running {
+                let enabled = desktop_control::is_enabled(&app, &workspace.id)?;
+                let window_count = state
+                    .ai_workspace
+                    .inspect(&app, &workspace.id)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("windows")
+                            .and_then(|items| items.as_array())
+                            .map(Vec::len)
+                    })
+                    .unwrap_or(0);
+                applications.push(desktop_control::DesktopControlApplication {
+                    id: "ai-workspace".to_string(),
+                    name: format!(
+                        "AI Workspace · {}",
+                        status
+                            .application_name
+                            .unwrap_or_else(|| "Application".to_string())
+                    ),
+                    running: true,
+                    accessibility: false,
+                    window_count,
+                    enabled,
+                    message: if enabled {
+                        "Isolated AI Workspace control enabled for this project".to_string()
+                    } else {
+                        "Enable Desktop locally to control the isolated AI Workspace".to_string()
+                    },
+                });
+                applications.sort_by(|left, right| {
+                    left.name
+                        .to_ascii_lowercase()
+                        .cmp(&right.name.to_ascii_lowercase())
+                });
+            }
+            Ok(applications)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Inspect the semantic accessibility UI of one running desktop application while the human-enabled project-level Desktop permission is on. Returns stable short-lived element IDs, roles, labels, actions, states and bounds. Sensitive password/credential values are never returned. Inspect again after the UI changes before acting.",
+        annotations(read_only_hint = true)
+    )]
+    async fn inspect_desktop_app(
+        &self,
+        Parameters(params): Parameters<DesktopInspectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            if params.application_id == "ai-workspace" {
+                if !desktop_control::is_enabled(&app, &workspace.id)? {
+                    return Err("Desktop permission is off for this project.".to_string());
+                }
+                let state = app.state::<AppState>();
+                let mut value = state.ai_workspace.inspect(&app, &workspace.id)?;
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "applicationId".to_string(),
+                        serde_json::json!("ai-workspace"),
+                    );
+                    object.insert("name".to_string(), serde_json::json!("AI Workspace"));
+                    object.insert("elements".to_string(), serde_json::json!([]));
+                    object.insert("truncated".to_string(), serde_json::json!(false));
+                }
+                return Ok(value);
+            }
+            desktop_control::inspect(
+                &app,
+                &workspace.id,
+                &params.application_id,
+                params.limit.unwrap_or(300),
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Perform one bounded UI action inside a desktop application while the human-enabled project-level Desktop permission is on. Supported actions: activate, click, type, key, scroll. Use activate to raise/focus the permitted app window before pointer or keyboard work. Prefer semantic element IDs from inspect_desktop_app. Blind typing is blocked; credential/password fields are blocked; coordinate fallback is window-relative and cannot leave the target app window; RepoTunnel can never control its own UI."
+    )]
+    async fn desktop_app_action(
+        &self,
+        Parameters(params): Parameters<DesktopActionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            if params.application_id == "ai-workspace" {
+                if !desktop_control::is_enabled(&app, &workspace.id)? {
+                    return Err("Desktop permission is off for this project.".to_string());
+                }
+                if params.element_id.is_some() {
+                    return Err("AI Workspace currently uses isolated-window coordinates rather than semantic element IDs.".to_string());
+                }
+                let state = app.state::<AppState>();
+                if params.action == "type" && params.clear_first.unwrap_or(false) {
+                    state.ai_workspace.action(
+                        &app,
+                        &workspace.id,
+                        "key",
+                        params.window_id.as_deref(),
+                        None,
+                        None,
+                        None,
+                        Some("Ctrl+A"),
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
+                return state.ai_workspace.action(
+                    &app,
+                    &workspace.id,
+                    &params.action,
+                    params.window_id.as_deref(),
+                    params.x_ratio,
+                    params.y_ratio,
+                    Some(1),
+                    params.shortcut.as_deref(),
+                    params.text.as_deref(),
+                    params.delta_x,
+                    params.delta_y,
+                );
+            }
+            desktop_control::action(
+                &app,
+                &workspace.id,
+                &params.application_id,
+                &params.action,
+                params.element_id.as_deref(),
+                params.window_id.as_deref(),
+                params.text.as_deref(),
+                params.clear_first.unwrap_or(false),
+                params.shortcut.as_deref(),
+                params.x_ratio,
+                params.y_ratio,
+                params.delta_x,
+                params.delta_y,
+            )
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Capture one current window belonging to a desktop application while the human-enabled project-level Desktop permission is on and return it as PNG image content for visual grounding. The capture is limited to that target application's window, not the whole desktop.",
+        annotations(read_only_hint = true)
+    )]
+    async fn desktop_take_screenshot(
+        &self,
+        Parameters(params): Parameters<DesktopScreenshotParams>,
+    ) -> Result<CallToolResult, McpError> {
+        const MAX_MCP_SCREENSHOT_BYTES: u64 = 8 * 1024 * 1024;
+        let app = self.app.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            if params.application_id == "ai-workspace" {
+                if !desktop_control::is_enabled(&app, &workspace.id)? {
+                    return Err("Desktop permission is off for this project.".to_string());
+                }
+                let state = app.state::<AppState>();
+                let frame = state.ai_workspace.frame(
+                    &app,
+                    &workspace.id,
+                    params.window_id.as_deref(),
+                    1440,
+                    true,
+                )?;
+                return Ok(desktop_control::DesktopScreenshot {
+                    application_id: "ai-workspace".to_string(),
+                    window_id: params.window_id.unwrap_or_else(|| "active".to_string()),
+                    mime_type: frame.mime_type,
+                    size_bytes: frame.size_bytes,
+                    width: frame.width,
+                    height: frame.height,
+                    data_base64: frame.data_base64,
+                });
+            }
+            desktop_control::screenshot(
+                &app,
+                &workspace.id,
+                &params.application_id,
+                params.window_id.as_deref(),
+            )
+        })
+        .await;
+        Ok(match result {
+            Ok(Ok(screenshot)) if screenshot.size_bytes <= MAX_MCP_SCREENSHOT_BYTES && !screenshot.data_base64.is_empty() => {
+                let metadata = serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "applicationId": screenshot.application_id,
+                        "windowId": screenshot.window_id,
+                        "mimeType": screenshot.mime_type.clone(),
+                        "sizeBytes": screenshot.size_bytes,
+                        "width": screenshot.width,
+                        "height": screenshot.height,
+                    }
+                });
+                CallToolResult::success(vec![
+                    ContentBlock::text(serde_json::to_string(&metadata).unwrap_or_else(|_| "{\"ok\":true}".to_string())),
+                    ContentBlock::image(screenshot.data_base64, screenshot.mime_type),
+                ])
+            }
+            Ok(Ok(screenshot)) => error_result(format!(
+                "The desktop screenshot is {} bytes or empty, so RepoTunnel refused to return it through MCP.",
+                screenshot.size_bytes
+            )),
+            Ok(Err(message)) => error_result(message),
+            Err(error) => error_result(format!("The desktop screenshot task could not complete: {error}")),
+        })
+    }
+
+    #[tool(
         description = "Launch one structured desktop target for an approved project. kind=url opens an HTTP/HTTPS URL, kind=workspace_path opens a project-relative file/folder, and kind=application launches an allowed application ID. URL/path targets may optionally specify an application ID. In AI Auto the launch happens immediately with no confirmation; in AI Review it may queue for local Accept/Reject."
     )]
     async fn launch_target(
@@ -1853,6 +2576,22 @@ impl RepoTunnelMcp {
                 )),
             );
             Ok(inspection)
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Read the most recent element selected by the human from RepoTunnel's Live Preview. Use this before editing when the human says 'change this', 'this button', or otherwise refers to a visually selected UI element.",
+        annotations(read_only_hint = true)
+    )]
+    async fn get_visual_selection(
+        &self,
+        Parameters(params): Parameters<WorkspaceIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let app = self.app.clone();
+        run_filesystem_task(move || {
+            let workspace = approved_workspace(&app, &params.workspace_id)?;
+            browser::get_visual_selection(&workspace.id)
         })
         .await
     }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type MouseEvent } from "react";
 import {
   approveBrowserAction,
   browserActivateTab,
@@ -7,12 +7,14 @@ import {
   browserInspectPage,
   browserNavigate,
   browserOpenTab,
+  browserPickElement,
   browserReload,
   browserScroll,
   browserTakeScreenshot,
   browserType,
   getBrowserAutomationStatus,
   getBrowserDiagnostics,
+  getBrowserVisualSelection,
   listAutomationBrowsers,
   listBrowserHistory,
   listBrowserTabs,
@@ -30,6 +32,7 @@ import type {
   BrowserPageInspection,
   BrowserScreenshot,
   BrowserTab,
+  BrowserVisualSelection,
   Workspace,
 } from "../types";
 
@@ -77,6 +80,9 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
   const [clearFirst, setClearFirst] = useState(true);
   const [inspection, setInspection] = useState<BrowserPageInspection | null>(null);
   const [screenshot, setScreenshot] = useState<BrowserScreenshot | null>(null);
+  const [livePreview, setLivePreview] = useState(false);
+  const [visualSelection, setVisualSelection] = useState<BrowserVisualSelection | null>(null);
+  const [previewRefreshing, setPreviewRefreshing] = useState(false);
   const [fullPage, setFullPage] = useState(false);
   const [diagnostics, setDiagnostics] = useState<BrowserDiagnostics>({ consoleEntries: [], networkFailures: [] });
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -101,6 +107,8 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
       setSelectedTabId("");
       setInspection(null);
       setScreenshot(null);
+      setLivePreview(false);
+      setVisualSelection(null);
       setDiagnostics({ consoleEntries: [], networkFailures: [] });
       return;
     }
@@ -133,6 +141,8 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
         setSelectedTabId("");
         setInspection(null);
         setScreenshot(null);
+        setLivePreview(false);
+        setVisualSelection(null);
         setDiagnostics({ consoleEntries: [], networkFailures: [] });
       }
     } catch (error) {
@@ -165,6 +175,58 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
     const timer = window.setInterval(load, 2500);
     return () => window.clearInterval(timer);
   }, [selectedTabId, status?.running, workspace]);
+
+  useEffect(() => {
+    if (!workspace) return;
+    getBrowserVisualSelection(workspace.id)
+      .then(setVisualSelection)
+      .catch(() => undefined);
+  }, [workspace]);
+
+  useEffect(() => {
+    if (!livePreview || !workspace || !status?.running || !selectedTabId) return;
+    let cancelled = false;
+
+    const capturePreview = async () => {
+      if (cancelled) return;
+      setPreviewRefreshing(true);
+      try {
+        const next = await browserTakeScreenshot(workspace.id, selectedTabId, false);
+        if (!cancelled) setScreenshot(next);
+      } catch {
+        // Background preview refresh is best-effort; normal browser status surfaces failures.
+      } finally {
+        if (!cancelled) setPreviewRefreshing(false);
+      }
+    };
+
+    capturePreview().catch(() => undefined);
+    const timer = window.setInterval(() => {
+      capturePreview().catch(() => undefined);
+    }, 1800);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [livePreview, selectedTabId, status?.running, workspace]);
+
+  async function selectPreviewElement(event: MouseEvent<HTMLImageElement>) {
+    if (!workspace || !selectedTabId || !screenshot || screenshot.fullPage) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const xRatio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    const yRatio = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
+    setBusyId("visual-select");
+    try {
+      const selected = await browserPickElement(workspace.id, selectedTabId, xRatio, yRatio);
+      setVisualSelection(selected);
+      setSelector(selected.selector);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   async function perform(id: string, task: () => Promise<unknown>, clear?: () => void) {
     if (!workspace) return;
@@ -384,16 +446,51 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
                   ) : <p>Inspect the selected tab or selector to read page content and DOM markup.</p>}
                 </div>
 
-                <div className="browser-observation-card">
+                <div className="browser-observation-card browser-live-preview-card">
                   <div className="browser-card-heading">
-                    <strong>Screenshot</strong>
-                    <span>{screenshot ? `${Math.max(1, Math.round(screenshot.sizeBytes / 1024))} KB` : "PNG capture"}</span>
+                    <strong>Live Preview</strong>
+                    <span>{livePreview ? (previewRefreshing ? "Refreshing…" : "Live") : screenshot ? `${Math.max(1, Math.round(screenshot.sizeBytes / 1024))} KB` : "Viewport preview"}</span>
                   </div>
                   <div className="browser-screenshot-actions">
-                    <label><input type="checkbox" checked={fullPage} onChange={(event: ChangeEvent<HTMLInputElement>) => setFullPage(event.target.checked)} /> Full page</label>
-                    <button className="secondary-button" type="button" disabled={!selectedTabId || busyId !== null} onClick={() => capture()}>{busyId === "screenshot" ? "Capturing…" : "Capture"}</button>
+                    <button
+                      className={livePreview ? "primary-button" : "secondary-button"}
+                      type="button"
+                      disabled={!selectedTabId}
+                      onClick={() => {
+                        setFullPage(false);
+                        setLivePreview((current) => !current);
+                      }}
+                    >
+                      {livePreview ? "Stop live preview" : "Start live preview"}
+                    </button>
+                    <label><input type="checkbox" checked={fullPage} disabled={livePreview} onChange={(event: ChangeEvent<HTMLInputElement>) => setFullPage(event.target.checked)} /> Full page</label>
+                    <button className="secondary-button" type="button" disabled={!selectedTabId || busyId !== null || livePreview} onClick={() => capture()}>{busyId === "screenshot" ? "Capturing…" : "Capture"}</button>
                   </div>
-                  {screenshot ? <img className="browser-screenshot-preview" alt="RepoTunnel browser capture" src={`data:${screenshot.mimeType};base64,${screenshot.dataBase64}`} /> : <p>No screenshot captured yet.</p>}
+                  {screenshot ? (
+                    <>
+                      <button
+                        className="browser-preview-picker"
+                        type="button"
+                        disabled={screenshot.fullPage || busyId === "visual-select"}
+                        title={screenshot.fullPage ? "Capture a viewport screenshot to select an element." : "Click an element to make it the current Change This target."}
+                      >
+                        <img
+                          className={`browser-screenshot-preview ${screenshot.fullPage ? "" : "selectable"}`}
+                          alt="RepoTunnel live browser preview"
+                          src={`data:${screenshot.mimeType};base64,${screenshot.dataBase64}`}
+                          onClick={(event) => selectPreviewElement(event)}
+                        />
+                      </button>
+                      {!screenshot.fullPage ? <small className="browser-preview-help">Click an element in the preview, then tell the AI “change this…”</small> : null}
+                    </>
+                  ) : <p>Start Live Preview to watch the selected tab here.</p>}
+                  {visualSelection ? (
+                    <div className="browser-visual-selection">
+                      <span>Selected for “Change This”</span>
+                      <code>{visualSelection.selector}</code>
+                      <small>{visualSelection.text || `<${visualSelection.tag}>`}</small>
+                    </div>
+                  ) : null}
                 </div>
               </div>
 

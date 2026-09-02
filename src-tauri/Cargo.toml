@@ -1,6 +1,6 @@
 [package]
 name = "repotunnel"
-version = "0.1.0"
+version = "0.2.0"
 description = "Secure local workspace gateway for AI tools"
 edition = "2021"
 
@@ -13,8 +13,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 rmcp = { version = "3.1.2", features = ["schemars", "server", "transport-streamable-http-server"] }
 ngrok = "0.19"
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+socket2 = "0.6"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,3 +28,14 @@ getrandom = "0.4.3"
 sha2 = "0.11.0"
 base64 = "0.23.1"
 subtle = "2.6.1"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Isolation",
+  "Win32_System_Console",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

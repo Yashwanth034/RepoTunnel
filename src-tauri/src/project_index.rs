@@ -10,7 +10,7 @@ use crate::{
     models::{LanguageStat, ProjectEntry, ProjectOverview, ProjectSnapshot, Workspace},
 };
 
-const MAX_PROJECT_ENTRIES: usize = 4_000;
+const MAX_PROJECT_ENTRIES: usize = 25_000;
 const MAX_CLASSIFY_BYTES: u64 = 2 * 1_048_576;
 const SNIFF_BYTES: usize = 8_192;
 const MAX_IGNORED_ENTRY_DETAILS: usize = 12;
@@ -85,6 +85,13 @@ struct ScanStats {
     languages: BTreeMap<String, usize>,
     manifests: Vec<String>,
     truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectFileMetadata {
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    pub(crate) modified_nanos: u128,
 }
 
 fn workspace_root(workspace: &Workspace) -> Result<PathBuf, String> {
@@ -401,6 +408,86 @@ fn inspect_file(
     })
 }
 
+pub(crate) fn project_file_metadata(
+    workspace: &Workspace,
+    entry_limit: usize,
+) -> Result<(Vec<ProjectFileMetadata>, bool), String> {
+    let entry_limit = entry_limit.clamp(100, MAX_PROJECT_ENTRIES);
+    let root = workspace_root(workspace)?;
+    let root_rules = rules_for_directory(&root, &root);
+    let mut queue = VecDeque::from([WalkItem {
+        directory: root.clone(),
+        rules: root_rules,
+    }]);
+    let mut files = Vec::new();
+    let mut seen_entries = 0usize;
+    let mut truncated = false;
+
+    while let Some(item) = queue.pop_front() {
+        let read_dir = fs::read_dir(&item.directory)
+            .map_err(|error| format!("Could not inspect project structure: {error}"))?;
+
+        for entry in read_dir {
+            let entry =
+                entry.map_err(|error| format!("Could not inspect project entry: {error}"))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("Could not inspect project entry: {error}"))?;
+
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_directory = metadata.is_dir();
+            if (is_directory && generated_directory(&name))
+                || ignored_by_rules(&item.rules, &root, &path, is_directory)
+            {
+                continue;
+            }
+
+            let relative = relative_string(&root, &path);
+            if resolve_workspace_path(workspace, &relative, AccessOperation::Read, true).is_err() {
+                continue;
+            }
+
+            if seen_entries >= entry_limit {
+                truncated = true;
+                break;
+            }
+            seen_entries += 1;
+
+            if is_directory {
+                let mut child_rules = item.rules.clone();
+                child_rules.extend(parse_ignore_file(&root, &path, ".gitignore"));
+                child_rules.extend(parse_ignore_file(&root, &path, ".ignore"));
+                queue.push_back(WalkItem {
+                    directory: path,
+                    rules: child_rules,
+                });
+            } else if metadata.is_file() {
+                let modified_nanos = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0);
+                files.push(ProjectFileMetadata {
+                    path: relative,
+                    size: metadata.len(),
+                    modified_nanos,
+                });
+            }
+        }
+
+        if truncated {
+            break;
+        }
+    }
+
+    Ok((files, truncated))
+}
+
 pub(crate) fn project_snapshot(
     workspace: &Workspace,
     entry_limit: usize,
@@ -619,7 +706,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{glob_matches, project_snapshot, smart_text_files};
+    use super::{glob_matches, project_file_metadata, project_snapshot, smart_text_files};
     use crate::models::{CommandPolicy, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy};
 
     fn temp_workspace() -> (PathBuf, Workspace) {
@@ -700,6 +787,29 @@ mod tests {
             .iter()
             .any(|item| item.contains(".env")));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn metadata_scan_preserves_project_boundaries_without_content_classification() {
+        let (root, workspace) = temp_workspace();
+        fs::write(root.join(".env"), "SECRET=value").unwrap();
+        fs::write(root.join(".gitignore"), "src/ignored.ts\n.env\n").unwrap();
+
+        let (files, truncated) = project_file_metadata(&workspace, 500).unwrap();
+        let paths = files
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!truncated);
+        assert!(paths.contains(&"src/main.ts"));
+        assert!(paths.contains(&"package.json"));
+        assert!(paths.contains(&"image.png"));
+        assert!(!paths.contains(&"src/ignored.ts"));
+        assert!(!paths.contains(&".env"));
+        assert!(!paths.iter().any(|path| path.starts_with("node_modules/")));
+        assert!(files.iter().all(|entry| entry.modified_nanos > 0));
         let _ = fs::remove_dir_all(root);
     }
 

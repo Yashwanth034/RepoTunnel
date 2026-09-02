@@ -27,7 +27,7 @@ Workspace registry + access policy
    |
    +----> Safe-editing / change manager ----> Local filesystem engine ----> Approved repository
    |
-   +----> Command policy / preset manager ----> Bubblewrap ----> Disposable project copy
+   +----> Command policy / preset manager ----> Native OS sandbox ----> Disposable project copy
    |
    +----> Git manager ----> Approved repository .git metadata
 ```
@@ -123,7 +123,7 @@ Undo is conservative: text writes restore the prior content only if the current 
 
 `src-tauri/src/execution.rs` owns controlled project command execution. It discovers a small set of build/test/check/lint presets from project manifests and never accepts a raw shell string from MCP. The command policy is independent from filesystem write policy.
 
-Before execution RepoTunnel verifies that Bubblewrap can actually create the required Linux namespaces. It then prepares a disposable project copy, excludes protected/ignored paths, mounts only required dependency/toolchain directories read-only, clears the child environment, disables networking, bounds execution time and output, and deletes the temporary working tree afterward. Commands therefore cannot persist their incidental filesystem writes into the approved project.
+Before execution RepoTunnel verifies that the native sandbox for the current OS is available and usable. Linux probes Bubblewrap namespace creation, Windows probes an AppContainer launch, and macOS probes the Seatbelt compatibility backend. RepoTunnel then prepares a disposable project copy, excludes protected/ignored paths, grants or mounts only the dependency/toolchain access required by that backend, sanitizes the child environment, disables networking for verification commands, bounds execution time and output, and deletes the temporary working tree afterward. Commands therefore cannot persist their incidental filesystem writes into the approved project.
 
 Pending command requests are fingerprinted and revalidated before local approval. MCP can request and inspect commands but cannot approve or reject its own pending execution.
 

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { NavIcon } from "./AppSidebar";
 import type { GitFileChange } from "../types";
 import DeveloperDock, { type EditorProblem } from "./DeveloperDock";
+import CodeMirrorSurface from "./CodeMirrorSurface";
 
 export type EditorDocument = {
   key: string;
@@ -32,6 +33,14 @@ export type EditorRevealLocation = {
   token: number;
 };
 
+export type EditorSelectionContext = {
+  workspaceId: string;
+  path: string;
+  content: string;
+  start: number;
+  end: number;
+};
+
 type WorkspaceEditorProps = {
   tabs: EditorDocument[];
   activeKey: string | null;
@@ -50,107 +59,12 @@ type WorkspaceEditorProps = {
   onKeepLocal: (key: string) => void;
   onDismissExternalNotice: (key: string) => void;
   onOpenProblem: (workspaceId: string, path: string, line: number, column: number) => void;
+  onSelectionContext?: (selection: EditorSelectionContext | null) => void;
+  onProblemsChange?: (problems: EditorProblem[]) => void;
   canReopenClosed: boolean;
   onReopenClosed: () => void;
   onNotice: (message: string) => void;
 };
-
-const KEYWORDS: Record<string, Set<string>> = {
-  javascript: new Set(["as", "async", "await", "break", "case", "catch", "class", "const", "continue", "default", "delete", "do", "else", "export", "extends", "false", "finally", "for", "from", "function", "if", "import", "in", "instanceof", "interface", "let", "new", "null", "of", "return", "static", "super", "switch", "this", "throw", "true", "try", "type", "typeof", "undefined", "var", "void", "while", "yield"]),
-  python: new Set(["and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True", "try", "while", "with", "yield"]),
-  rust: new Set(["as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while"]),
-  sql: new Set(["SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TABLE", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "NULL", "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET", "DISTINCT"]),
-};
-
-function normalizedLanguage(language: string): string {
-  if (["typescript", "tsx", "jsx", "javascript"].includes(language)) return "javascript";
-  return language;
-}
-
-function commentStart(language: string, line: string, index: number): boolean {
-  if (["javascript", "rust", "css"].includes(language) && line.startsWith("//", index)) return true;
-  if (["python", "yaml", "shell"].includes(language) && line[index] === "#") return true;
-  return language === "sql" && line.startsWith("--", index);
-}
-
-function tokenizedLine(
-  line: string,
-  language: string,
-  lineIndex: number,
-  lineStart = 0,
-  matchedOffsets: Set<number> = new Set(),
-): ReactNode {
-  if (language === "markdown" && /^\s{0,3}#{1,6}\s/.test(line)) {
-    return <span className="tok-heading">{line || " "}</span>;
-  }
-  if (language === "markdown" && /^\s*>/.test(line)) {
-    return <span className="tok-comment">{line || " "}</span>;
-  }
-
-  const nodes: ReactNode[] = [];
-  const normalized = normalizedLanguage(language);
-  const keywords = KEYWORDS[normalized] ?? new Set<string>();
-  let index = 0;
-
-  while (index < line.length) {
-    if (commentStart(normalized, line, index)) {
-      nodes.push(<span key={`${lineIndex}-${index}`} className="tok-comment">{line.slice(index)}</span>);
-      break;
-    }
-
-    const char = line[index];
-    if (char === '"' || char === "'" || char === "`") {
-      let end = index + 1;
-      let escaped = false;
-      while (end < line.length) {
-        const current = line[end];
-        if (!escaped && current === char) {
-          end += 1;
-          break;
-        }
-        if (current === "\\" && !escaped) escaped = true;
-        else escaped = false;
-        end += 1;
-      }
-      nodes.push(<span key={`${lineIndex}-${index}`} className="tok-string">{line.slice(index, end)}</span>);
-      index = end;
-      continue;
-    }
-
-    if (/\d/.test(char)) {
-      let end = index + 1;
-      while (end < line.length && /[\d._xXa-fA-F]/.test(line[end])) end += 1;
-      nodes.push(<span key={`${lineIndex}-${index}`} className="tok-number">{line.slice(index, end)}</span>);
-      index = end;
-      continue;
-    }
-
-    if (/[A-Za-z_$]/.test(char)) {
-      let end = index + 1;
-      while (end < line.length && /[A-Za-z0-9_$]/.test(line[end])) end += 1;
-      const word = line.slice(index, end);
-      const lookup = normalized === "sql" ? word.toUpperCase() : word;
-      if (keywords.has(lookup)) {
-        nodes.push(<span key={`${lineIndex}-${index}`} className="tok-keyword">{word}</span>);
-      } else if (/^(TODO|FIXME|NOTE)$/.test(word)) {
-        nodes.push(<span key={`${lineIndex}-${index}`} className="tok-note">{word}</span>);
-      } else {
-        nodes.push(word);
-      }
-      index = end;
-      continue;
-    }
-
-    if (/[{}()[\];,:.+\-*=&|!?<>/]/.test(char)) {
-      nodes.push(<span key={`${lineIndex}-${index}`} className={`tok-punctuation ${matchedOffsets.has(lineStart + index) ? "bracket-match" : ""}`}>{char}</span>);
-    } else {
-      nodes.push(char);
-    }
-    index += 1;
-  }
-
-  return nodes.length > 0 ? nodes : " ";
-}
 
 function languageLabel(language: string): string {
   const labels: Record<string, string> = {
@@ -183,471 +97,6 @@ function indentUnit(language: string): string {
   return language === "python" ? "    " : "  ";
 }
 
-function lineColumnAt(content: string, position: number): { line: number; column: number } {
-  const safe = Math.max(0, Math.min(position, content.length));
-  const before = content.slice(0, safe);
-  const line = before.split("\n").length;
-  const lastBreak = before.lastIndexOf("\n");
-  return { line, column: safe - lastBreak };
-}
-
-function lineStartOffsets(content: string): number[] {
-  const starts = [0];
-  for (let index = 0; index < content.length; index += 1) if (content[index] === "\n") starts.push(index + 1);
-  return starts;
-}
-
-function matchingBracketOffsets(content: string, caret: number): Set<number> {
-  const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
-  const reverse: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
-  const candidates = [caret, caret - 1].filter((value) => value >= 0 && value < content.length);
-  const source = candidates.find((value) => pairs[content[value]] || reverse[content[value]]);
-  if (source === undefined) return new Set();
-  const char = content[source];
-  const forward = Boolean(pairs[char]);
-  const open = forward ? char : reverse[char];
-  const close = forward ? pairs[char] : char;
-  let depth = 0;
-  if (forward) {
-    for (let index = source; index < content.length; index += 1) {
-      if (content[index] === open) depth += 1;
-      else if (content[index] === close) depth -= 1;
-      if (depth === 0) return new Set([source, index]);
-    }
-  } else {
-    for (let index = source; index >= 0; index -= 1) {
-      if (content[index] === close) depth += 1;
-      else if (content[index] === open) depth -= 1;
-      if (depth === 0) return new Set([source, index]);
-    }
-  }
-  return new Set([source]);
-}
-
-function CodeSurface({
-  document,
-  problems,
-  onChange,
-  onSave,
-  onCursorChange,
-  revealLocation,
-  goToLineToken,
-}: {
-  document: EditorDocument;
-  problems: EditorProblem[];
-  onChange: (content: string) => void;
-  onSave: () => Promise<boolean>;
-  onCursorChange: (line: number, column: number) => void;
-  revealLocation?: EditorRevealLocation | null;
-  goToLineToken: number;
-}) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const preRef = useRef<HTMLPreElement>(null);
-  const gutterRef = useRef<HTMLDivElement>(null);
-  const [findOpen, setFindOpen] = useState(false);
-  const [findQuery, setFindQuery] = useState("");
-  const [findMiss, setFindMiss] = useState(false);
-  const [goToLineOpen, setGoToLineOpen] = useState(false);
-  const [goToLineValue, setGoToLineValue] = useState("");
-  const [cursorPosition, setCursorPosition] = useState(0);
-  const lines = useMemo(() => document.content.split("\n"), [document.content]);
-  const starts = useMemo(() => lineStartOffsets(document.content), [document.content]);
-  const cursor = useMemo(() => lineColumnAt(document.content, cursorPosition), [document.content, cursorPosition]);
-  const matchedOffsets = useMemo(() => matchingBracketOffsets(document.content, cursorPosition), [document.content, cursorPosition]);
-  const problemsByLine = useMemo(() => {
-    const map = new Map<number, EditorProblem[]>();
-    for (const problem of problems) {
-      const current = map.get(problem.line) ?? [];
-      current.push(problem);
-      map.set(problem.line, current);
-    }
-    return map;
-  }, [problems]);
-
-  useEffect(() => onCursorChange(cursor.line, cursor.column), [cursor.line, cursor.column, onCursorChange]);
-
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    // A CodeSurface instance is reused when switching tabs. Reset both the real
-    // textarea and the syntax/gutter layers together so a previous file's scroll
-    // transform can never leave the newly selected file looking blank.
-    textarea.scrollTop = 0;
-    textarea.scrollLeft = 0;
-    setCursorPosition(0);
-    const frame = window.requestAnimationFrame(syncScroll);
-    return () => window.cancelAnimationFrame(frame);
-  }, [document.key]);
-
-  useEffect(() => {
-    if (goToLineToken <= 0) return;
-    setGoToLineValue(String(cursor.line));
-    setGoToLineOpen(true);
-  }, [goToLineToken]);
-
-  useEffect(() => {
-    if (!revealLocation || revealLocation.key !== document.key) return;
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    const targetLine = Math.max(1, revealLocation.line);
-    const targetColumn = Math.max(1, revealLocation.column);
-    const start = starts[Math.min(targetLine - 1, starts.length - 1)] ?? 0;
-    const lineEnd = document.content.indexOf("\n", start);
-    const max = lineEnd < 0 ? document.content.length : lineEnd;
-    const position = Math.min(max, start + targetColumn - 1);
-    textarea.focus();
-    textarea.setSelectionRange(position, position);
-    setCursorPosition(position);
-    const lineHeight = 19;
-    textarea.scrollTop = Math.max(0, (targetLine - 3) * lineHeight);
-    syncScroll();
-  }, [revealLocation?.token, revealLocation?.key, revealLocation?.line, revealLocation?.column, document.key, document.content, starts]);
-
-  function syncScroll() {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    if (preRef.current) preRef.current.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
-    if (gutterRef.current) gutterRef.current.style.transform = `translateY(${-textarea.scrollTop}px)`;
-  }
-
-  function updateCursor(textarea: HTMLTextAreaElement) {
-    setCursorPosition(textarea.selectionStart);
-  }
-
-  function findNext(reverse = false) {
-    const textarea = textareaRef.current;
-    const needle = findQuery;
-    if (!textarea || !needle) return;
-    const haystack = document.content.toLowerCase();
-    const query = needle.toLowerCase();
-    let index = reverse
-      ? haystack.lastIndexOf(query, Math.max(0, textarea.selectionStart - 1))
-      : haystack.indexOf(query, textarea.selectionEnd);
-    if (index < 0) index = reverse ? haystack.lastIndexOf(query) : haystack.indexOf(query);
-    setFindMiss(index < 0);
-    if (index >= 0) {
-      textarea.focus();
-      textarea.setSelectionRange(index, index + needle.length);
-      setCursorPosition(index);
-    }
-  }
-
-  function goToLine() {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    const requested = Number.parseInt(goToLineValue, 10);
-    if (!Number.isFinite(requested)) return;
-    const line = Math.max(1, Math.min(lines.length, requested));
-    const position = starts[line - 1] ?? 0;
-    textarea.focus();
-    textarea.setSelectionRange(position, position);
-    setCursorPosition(position);
-    textarea.scrollTop = Math.max(0, (line - 3) * 19);
-    syncScroll();
-    setGoToLineOpen(false);
-  }
-
-  function replaceSelection(nextText: string, selectionStart: number, selectionEnd = selectionStart) {
-    const textarea = textareaRef.current;
-    onChange(nextText);
-    window.requestAnimationFrame(() => {
-      if (!textarea) return;
-      textarea.setSelectionRange(selectionStart, selectionEnd);
-      setCursorPosition(selectionStart);
-    });
-  }
-
-  function handleTab(event: KeyboardEvent<HTMLTextAreaElement>) {
-    event.preventDefault();
-    const textarea = event.currentTarget;
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const unit = indentUnit(document.language);
-    const lineStart = document.content.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
-    const selection = document.content.slice(lineStart, end);
-    if (selection.includes("\n") || end > start) {
-      const linesToIndent = selection.split("\n");
-      const transformed = linesToIndent.map((line) => {
-        if (!event.shiftKey) return `${unit}${line}`;
-        if (line.startsWith(unit)) return line.slice(unit.length);
-        return line.replace(/^ {1,4}/, "");
-      }).join("\n");
-      const next = `${document.content.slice(0, lineStart)}${transformed}${document.content.slice(end)}`;
-      const delta = transformed.length - selection.length;
-      replaceSelection(next, start + (event.shiftKey ? -Math.min(unit.length, start - lineStart) : unit.length), end + delta);
-      return;
-    }
-    if (event.shiftKey) {
-      const before = document.content.slice(lineStart, start);
-      const remove = before.endsWith(unit) ? unit.length : Math.min((before.match(/\s+$/)?.[0].length ?? 0), unit.length);
-      if (remove > 0) {
-        const removeStart = start - remove;
-        const next = `${document.content.slice(0, removeStart)}${document.content.slice(start)}`;
-        replaceSelection(next, removeStart);
-      }
-      return;
-    }
-    const next = `${document.content.slice(0, start)}${unit}${document.content.slice(end)}`;
-    replaceSelection(next, start + unit.length);
-  }
-
-  function handleEnter(event: KeyboardEvent<HTMLTextAreaElement>) {
-    event.preventDefault();
-    const textarea = event.currentTarget;
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const beforeLineStart = document.content.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
-    const currentBefore = document.content.slice(beforeLineStart, start);
-    const leading = currentBefore.match(/^\s*/)?.[0] ?? "";
-    const trimmed = currentBefore.trimEnd();
-    const unit = indentUnit(document.language);
-    const opensBlock = /[\{\[\(:]$/.test(trimmed) || (document.language === "python" && trimmed.endsWith(":")) || /<([A-Za-z][\w:-]*)(?:\s[^<>]*)?>$/.test(trimmed);
-    const after = document.content.slice(end);
-    const closesBlock = /^\s*[}\])]/.test(after);
-    if (opensBlock && closesBlock) {
-      const inserted = `\n${leading}${unit}\n${leading}`;
-      const next = `${document.content.slice(0, start)}${inserted}${after}`;
-      replaceSelection(next, start + 1 + leading.length + unit.length);
-      return;
-    }
-    const indent = opensBlock ? `${leading}${unit}` : leading;
-    const inserted = `\n${indent}`;
-    const next = `${document.content.slice(0, start)}${inserted}${after}`;
-    replaceSelection(next, start + inserted.length);
-  }
-
-  function selectedLineRange(textarea: HTMLTextAreaElement) {
-    const selectionStart = textarea.selectionStart;
-    const selectionEnd = textarea.selectionEnd;
-    const start = document.content.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
-    const endBreak = document.content.indexOf("\n", selectionEnd);
-    const end = endBreak < 0 ? document.content.length : endBreak;
-    return { start, end, selectionStart, selectionEnd };
-  }
-
-  function duplicateSelectedLines(event: KeyboardEvent<HTMLTextAreaElement>) {
-    event.preventDefault();
-    const textarea = event.currentTarget;
-    const range = selectedLineRange(textarea);
-    const block = document.content.slice(range.start, range.end);
-    const inserted = `\n${block}`;
-    const next = `${document.content.slice(0, range.end)}${inserted}${document.content.slice(range.end)}`;
-    const shift = inserted.length;
-    replaceSelection(next, range.selectionStart + shift, range.selectionEnd + shift);
-  }
-
-  function moveSelectedLines(event: KeyboardEvent<HTMLTextAreaElement>, direction: -1 | 1) {
-    event.preventDefault();
-    const textarea = event.currentTarget;
-    const range = selectedLineRange(textarea);
-    const block = document.content.slice(range.start, range.end);
-    if (direction < 0) {
-      if (range.start === 0) return;
-      const previousEnd = range.start - 1;
-      const previousStart = document.content.lastIndexOf("\n", Math.max(0, previousEnd - 1)) + 1;
-      const previous = document.content.slice(previousStart, previousEnd);
-      const next = `${document.content.slice(0, previousStart)}${block}\n${previous}${document.content.slice(range.end)}`;
-      const delta = range.start - previousStart;
-      replaceSelection(next, Math.max(0, range.selectionStart - delta), Math.max(0, range.selectionEnd - delta));
-      return;
-    }
-    if (range.end >= document.content.length) return;
-    const nextStart = range.end + 1;
-    const nextBreak = document.content.indexOf("\n", nextStart);
-    const nextEnd = nextBreak < 0 ? document.content.length : nextBreak;
-    const following = document.content.slice(nextStart, nextEnd);
-    const tail = nextEnd < document.content.length ? document.content.slice(nextEnd) : "";
-    const next = `${document.content.slice(0, range.start)}${following}\n${block}${tail}`;
-    const delta = following.length + 1;
-    replaceSelection(next, range.selectionStart + delta, range.selectionEnd + delta);
-  }
-
-  function handleAutoPair(event: KeyboardEvent<HTMLTextAreaElement>): boolean {
-    if (event.ctrlKey || event.metaKey || event.altKey) return false;
-    const textarea = event.currentTarget;
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    const pairs: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
-    const quote = event.key === '"' || event.key === "'" || event.key === "`";
-    const allowQuote = quote && !["text", "markdown"].includes(document.language);
-    const closing = Object.values(pairs).includes(event.key) || quote;
-
-    if (closing && start === end && document.content[start] === event.key) {
-      event.preventDefault();
-      textarea.setSelectionRange(start + 1, start + 1);
-      setCursorPosition(start + 1);
-      return true;
-    }
-
-    if (pairs[event.key] || allowQuote) {
-      event.preventDefault();
-      const close = allowQuote ? event.key : pairs[event.key];
-      const selected = document.content.slice(start, end);
-      const inserted = `${event.key}${selected}${close}`;
-      const next = `${document.content.slice(0, start)}${inserted}${document.content.slice(end)}`;
-      if (selected) replaceSelection(next, start + 1, start + 1 + selected.length);
-      else replaceSelection(next, start + 1);
-      return true;
-    }
-
-    if (event.key === "Backspace" && start === end && start > 0) {
-      const open = document.content[start - 1];
-      const close = document.content[start];
-      const matching = pairs[open] === close || ((open === '"' || open === "'" || open === "`") && close === open);
-      if (matching) {
-        event.preventDefault();
-        const next = `${document.content.slice(0, start - 1)}${document.content.slice(start + 1)}`;
-        replaceSelection(next, start - 1);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      void onSave();
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
-      event.preventDefault();
-      setGoToLineOpen(false);
-      setFindOpen(true);
-      return;
-    }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "g") {
-      event.preventDefault();
-      setFindOpen(false);
-      setGoToLineValue(String(cursor.line));
-      setGoToLineOpen(true);
-      return;
-    }
-    if (document.readonly) return;
-    if (event.altKey && event.shiftKey && event.key === "ArrowDown") {
-      duplicateSelectedLines(event);
-      return;
-    }
-    if (event.altKey && !event.shiftKey && event.key === "ArrowUp") {
-      moveSelectedLines(event, -1);
-      return;
-    }
-    if (event.altKey && !event.shiftKey && event.key === "ArrowDown") {
-      moveSelectedLines(event, 1);
-      return;
-    }
-    if (handleAutoPair(event)) return;
-    if (event.key === "Tab") {
-      handleTab(event);
-      return;
-    }
-    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey) {
-      handleEnter(event);
-    }
-  }
-
-  return (
-    <div className="code-surface-shell">
-      {findOpen ? (
-        <div className={`editor-find ${findMiss ? "miss" : ""}`}>
-          <NavIcon name="search" size={14} />
-          <input
-            autoFocus
-            value={findQuery}
-            onChange={(event) => { setFindQuery(event.target.value); setFindMiss(false); }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") findNext(event.shiftKey);
-              if (event.key === "Escape") setFindOpen(false);
-            }}
-            placeholder="Find in file"
-          />
-          <button type="button" onClick={() => findNext(true)} title="Previous match">↑</button>
-          <button type="button" onClick={() => findNext(false)} title="Next match">↓</button>
-          <button type="button" onClick={() => setFindOpen(false)} title="Close find">×</button>
-        </div>
-      ) : null}
-
-      {goToLineOpen ? (
-        <div className="editor-goto-line">
-          <span>Go to line</span>
-          <input
-            autoFocus
-            inputMode="numeric"
-            value={goToLineValue}
-            onChange={(event) => setGoToLineValue(event.target.value.replace(/[^0-9]/g, ""))}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") goToLine();
-              if (event.key === "Escape") setGoToLineOpen(false);
-            }}
-            aria-label="Line number"
-          />
-          <small>1–{lines.length}</small>
-          <button type="button" onClick={goToLine}>Go</button>
-          <button type="button" onClick={() => setGoToLineOpen(false)} aria-label="Close">×</button>
-        </div>
-      ) : null}
-
-      <div className="code-gutter" aria-hidden="true">
-        <div ref={gutterRef}>
-          {lines.map((_, index) => {
-            const lineNumber = index + 1;
-            const diagnostics = problemsByLine.get(lineNumber) ?? [];
-            const severity = diagnostics.some((problem) => problem.severity === "error") ? "error" : diagnostics.length > 0 ? "warning" : "";
-            return (
-              <span
-                key={index}
-                className={`${lineNumber === cursor.line ? "active" : ""} ${severity ? `diagnostic ${severity}` : ""}`}
-                title={diagnostics.map((problem) => problem.message).join("\n")}
-              >
-                {severity ? <b className="gutter-diagnostic-dot">{severity === "error" ? "×" : "!"}</b> : null}
-                {lineNumber}
-              </span>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="code-layer" aria-hidden="true">
-        <pre ref={preRef}>
-          {lines.map((line, index) => {
-            const lineNumber = index + 1;
-            const diagnostics = problemsByLine.get(lineNumber) ?? [];
-            const severity = diagnostics.some((problem) => problem.severity === "error") ? "error" : diagnostics.length > 0 ? "warning" : "";
-            const lineStart = starts[index] ?? 0;
-            const firstProblem = diagnostics[0];
-            return (
-              <span className={`code-highlight-line ${lineNumber === cursor.line ? "active-line" : ""} ${severity ? `diagnostic-line ${severity}` : ""}`} key={index}>
-                {tokenizedLine(line, document.language, index, lineStart, matchedOffsets)}
-                {firstProblem ? <i className={`diagnostic-squiggle ${firstProblem.severity}`} style={{ left: `${Math.max(0, firstProblem.column - 1)}ch` }} /> : null}
-              </span>
-            );
-          })}
-        </pre>
-      </div>
-
-      <textarea
-        ref={textareaRef}
-        className="code-textarea"
-        value={document.content}
-        readOnly={document.readonly}
-        onChange={(event) => {
-          onChange(event.target.value);
-          setCursorPosition(event.target.selectionStart);
-        }}
-        onScroll={syncScroll}
-        onKeyDown={handleKeyDown}
-        onSelect={(event) => updateCursor(event.currentTarget)}
-        onClick={(event) => updateCursor(event.currentTarget)}
-        onKeyUp={(event) => updateCursor(event.currentTarget)}
-        spellCheck={false}
-        autoCapitalize="off"
-        autoCorrect="off"
-        aria-label={`Edit ${document.path}`}
-      />
-    </div>
-  );
-}
-
 function gitMarker(change: GitFileChange | undefined): string {
   if (!change) return "";
   if (change.conflicted) return "!";
@@ -671,6 +120,7 @@ function EditorPane({
   onReloadExternal,
   onKeepLocal,
   onDismissExternalNotice,
+  onSelectionContext,
 }: {
   document: EditorDocument;
   savingKey: string | null;
@@ -684,6 +134,7 @@ function EditorPane({
   onReloadExternal: (key: string) => void;
   onKeepLocal: (key: string) => void;
   onDismissExternalNotice: (key: string) => void;
+  onSelectionContext?: (selection: EditorSelectionContext | null) => void;
 }) {
   const [showConflictCompare, setShowConflictCompare] = useState(false);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
@@ -692,7 +143,7 @@ function EditorPane({
   useEffect(() => setCursor({ line: 1, column: 1 }), [document.key]);
   const breadcrumbs = document.path.split("/");
   const marker = gitMarker(gitChange);
-  const fileProblems = problems.filter((problem) => problem.path === document.path);
+  const fileProblems = useMemo(() => problems.filter((problem) => problem.path === document.path), [problems, document.path]);
   const errorCount = fileProblems.filter((problem) => problem.severity === "error").length;
   const warningCount = fileProblems.length - errorCount;
   const indent = indentUnit(document.language).length;
@@ -768,15 +219,21 @@ function EditorPane({
 
       <div className="editor-body">
         {document.kind === "text" ? (
-          <CodeSurface
+          <CodeMirrorSurface
             key={document.key}
-            document={document}
+            documentKey={document.key}
+            path={document.path}
+            language={document.language}
+            content={document.content}
+            readonly={document.readonly}
+            modifiedAt={document.modifiedAt}
             problems={fileProblems}
             revealLocation={revealLocation}
             goToLineToken={goToLineToken}
             onChange={(content) => onChange(document.key, content)}
             onSave={() => onSave(document.key)}
             onCursorChange={(line, column) => setCursor((current) => current.line === line && current.column === column ? current : { line, column })}
+            onSelectionChange={(selection) => onSelectionContext?.(selection ? { workspaceId: document.workspaceId, path: document.path, ...selection } : null)}
           />
         ) : document.kind === "image" && document.imageDataUrl ? (
           <div className="image-preview-panel">
@@ -825,6 +282,8 @@ function WorkspaceEditor({
   onKeepLocal,
   onDismissExternalNotice,
   onOpenProblem,
+  onSelectionContext,
+  onProblemsChange,
   canReopenClosed,
   onReopenClosed,
   onNotice,
@@ -834,6 +293,9 @@ function WorkspaceEditor({
   const [pendingCloseKey, setPendingCloseKey] = useState<string | null>(null);
   const [splitRatio, setSplitRatio] = useState(50);
   const editorPanesRef = useRef<HTMLDivElement | null>(null);
+  const handleSelectionContext = useCallback((selection: EditorSelectionContext | null) => {
+    onSelectionContext?.(selection);
+  }, [onSelectionContext]);
 
   useEffect(() => {
     const secondary = secondaryKey ? tabs.find((tab) => tab.key === secondaryKey) : null;
@@ -841,6 +303,10 @@ function WorkspaceEditor({
     else if (secondaryKey === active?.key) onSecondaryChange(null);
     else if (secondary && active && secondary.workspaceId !== active.workspaceId) onSecondaryChange(null);
   }, [tabs, active?.key, secondaryKey, onSecondaryChange]);
+
+  useEffect(() => {
+    if (!active || active.kind !== "text") handleSelectionContext(null);
+  }, [active?.key, active?.kind, handleSelectionContext]);
 
   useEffect(() => {
     function reopenShortcut(event: globalThis.KeyboardEvent) {
@@ -975,6 +441,7 @@ function WorkspaceEditor({
           onReloadExternal={onReloadExternal}
           onKeepLocal={onKeepLocal}
           onDismissExternalNotice={onDismissExternalNotice}
+          onSelectionContext={handleSelectionContext}
         />
         {secondary ? (
           <div
@@ -1016,7 +483,7 @@ function WorkspaceEditor({
         workspaceName={active.workspaceName}
         workspacePath={workspacePath}
         onOpenProblem={(path, line, column) => onOpenProblem(active.workspaceId, path, line, column)}
-        onProblemsChange={setProblems}
+        onProblemsChange={(nextProblems) => { setProblems(nextProblems); onProblemsChange?.(nextProblems); }}
         onNotice={onNotice}
       />
 

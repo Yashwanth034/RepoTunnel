@@ -23,11 +23,13 @@ const MAX_LOCKS: usize = 150;
 const MAX_TEXT: usize = 8_000;
 const MAX_SUMMARY: usize = 600;
 const AGENT_OFFLINE_AFTER_MS: u64 = 90_000;
-const DEFAULT_LOCK_TTL_SECONDS: u64 = 15 * 60;
-const MAX_LOCK_TTL_SECONDS: u64 = 60 * 60;
+const DEFAULT_LOCK_TTL_SECONDS: u64 = 60 * 60;
+const MAX_LOCK_TTL_SECONDS: u64 = 12 * 60 * 60;
 static TEAM_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static TEAM_CLIENT_BINDINGS: OnceLock<Mutex<BTreeMap<String, TeamClientBinding>>> = OnceLock::new();
-const CLIENT_BINDING_TTL_MS: u64 = 10 * 60 * 1_000;
+const CLIENT_BINDING_TTL_MS: u64 = 12 * 60 * 60 * 1_000;
+const CLIENT_BINDING_EXCLUSIVE_MS: u64 = 90_000;
+const MAX_CLIENT_BINDINGS: usize = 256;
 const USER_REQUEST_PREFIX: &str = "USER REQUEST:";
 const BROWSER_RESOURCE_LOCK: &str = "@browser";
 
@@ -49,6 +51,23 @@ fn client_bindings() -> &'static Mutex<BTreeMap<String, TeamClientBinding>> {
 
 fn prune_client_bindings(bindings: &mut BTreeMap<String, TeamClientBinding>, now: u64) {
     bindings.retain(|_, binding| now.saturating_sub(binding.last_seen_at) <= CLIENT_BINDING_TTL_MS);
+    if bindings.len() > MAX_CLIENT_BINDINGS {
+        let mut oldest = bindings
+            .iter()
+            .map(|(key, binding)| (key.clone(), binding.last_seen_at))
+            .collect::<Vec<_>>();
+        oldest.sort_by_key(|(_, last_seen)| *last_seen);
+        for (key, _) in oldest
+            .into_iter()
+            .take(bindings.len() - MAX_CLIENT_BINDINGS)
+        {
+            bindings.remove(&key);
+        }
+    }
+}
+
+fn client_binding_is_recent(now: u64, last_seen_at: u64) -> bool {
+    now.saturating_sub(last_seen_at) <= CLIENT_BINDING_EXCLUSIVE_MS
 }
 
 fn now_millis() -> u64 {
@@ -212,32 +231,15 @@ fn prune_expired(session: &mut TeamSession, now: u64) -> bool {
     changed |= before != session.locks.len();
 
     if session.status == TeamSessionStatus::Active {
-        // Once an engineer has finished/submitted its own implementation scope, keep that
-        // identity logically attached while the teammate is still implementing, reviewing,
-        // or verifying. A ChatGPT turn may end, but RepoTunnel should show the engineer as
-        // waiting rather than Offline until the current A/B work cycle is complete.
-        let waiting_agent_ids = if session.phase != TeamPhase::Complete {
-            session
-                .agents
-                .iter()
-                .filter(|agent| {
-                    agent.current_task_id.is_none()
-                        && session.tasks.iter().any(|task| {
-                            task.cycle_number == session.cycle_number
-                                && task.owner_agent_id.as_deref() == Some(agent.id.as_str())
-                                && matches!(
-                                    task.status,
-                                    TeamTaskStatus::Review | TeamTaskStatus::Done
-                                )
-                        })
-                })
-                .map(|agent| agent.id.clone())
-                .collect::<BTreeSet<_>>()
-        } else {
-            BTreeSet::new()
-        };
+        // Persistent Team presence is intentionally request-scoped. Once both engineers have
+        // joined an active work cycle, a quiet external chat must not make an engineer appear
+        // detached in the middle of implementation/review/verification. RepoTunnel keeps the
+        // identity attached as Idle/Waiting until the request is completed, paused, or ended.
+        // Heartbeats still update last_seen_at, but "Offline" is reserved for agents that have
+        // not joined the current persistent Team or for a Team that is no longer actively working.
+        let keep_attached = session.phase != TeamPhase::Complete && all_agents_joined(session);
         for agent in &mut session.agents {
-            if waiting_agent_ids.contains(&agent.id) {
+            if keep_attached && agent.joined_at.is_some() {
                 if agent.status == TeamAgentStatus::Offline {
                     agent.status = TeamAgentStatus::Idle;
                     changed = true;
@@ -561,6 +563,7 @@ fn begin_next_request(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_session(
     app: &AppHandle,
     workspace: &Workspace,
@@ -795,24 +798,33 @@ pub(crate) fn bind_client(
     prune_client_bindings(&mut bindings, now);
     let normalized_key = bounded(client_key, 240);
     let stable_mcp_session = normalized_key.starts_with("mcp-session:");
-    if stable_mcp_session
-        && bindings.iter().any(|(key, binding)| {
-            key.as_str() != normalized_key.as_str()
-                && key.starts_with("mcp-session:")
-                && binding.session_id == session_id
-                && binding.agent_id == agent_id
-        })
-    {
-        let agent = snapshot
-            .session
-            .agents
+    if stable_mcp_session {
+        let conflicting = bindings
             .iter()
-            .find(|agent| agent.id == agent_id)
-            .map(|agent| agent.name.as_str())
-            .unwrap_or("That team role");
-        return Err(format!(
-            "{agent} is already attached to another active MCP client. Refresh team_status and use the other unclaimed agent role, or wait for the existing client binding to expire."
-        ));
+            .find(|(key, binding)| {
+                key.as_str() != normalized_key.as_str()
+                    && key.starts_with("mcp-session:")
+                    && binding.session_id == session_id
+                    && binding.agent_id == agent_id
+            })
+            .map(|(key, binding)| (key.clone(), binding.last_seen_at));
+        if let Some((old_key, last_seen_at)) = conflicting {
+            if client_binding_is_recent(now, last_seen_at) {
+                let agent = snapshot
+                    .session
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == agent_id)
+                    .map(|agent| agent.name.as_str())
+                    .unwrap_or("That team role");
+                return Err(format!(
+                    "{agent} is already attached to another recently active MCP client. Refresh team_status and use the other unclaimed agent role, or reconnect after the brief exclusivity window."
+                ));
+            }
+            // A disconnected transport may create a new MCP session key. Replace only the stale
+            // in-memory transport binding; persisted Team tasks/messages/ownership are never replayed.
+            bindings.remove(&old_key);
+        }
     }
     if !stable_mcp_session {
         bindings.retain(|key, binding| {
@@ -1631,6 +1643,7 @@ pub(crate) fn handoff_task(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn update_task(
     app: &AppHandle,
     session_id: &str,
@@ -2047,12 +2060,12 @@ pub(crate) fn set_phase(
         if phase == TeamPhase::Complete {
             return Err("Use team_action complete after verifying the current request. That completes only the current work cycle; the persistent Team itself stays active until the user ends it in RepoTunnel.".to_string());
         }
-        if session.phase == TeamPhase::Planning && phase != TeamPhase::Planning {
-            if !planning_split_ready(session)
-                || !every_agent_posted(session, TeamMessageKind::Decision)
-            {
-                return Err("RepoTunnel keeps implementation locked until both engineers join, both post a plan, each creates one distinct implementation task, and both confirm the split with Decision messages.".to_string());
-            }
+        if session.phase == TeamPhase::Planning
+            && phase != TeamPhase::Planning
+            && (!planning_split_ready(session)
+                || !every_agent_posted(session, TeamMessageKind::Decision))
+        {
+            return Err("RepoTunnel keeps implementation locked until both engineers join, both post a plan, each creates one distinct implementation task, and both confirm the split with Decision messages.".to_string());
         }
         session.phase = phase;
         let agent_mut = joined_agent_mut(session, agent_id)?;
@@ -2378,16 +2391,14 @@ fn snapshot_from_session(
         .filter(|criterion| criterion.verified)
         .count();
     let total_criterion_count = session.criterion_checks.len();
-    let task_progress = if total_relevant == 0 {
-        0
-    } else {
-        (done_task_count.saturating_mul(100)) / total_relevant
-    };
-    let criterion_progress = if total_criterion_count == 0 {
-        0
-    } else {
-        (verified_criterion_count.saturating_mul(100)) / total_criterion_count
-    };
+    let task_progress = done_task_count
+        .saturating_mul(100)
+        .checked_div(total_relevant)
+        .unwrap_or(0);
+    let criterion_progress = verified_criterion_count
+        .saturating_mul(100)
+        .checked_div(total_criterion_count)
+        .unwrap_or(0);
     let progress_percent = if total_relevant == 0 {
         criterion_progress
     } else {
@@ -2427,9 +2438,7 @@ fn recommendation(session: &TeamSession, agent_id: Option<&str>) -> Option<Strin
     let Some(agent_id) = agent_id else {
         return Some("Have both agents join once, then let them plan, divide non-overlapping work, cross-review, verify the current request, and remain attached to this persistent Team until the user ends it.".to_string());
     };
-    let Some(agent) = session.agents.iter().find(|agent| agent.id == agent_id) else {
-        return None;
-    };
+    let agent = session.agents.iter().find(|agent| agent.id == agent_id)?;
     if agent.joined_at.is_none() {
         return Some(format!("Join the session as {}. Do not plan, split, claim, or implement until both Engineer A and Engineer B are connected.", agent.name));
     }
@@ -2539,12 +2548,19 @@ fn recommendation(session: &TeamSession, agent_id: Option<&str>) -> Option<Strin
     {
         return Some("Read the shared discussion and blocked tasks, help resolve blockers, or take another independent task instead of duplicating the other agent's implementation.".to_string());
     }
-    Some("Read the latest team messages and current task ownership. Coordinate with the other agent rather than duplicating active work.".to_string())
+    Some("Read the latest team messages and current task ownership. Stay attached until this request is complete: coordinate with the other agent, long-poll team_status while waiting when useful, and help with review/verification rather than going offline or duplicating active work.".to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_team_path, paths_overlap};
+    use std::collections::BTreeMap;
+
+    use super::{
+        client_binding_is_recent, normalize_team_path, paths_overlap, prune_client_bindings,
+        prune_expired, TeamClientBinding, CLIENT_BINDING_TTL_MS, DEFAULT_LOCK_TTL_SECONDS,
+        MAX_CLIENT_BINDINGS, MAX_LOCK_TTL_SECONDS,
+    };
+    use crate::models::{TeamAgent, TeamAgentStatus, TeamPhase, TeamSession, TeamSessionStatus};
 
     #[test]
     fn team_lock_paths_are_workspace_relative() {
@@ -2559,5 +2575,91 @@ mod tests {
         assert!(paths_overlap("src", "src/app.ts"));
         assert!(paths_overlap("src/app.ts", "src"));
         assert!(!paths_overlap("src", "scripts"));
+    }
+
+    fn joined_agent(id: &str, last_seen_at: u64) -> TeamAgent {
+        TeamAgent {
+            id: id.to_string(),
+            name: id.to_string(),
+            role: "Engineer".to_string(),
+            client_label: None,
+            status: TeamAgentStatus::Active,
+            joined_at: Some(1),
+            last_seen_at: Some(last_seen_at),
+            current_task_id: None,
+            resume_checkpoint: Some("persisted checkpoint".to_string()),
+        }
+    }
+
+    #[test]
+    fn stage_eleven_a_active_team_keeps_joined_engineers_attached_after_long_quiet_period() {
+        let now = 6 * 60 * 60 * 1_000;
+        let mut session = TeamSession {
+            id: "team-long".to_string(),
+            workspace_id: "workspace-a".to_string(),
+            workspace_name: "Project A".to_string(),
+            goal: "Long build".to_string(),
+            success_criteria: Vec::new(),
+            criterion_checks: Vec::new(),
+            status: TeamSessionStatus::Active,
+            phase: TeamPhase::Executing,
+            agents: vec![joined_agent("a", 1), joined_agent("b", 1)],
+            tasks: Vec::new(),
+            messages: Vec::new(),
+            locks: Vec::new(),
+            revision: 1,
+            cycle_number: 1,
+            current_request: Some("Long build".to_string()),
+            completed_cycles: Vec::new(),
+            persistent_team: true,
+            created_at: 1,
+            updated_at: 1,
+            completed_at: None,
+            completion_summary: None,
+        };
+        prune_expired(&mut session, now);
+        assert!(session
+            .agents
+            .iter()
+            .all(|agent| agent.status != TeamAgentStatus::Offline));
+        assert!(session
+            .agents
+            .iter()
+            .all(|agent| agent.resume_checkpoint.as_deref() == Some("persisted checkpoint")));
+    }
+
+    #[test]
+    fn stage_eleven_a_team_locks_and_transport_bindings_support_long_runs_without_unbounded_growth()
+    {
+        assert_eq!(DEFAULT_LOCK_TTL_SECONDS, 60 * 60);
+        assert_eq!(MAX_LOCK_TTL_SECONDS, 12 * 60 * 60);
+        assert!(client_binding_is_recent(90_000, 0));
+        assert!(!client_binding_is_recent(90_001, 0));
+
+        let now = CLIENT_BINDING_TTL_MS + 10_000;
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "expired".to_string(),
+            TeamClientBinding {
+                session_id: "session".to_string(),
+                workspace_id: "workspace".to_string(),
+                agent_id: "a".to_string(),
+                last_seen_at: 1,
+            },
+        );
+        for index in 0..(MAX_CLIENT_BINDINGS + 20) {
+            bindings.insert(
+                format!("fresh-{index:03}"),
+                TeamClientBinding {
+                    session_id: "session".to_string(),
+                    workspace_id: "workspace".to_string(),
+                    agent_id: "a".to_string(),
+                    last_seen_at: now - index as u64,
+                },
+            );
+        }
+        prune_client_bindings(&mut bindings, now);
+        assert!(!bindings.contains_key("expired"));
+        assert_eq!(bindings.len(), MAX_CLIENT_BINDINGS);
     }
 }

@@ -432,6 +432,7 @@ pub(crate) fn record_sandbox_command(
         CommandStatus::Completed => ActivityStatus::Succeeded,
         CommandStatus::Failed | CommandStatus::TimedOut => ActivityStatus::Failed,
         CommandStatus::Rejected => ActivityStatus::Rejected,
+        CommandStatus::Cancelled => ActivityStatus::Stopped,
     };
     record(
         app,
@@ -724,6 +725,7 @@ pub(crate) fn sync_sandbox_command(app: &AppHandle, record: &CommandRecord) {
         CommandStatus::Completed => ActivityStatus::Succeeded,
         CommandStatus::Failed | CommandStatus::TimedOut => ActivityStatus::Failed,
         CommandStatus::Rejected => ActivityStatus::Rejected,
+        CommandStatus::Cancelled => ActivityStatus::Stopped,
     };
     let _ = update_source(
         app,

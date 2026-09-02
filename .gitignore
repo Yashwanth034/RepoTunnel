@@ -18,6 +18,15 @@ Thumbs.db
 *.deb
 *.rpm
 
+# Local validation/test artifacts
+.cargo-ci/
+.aiw-*/
+ai-workspace-*-test/
+src-tauri/browser-fix-*/
+__pycache__/
+*.py[cod]
+*.before-*
+
 # Local credentials and security state
 mcp-auth.json
 mcp-clients.json
@@ -29,3 +38,9 @@ id_ed25519
 *.key
 *.p12
 *.pfx
+# Local Direct HTTPS proof/certificate material
+.direct-live-certbot/
+.direct-live-certbot-prod/
+.direct-host-certbot-prod/
+.direct-live-acme/
+.well-known/

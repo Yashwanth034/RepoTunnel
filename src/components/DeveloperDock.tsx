@@ -867,13 +867,17 @@ export default function DeveloperDock({
                   <span>{path} · {fileProblems.length}</span>
                 </div>
                 {fileProblems.map((problem) => (
-                  <button type="button" key={problem.key} onClick={() => onOpenProblem(problem.path, problem.line, problem.column)}>
-                    <span className={`problem-severity ${problem.severity}`}>{problem.severity === "error" ? "×" : "!"}</span>
-                    <span className="problem-copy">
-                      <strong>{problem.message}</strong>
-                      <small>Ln {problem.line}, Col {problem.column} · {problem.source}</small>
-                    </span>
-                  </button>
+                  <div className="developer-problem-row" key={problem.key}>
+                    <button type="button" className="developer-problem-main" onClick={() => onOpenProblem(problem.path, problem.line, problem.column)}>
+                      <span className={`problem-severity ${problem.severity}`}>{problem.severity === "error" ? "×" : "!"}</span>
+                      <span className="problem-copy">
+                        <strong>{problem.message}</strong>
+                        <small>Ln {problem.line}, Col {problem.column} · {problem.source}</small>
+                      </span>
+                    </button>
+                    <div className="developer-problem-actions">
+                    </div>
+                  </div>
                 ))}
               </section>
             ))}

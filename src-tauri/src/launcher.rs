@@ -156,6 +156,160 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         supports_paths: true,
     },
     CatalogApplication {
+        id: "microsoft-word",
+        name: "Microsoft Word",
+        category: "document",
+        executables: &[
+            "WINWORD.EXE",
+            "WINWORD",
+            "/Applications/Microsoft Word.app/Contents/MacOS/Microsoft Word",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "microsoft-excel",
+        name: "Microsoft Excel",
+        category: "spreadsheet",
+        executables: &[
+            "EXCEL.EXE",
+            "EXCEL",
+            "/Applications/Microsoft Excel.app/Contents/MacOS/Microsoft Excel",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "microsoft-powerpoint",
+        name: "Microsoft PowerPoint",
+        category: "presentation",
+        executables: &[
+            "POWERPNT.EXE",
+            "POWERPNT",
+            "/Applications/Microsoft PowerPoint.app/Contents/MacOS/Microsoft PowerPoint",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "libreoffice-writer",
+        name: "LibreOffice Writer",
+        category: "document",
+        executables: &[
+            "libreoffice",
+            "soffice",
+            "/usr/bin/libreoffice",
+            "/snap/bin/libreoffice",
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "libreoffice-calc",
+        name: "LibreOffice Calc",
+        category: "spreadsheet",
+        executables: &[
+            "libreoffice",
+            "soffice",
+            "/usr/bin/libreoffice",
+            "/snap/bin/libreoffice",
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "libreoffice-impress",
+        name: "LibreOffice Impress",
+        category: "presentation",
+        executables: &[
+            "libreoffice",
+            "soffice",
+            "/usr/bin/libreoffice",
+            "/snap/bin/libreoffice",
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "apple-pages",
+        name: "Pages",
+        category: "document",
+        executables: &["/Applications/Pages.app/Contents/MacOS/Pages"],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "apple-numbers",
+        name: "Numbers",
+        category: "spreadsheet",
+        executables: &["/Applications/Numbers.app/Contents/MacOS/Numbers"],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "apple-keynote",
+        name: "Keynote",
+        category: "presentation",
+        executables: &["/Applications/Keynote.app/Contents/MacOS/Keynote"],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "android-studio",
+        name: "Android Studio",
+        category: "development",
+        executables: &[
+            "studio",
+            "android-studio",
+            "/opt/android-studio/bin/studio",
+            "/usr/local/android-studio/bin/studio",
+            "/snap/bin/android-studio",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "unity",
+        name: "Unity",
+        category: "game engine",
+        executables: &[
+            "unity-editor",
+            "unity",
+            "Unity",
+            "unityhub",
+            "/snap/bin/unityhub",
+        ],
+        supports_urls: false,
+        supports_paths: false,
+    },
+    CatalogApplication {
+        id: "blender",
+        name: "Blender",
+        category: "3D",
+        executables: &["blender", "/snap/bin/blender"],
+        supports_urls: false,
+        supports_paths: false,
+    },
+    CatalogApplication {
+        id: "godot",
+        name: "Godot",
+        category: "game engine",
+        executables: &["godot4", "godot", "godot3", "/snap/bin/godot"],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "docker",
+        name: "Docker",
+        category: "development",
+        executables: &["docker", "/usr/bin/docker", "/usr/local/bin/docker"],
+        supports_urls: false,
+        supports_paths: false,
+    },
+    CatalogApplication {
         id: "nautilus",
         name: "Files",
         category: "files",
@@ -317,15 +471,78 @@ fn effective_command_policy(workspace: &Workspace) -> CommandPolicy {
     }
 }
 
+#[cfg(windows)]
+fn find_windows_office_executable(name: &str) -> Option<PathBuf> {
+    let executable = name.to_ascii_uppercase();
+    if !matches!(
+        executable.as_str(),
+        "WINWORD.EXE" | "WINWORD" | "EXCEL.EXE" | "EXCEL" | "POWERPNT.EXE" | "POWERPNT"
+    ) {
+        return None;
+    }
+    let executable = if executable.ends_with(".EXE") {
+        executable
+    } else {
+        format!("{executable}.EXE")
+    };
+    let office_dirs = [
+        "Microsoft Office/root/Office16",
+        "Microsoft Office/Office16",
+        "Microsoft Office/root/Office15",
+        "Microsoft Office/Office15",
+    ];
+    for root_name in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        let Some(root) = env::var_os(root_name) else {
+            continue;
+        };
+        for directory in office_dirs {
+            let candidate = PathBuf::from(&root).join(directory).join(&executable);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 fn find_executable(name: &str) -> Option<PathBuf> {
-    if name.contains('/') {
+    if name.contains('/') || name.contains('\\') {
         let path = PathBuf::from(name);
         return path.is_file().then_some(path);
     }
-    let path_value = env::var_os("PATH")?;
-    env::split_paths(&path_value)
-        .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+    if let Some(path_value) = env::var_os("PATH") {
+        if let Some(candidate) = env::split_paths(&path_value)
+            .map(|directory| directory.join(name))
+            .find(|candidate| candidate.is_file())
+        {
+            return Some(candidate);
+        }
+    }
+    #[cfg(windows)]
+    if let Some(candidate) = find_windows_office_executable(name) {
+        return Some(candidate);
+    }
+    None
+}
+
+pub(crate) fn application_launch_args(application_id: &str) -> &'static [&'static str] {
+    match application_id {
+        "libreoffice-writer" => &["--writer"],
+        "libreoffice-calc" => &["--calc"],
+        "libreoffice-impress" => &["--impress"],
+        _ => &[],
+    }
+}
+
+fn application_args(application_id: &str, target: Option<String>) -> Vec<String> {
+    let mut args = application_launch_args(application_id)
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    if let Some(target) = target {
+        args.push(target);
+    }
+    args
 }
 
 fn catalog_entry(application_id: &str) -> Option<CatalogApplication> {
@@ -507,7 +724,8 @@ fn execute_request(workspace: &Workspace, request: &StoredLaunchRequest) -> Resu
                         application.name
                     ));
                 }
-                spawn_detached(&executable, &[target])
+                let args = application_args(application_id, Some(target));
+                spawn_detached(&executable, &args)
             } else {
                 let (executable, mut args) = default_opener()?;
                 args.push(target);
@@ -516,7 +734,8 @@ fn execute_request(workspace: &Workspace, request: &StoredLaunchRequest) -> Resu
         }
         StoredLaunchRequest::Application { application_id } => {
             let (_, executable) = resolve_application(application_id)?;
-            spawn_detached(&executable, &[])
+            let args = application_args(application_id, None);
+            spawn_detached(&executable, &args)
         }
     }
 }

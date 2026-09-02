@@ -38,7 +38,7 @@ After both engineers are connected, the Team stays attached to the project. You 
 
 ## Install
 
-**Current version: v0.1.0**
+**Current version: v0.2.0**
 
 Download RepoTunnel from the official GitHub Releases page:
 
@@ -132,7 +132,7 @@ RepoTunnel is designed around explicit project access instead of unrestricted co
 - **Revoke MCP access** immediately invalidates current remote authorization.
 - Git push is allowed only when you explicitly ask the AI to push.
 - **Pause AI** provides an emergency stop for RepoTunnel-managed AI activity.
-- On Linux, AI terminal and process execution is isolated with Bubblewrap and is blocked if the required sandbox is unavailable.
+- AI terminal/process execution uses a fail-closed native sandbox: Bubblewrap on Linux, ephemeral AppContainer + Job Object isolation on Windows, and a Seatbelt `sandbox-exec` compatibility backend on macOS. RepoTunnel blocks execution instead of silently falling back to unrestricted host access.
 
 For the complete security model, see [`docs/security.md`](docs/security.md).
 
@@ -166,7 +166,7 @@ RepoTunnel intentionally blocks AI terminal execution when the required sandbox 
 
 ### Windows or macOS shows a security warning
 
-The current v0.1.0 Windows and macOS packages are not commercially code-signed or Apple-notarized.
+The current v0.2.0 Windows and macOS packages are not commercially code-signed or Apple-notarized.
 
 Download RepoTunnel only from the official release page and verify the package using `RepoTunnel-SHA256SUMS.txt`.
 

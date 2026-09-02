@@ -1,21 +1,93 @@
-name: Platform Build Validation
+name: Release
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 permissions:
   contents: read
 
 jobs:
-  windows:
-    name: Windows x64
-    runs-on: windows-latest
+  quality:
+    name: Quality and security
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Verify tag and version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}"
+
+      - name: Run release checks
+        run: npm run release:check
+
+  linux:
+    name: Linux x64
+    needs: quality
+    runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
-
     steps:
-      - name: Checkout current v0.1.0 source
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -31,53 +103,112 @@ jobs:
         with:
           workspaces: src-tauri -> target
 
-      - name: Install frontend dependencies
+      - name: Install dependencies
         run: npm ci
 
-      - name: Frontend build
-        run: npm run build
+      - name: Build packages
+        run: npm run tauri -- build --bundles deb,rpm,appimage
 
-      - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: Collect packages
+        shell: bash
+        run: |
+          mkdir -p platform-artifacts
+          find src-tauri/target/release/bundle -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) \
+            -exec cp {} platform-artifacts/ \;
+          test "$(find platform-artifacts -type f | wc -l)" -ge 3
+          ls -lh platform-artifacts
 
-      - name: Build Windows installers
-        run: npm run tauri build -- --bundles nsis,msi
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: RepoTunnel-linux-x64
+          path: platform-artifacts/*
+          if-no-files-found: error
 
-      - name: Collect Windows installers
+  windows:
+    name: Windows x64
+    needs: quality
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify Windows build
+        shell: pwsh
+        run: |
+          $entry = Get-Content "src-tauri/src/main.rs" -Raw
+          if ($entry -notmatch 'windows_subsystem\s*=\s*"windows"') {
+            throw "Windows release builds must use the GUI subsystem."
+          }
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Build installers
+        run: npm run tauri -- build --bundles nsis,msi
+
+      - name: Collect installers
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path platform-artifacts | Out-Null
-          Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File |
+          Get-ChildItem src-tauri/target/release/bundle -Recurse -File |
             Where-Object { $_.Extension -in '.msi', '.exe' } |
             Copy-Item -Destination platform-artifacts
+          if ((Get-ChildItem platform-artifacts -File).Count -lt 2) {
+            throw "Expected NSIS and MSI installers."
+          }
           Get-ChildItem platform-artifacts
 
-      - name: Upload Windows artifacts
+      - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
-          name: RepoTunnel-v0.1.0-windows-x64
+          name: RepoTunnel-windows-x64
           path: platform-artifacts/*
           if-no-files-found: error
 
   macos:
     name: macOS ${{ matrix.name }}
-    runs-on: macos-latest
+    needs: quality
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Apple-Silicon
+          - name: Apple Silicon
+            runner: macos-latest
             target: aarch64-apple-darwin
+            file_arch: aarch64
           - name: Intel
+            runner: macos-15-intel
             target: x86_64-apple-darwin
-
+            file_arch: x64
+    runs-on: ${{ matrix.runner }}
     env:
       APPLE_SIGNING_IDENTITY: "-"
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
-
     steps:
-      - name: Checkout current v0.1.0 source
-        uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v6
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -89,33 +220,87 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: clippy
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
 
-      - name: Install frontend dependencies
+      - name: Install dependencies
         run: npm ci
 
-      - name: Frontend build
-        run: npm run build
-
-      - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
-      - name: Build macOS DMG
-        run: npm run tauri build -- --target ${{ matrix.target }} --bundles dmg
-
-      - name: Collect macOS DMG
+      - name: Verify macOS build
         run: |
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Build DMG
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles dmg
+
+      - name: Verify and collect DMG
+        shell: bash
+        run: |
+          BUNDLE_ROOT="src-tauri/target/${{ matrix.target }}/release/bundle"
+          APP_PATH="$(find "$BUNDLE_ROOT" -type d -name '*.app' -print -quit)"
+          DMG_PATH="$(find "$BUNDLE_ROOT" -type f -name '*.dmg' -print -quit)"
+          test -n "$APP_PATH"
+          test -n "$DMG_PATH"
+          test -f "$APP_PATH/Contents/Info.plist"
+          EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
+          test -x "$APP_PATH/Contents/MacOS/$EXECUTABLE"
+          VERSION="$(node -p "require('./package.json').version")"
           mkdir -p platform-artifacts
-          find src-tauri/target -type f -name '*.dmg' -exec cp {} platform-artifacts/ \;
+          cp "$DMG_PATH" "platform-artifacts/RepoTunnel_${VERSION}_${{ matrix.file_arch }}.dmg"
           ls -lh platform-artifacts
 
-      - name: Upload macOS artifact
+      - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: RepoTunnel-v0.1.0-macos-${{ matrix.target }}
+          name: RepoTunnel-macos-${{ matrix.file_arch }}
           path: platform-artifacts/*.dmg
           if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: github.ref_type == 'tag'
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download packages
+        uses: actions/download-artifact@v5
+        with:
+          path: release-artifacts
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          mkdir -p release-files
+          find release-artifacts -type f -exec cp {} release-files/ \;
+          test "$(find release-files -maxdepth 1 -type f | wc -l)" -ge 7
+          (
+            cd release-files
+            sha256sum * > RepoTunnel-SHA256SUMS.txt
+          )
+          VERSION="$(node -p "require('./package.json').version")"
+          awk -v version="$VERSION" '
+            $0 ~ "^## " version " " { capture=1; next }
+            /^## / && capture { exit }
+            capture { print }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+          ls -lh release-files
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" release-files/* \
+            --verify-tag \
+            --title "RepoTunnel ${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md

@@ -184,7 +184,7 @@ pub(crate) fn readiness(workspace: &Workspace) -> WorkflowReadiness {
                 "Sandboxed verification",
                 WorkflowCheckStatus::Warning,
                 execution_status.message.unwrap_or_else(|| {
-                    "Bubblewrap is unavailable, so RepoTunnel will refuse project commands."
+                    "The native OS sandbox is unavailable, so RepoTunnel will refuse project commands."
                         .to_string()
                 }),
             ));

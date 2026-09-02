@@ -17,20 +17,61 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 const AUTH_FILE: &str = "mcp-auth.json";
 const CLIENTS_FILE: &str = "mcp-clients.json";
 const MAX_REGISTERED_CLIENTS: usize = 32;
+const MAX_AUTH_SESSIONS: usize = 64;
 const CLIENT_REGISTRATION_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
 const TOKEN_BYTES: usize = 32;
 const ACCESS_TOKEN_LIFETIME_SECS: u64 = 60 * 60;
 const AUTH_CODE_LIFETIME_SECS: u64 = 5 * 60;
+const AUTH_STORE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StoredAuth {
+struct LegacyStoredAuth {
     version: u32,
     client_id: String,
     resource: String,
     access_token_hash: String,
     access_expires_at: u64,
     refresh_token_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAuthSession {
+    client_id: String,
+    resource: String,
+    access_token_hash: String,
+    access_expires_at: u64,
+    refresh_token_hash: String,
+    #[serde(default)]
+    issued_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAuthStore {
+    version: u32,
+    sessions: Vec<StoredAuthSession>,
+}
+
+impl Default for StoredAuthStore {
+    fn default() -> Self {
+        Self {
+            version: AUTH_STORE_VERSION,
+            sessions: Vec::new(),
+        }
+    }
+}
+
+static AUTH_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static CLIENT_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn auth_store_lock() -> &'static Mutex<()> {
+    AUTH_STORE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn client_store_lock() -> &'static Mutex<()> {
+    CLIENT_STORE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -160,7 +201,51 @@ pub(crate) fn verify_token(candidate: &str, expected_hash: &[u8; 32]) -> bool {
         == 1
 }
 
-fn load_auth(app: &AppHandle) -> Result<Option<StoredAuth>, String> {
+fn validate_session(session: &StoredAuthSession) -> Result<(), String> {
+    if session.client_id.trim().is_empty() || session.resource.trim().is_empty() {
+        return Err("Saved RepoTunnel authentication data is invalid.".to_string());
+    }
+    decode_hash(&session.access_token_hash)?;
+    decode_hash(&session.refresh_token_hash)?;
+    Ok(())
+}
+
+fn parse_auth_store(contents: &[u8]) -> Result<StoredAuthStore, String> {
+    if let Ok(store) = serde_json::from_slice::<StoredAuthStore>(contents) {
+        if store.version != AUTH_STORE_VERSION {
+            return Err("Unsupported RepoTunnel authentication data version.".to_string());
+        }
+        if store.sessions.len() > MAX_AUTH_SESSIONS {
+            return Err("Saved RepoTunnel authentication data has too many sessions.".to_string());
+        }
+        for session in &store.sessions {
+            validate_session(session)?;
+        }
+        return Ok(store);
+    }
+
+    let legacy: LegacyStoredAuth = serde_json::from_slice(contents)
+        .map_err(|_| "Saved RepoTunnel authentication data is invalid.".to_string())?;
+    if legacy.version != 1 {
+        return Err("Unsupported RepoTunnel authentication data version.".to_string());
+    }
+
+    let session = StoredAuthSession {
+        client_id: legacy.client_id,
+        resource: legacy.resource,
+        access_token_hash: legacy.access_token_hash,
+        access_expires_at: legacy.access_expires_at,
+        refresh_token_hash: legacy.refresh_token_hash,
+        issued_at: 0,
+    };
+    validate_session(&session)?;
+    Ok(StoredAuthStore {
+        version: AUTH_STORE_VERSION,
+        sessions: vec![session],
+    })
+}
+
+fn load_auth_store_unlocked(app: &AppHandle) -> Result<StoredAuthStore, String> {
     let path = auth_path(app)?;
 
     if fs::symlink_metadata(&path)
@@ -173,38 +258,41 @@ fn load_auth(app: &AppHandle) -> Result<Option<StoredAuth>, String> {
     }
 
     if !path.exists() {
-        return Ok(None);
+        return Ok(StoredAuthStore::default());
     }
 
     let contents = fs::read(&path)
         .map_err(|error| format!("Could not read RepoTunnel authentication data: {error}"))?;
 
     if contents.is_empty() {
-        return Ok(None);
+        return Ok(StoredAuthStore::default());
     }
 
-    let auth: StoredAuth = serde_json::from_slice(&contents)
-        .map_err(|_| "Saved RepoTunnel authentication data is invalid.".to_string())?;
-
-    if auth.version != 1 {
-        return Err("Unsupported RepoTunnel authentication data version.".to_string());
-    }
-
-    decode_hash(&auth.access_token_hash)?;
-    decode_hash(&auth.refresh_token_hash)?;
-
-    Ok(Some(auth))
+    parse_auth_store(&contents)
 }
 
-fn save_auth(app: &AppHandle, auth: &StoredAuth) -> Result<(), String> {
-    let contents = serde_json::to_vec_pretty(auth)
+fn save_auth_store_unlocked(app: &AppHandle, store: &StoredAuthStore) -> Result<(), String> {
+    let contents = serde_json::to_vec_pretty(store)
         .map_err(|error| format!("Could not serialize RepoTunnel authentication data: {error}"))?;
 
     private_write(&auth_path(app)?, &contents)
 }
 
-pub(crate) fn issue_tokens(
-    app: &AppHandle,
+fn append_session(store: &mut StoredAuthStore, session: StoredAuthSession) {
+    if store.sessions.len() >= MAX_AUTH_SESSIONS {
+        store.sessions.sort_by_key(|item| item.issued_at);
+        let remove_count = store
+            .sessions
+            .len()
+            .saturating_add(1)
+            .saturating_sub(MAX_AUTH_SESSIONS);
+        store.sessions.drain(0..remove_count);
+    }
+    store.sessions.push(session);
+}
+
+fn issue_tokens_into_store(
+    store: &mut StoredAuthStore,
     client_id: &str,
     resource: &str,
 ) -> Result<IssuedTokens, String> {
@@ -216,16 +304,17 @@ pub(crate) fn issue_tokens(
         .checked_add(ACCESS_TOKEN_LIFETIME_SECS)
         .ok_or_else(|| "Could not calculate RepoTunnel access-token expiry.".to_string())?;
 
-    let stored = StoredAuth {
-        version: 1,
-        client_id: client_id.to_string(),
-        resource: resource.to_string(),
-        access_token_hash: encode_hash(&hash_token(&access_token)),
-        access_expires_at,
-        refresh_token_hash: encode_hash(&hash_token(&refresh_token)),
-    };
-
-    save_auth(app, &stored)?;
+    append_session(
+        store,
+        StoredAuthSession {
+            client_id: client_id.to_string(),
+            resource: resource.to_string(),
+            access_token_hash: encode_hash(&hash_token(&access_token)),
+            access_expires_at,
+            refresh_token_hash: encode_hash(&hash_token(&refresh_token)),
+            issued_at: now,
+        },
+    );
 
     Ok(IssuedTokens {
         access_token,
@@ -234,21 +323,67 @@ pub(crate) fn issue_tokens(
     })
 }
 
+fn session_access_matches(
+    session: &StoredAuthSession,
+    candidate: &str,
+    resource: &str,
+    now: u64,
+) -> Result<bool, String> {
+    if session.resource != resource || now >= session.access_expires_at {
+        return Ok(false);
+    }
+    let expected = decode_hash(&session.access_token_hash)?;
+    Ok(verify_token(candidate, &expected))
+}
+
+fn refresh_session_index(
+    store: &StoredAuthStore,
+    candidate: &str,
+    client_id: &str,
+    resource: &str,
+) -> Result<Option<usize>, String> {
+    for (index, session) in store.sessions.iter().enumerate() {
+        if session.client_id != client_id || session.resource != resource {
+            continue;
+        }
+        let expected = decode_hash(&session.refresh_token_hash)?;
+        if verify_token(candidate, &expected) {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn issue_tokens(
+    app: &AppHandle,
+    client_id: &str,
+    resource: &str,
+) -> Result<IssuedTokens, String> {
+    let _guard = auth_store_lock()
+        .lock()
+        .map_err(|_| "RepoTunnel authentication state is unavailable.".to_string())?;
+    let mut store = load_auth_store_unlocked(app)?;
+    let tokens = issue_tokens_into_store(&mut store, client_id, resource)?;
+    save_auth_store_unlocked(app, &store)?;
+    Ok(tokens)
+}
+
 pub(crate) fn verify_access_token(
     app: &AppHandle,
     candidate: &str,
     resource: &str,
 ) -> Result<bool, String> {
-    let Some(auth) = load_auth(app)? else {
-        return Ok(false);
-    };
-
-    if auth.resource != resource || now_epoch_secs()? >= auth.access_expires_at {
-        return Ok(false);
+    let _guard = auth_store_lock()
+        .lock()
+        .map_err(|_| "RepoTunnel authentication state is unavailable.".to_string())?;
+    let store = load_auth_store_unlocked(app)?;
+    let now = now_epoch_secs()?;
+    for session in &store.sessions {
+        if session_access_matches(session, candidate, resource, now)? {
+            return Ok(true);
+        }
     }
-
-    let expected = decode_hash(&auth.access_token_hash)?;
-    Ok(verify_token(candidate, &expected))
+    Ok(false)
 }
 
 pub(crate) fn rotate_refresh_token(
@@ -257,22 +392,19 @@ pub(crate) fn rotate_refresh_token(
     client_id: &str,
     resource: &str,
 ) -> Result<Option<IssuedTokens>, String> {
-    let Some(auth) = load_auth(app)? else {
+    let _guard = auth_store_lock()
+        .lock()
+        .map_err(|_| "RepoTunnel authentication state is unavailable.".to_string())?;
+    let mut store = load_auth_store_unlocked(app)?;
+    let Some(index) = refresh_session_index(&store, candidate, client_id, resource)? else {
         return Ok(None);
     };
 
-    if auth.client_id != client_id || auth.resource != resource {
-        return Ok(None);
-    }
-
-    let expected = decode_hash(&auth.refresh_token_hash)?;
-    if !verify_token(candidate, &expected) {
-        return Ok(None);
-    }
-
-    // Successful refresh issues a new access token AND a new refresh token.
-    // The previous refresh token therefore becomes invalid immediately.
-    issue_tokens(app, client_id, resource).map(Some)
+    // Rotate only the matching authorization session. Other ChatGPT/MCP sessions remain valid.
+    store.sessions.remove(index);
+    let tokens = issue_tokens_into_store(&mut store, client_id, resource)?;
+    save_auth_store_unlocked(app, &store)?;
+    Ok(Some(tokens))
 }
 
 fn valid_pkce_verifier(verifier: &str) -> bool {
@@ -423,6 +555,9 @@ pub(crate) fn register_client(
     redirect_uris: &[String],
 ) -> Result<RegisteredClient, String> {
     let (client_name, redirect_uris) = normalize_client_registration(client_name, redirect_uris)?;
+    let _guard = client_store_lock()
+        .lock()
+        .map_err(|_| "OAuth client registration state is unavailable.".to_string())?;
 
     let now = now_epoch_secs()?;
     let mut clients = load_registered_clients(app)?;
@@ -455,6 +590,9 @@ pub(crate) fn registered_client_for_redirect(
     client_id: &str,
     redirect_uri: &str,
 ) -> Result<Option<RegisteredClient>, String> {
+    let _guard = client_store_lock()
+        .lock()
+        .map_err(|_| "OAuth client registration state is unavailable.".to_string())?;
     let now = now_epoch_secs()?;
 
     Ok(load_registered_clients(app)?.into_iter().find(|client| {
@@ -555,6 +693,9 @@ pub(crate) fn redeem_authorization_code(
 }
 
 pub(crate) fn revoke_tokens(app: &AppHandle) -> Result<(), String> {
+    let _guard = auth_store_lock()
+        .lock()
+        .map_err(|_| "RepoTunnel authentication state is unavailable.".to_string())?;
     let path = auth_path(app)?;
 
     if fs::symlink_metadata(&path)
@@ -578,9 +719,11 @@ pub(crate) fn revoke_tokens(app: &AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_authorization_code, generate_token, hash_token, normalize_client_registration,
-        pkce_s256_challenge, redeem_authorization_code, valid_redirect_uri, verify_pkce_s256,
-        verify_token,
+        create_authorization_code, encode_hash, generate_token, hash_token,
+        issue_tokens_into_store, normalize_client_registration, now_epoch_secs, parse_auth_store,
+        pkce_s256_challenge, redeem_authorization_code, refresh_session_index,
+        session_access_matches, valid_redirect_uri, verify_pkce_s256, verify_token,
+        LegacyStoredAuth, StoredAuthStore, AUTH_STORE_VERSION,
     };
 
     #[test]
@@ -675,6 +818,97 @@ mod tests {
         assert!(!valid_redirect_uri("http://example.com/callback"));
         assert!(!valid_redirect_uri("file:///tmp/callback"));
         assert!(!valid_redirect_uri("javascript:alert(1)"));
+    }
+
+    #[test]
+    fn migrates_legacy_single_session_auth_store() {
+        let access_token = "legacy-access";
+        let refresh_token = "legacy-refresh";
+        let legacy = LegacyStoredAuth {
+            version: 1,
+            client_id: "legacy-client".to_string(),
+            resource: "https://example.test/mcp".to_string(),
+            access_token_hash: encode_hash(&hash_token(access_token)),
+            access_expires_at: u64::MAX,
+            refresh_token_hash: encode_hash(&hash_token(refresh_token)),
+        };
+        let contents = serde_json::to_vec(&legacy).unwrap();
+        let store = parse_auth_store(&contents).unwrap();
+
+        assert_eq!(store.version, AUTH_STORE_VERSION);
+        assert_eq!(store.sessions.len(), 1);
+        assert!(session_access_matches(
+            &store.sessions[0],
+            access_token,
+            "https://example.test/mcp",
+            1,
+        )
+        .unwrap());
+        assert_eq!(
+            refresh_session_index(
+                &store,
+                refresh_token,
+                "legacy-client",
+                "https://example.test/mcp",
+            )
+            .unwrap(),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn multiple_oauth_sessions_do_not_invalidate_each_other() {
+        let resource = "https://example.test/mcp";
+        let mut store = StoredAuthStore::default();
+        let first = issue_tokens_into_store(&mut store, "chatgpt-a", resource).unwrap();
+        let second = issue_tokens_into_store(&mut store, "chatgpt-b", resource).unwrap();
+        let now = now_epoch_secs().unwrap();
+
+        assert_eq!(store.sessions.len(), 2);
+        assert!(store.sessions.iter().any(|session| session_access_matches(
+            session,
+            &first.access_token,
+            resource,
+            now
+        )
+        .unwrap()));
+        assert!(store.sessions.iter().any(|session| session_access_matches(
+            session,
+            &second.access_token,
+            resource,
+            now
+        )
+        .unwrap()));
+
+        let first_index =
+            refresh_session_index(&store, &first.refresh_token, "chatgpt-a", resource)
+                .unwrap()
+                .unwrap();
+        store.sessions.remove(first_index);
+        let replacement = issue_tokens_into_store(&mut store, "chatgpt-a", resource).unwrap();
+
+        assert!(!store.sessions.iter().any(|session| session_access_matches(
+            session,
+            &first.access_token,
+            resource,
+            now
+        )
+        .unwrap()));
+        assert!(store.sessions.iter().any(|session| session_access_matches(
+            session,
+            &second.access_token,
+            resource,
+            now
+        )
+        .unwrap()));
+        assert!(store.sessions.iter().any(|session| {
+            session_access_matches(session, &replacement.access_token, resource, now).unwrap()
+        }));
+        assert!(
+            refresh_session_index(&store, &first.refresh_token, "chatgpt-a", resource,)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

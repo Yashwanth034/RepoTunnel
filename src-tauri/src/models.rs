@@ -43,6 +43,43 @@ pub(crate) struct Workspace {
     pub(crate) command_policy: CommandPolicy,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectMemory {
+    pub(crate) workspace_id: String,
+    pub(crate) workspace_name: String,
+    pub(crate) summary: String,
+    pub(crate) goals: Vec<String>,
+    pub(crate) decisions: Vec<String>,
+    pub(crate) preferences: Vec<String>,
+    pub(crate) next_steps: Vec<String>,
+    pub(crate) updated_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectSetupStatus {
+    pub(crate) workspace_id: String,
+    pub(crate) workspace_name: String,
+    pub(crate) project_kind: String,
+    pub(crate) framework: String,
+    pub(crate) package_manager: Option<String>,
+    pub(crate) dependencies_ready: bool,
+    pub(crate) setup_needed: bool,
+    pub(crate) setup_command: Option<String>,
+    pub(crate) dev_command: Option<String>,
+    pub(crate) dev_url: Option<String>,
+    pub(crate) detected_port: Option<u16>,
+    pub(crate) notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectSetupOutcome {
+    pub(crate) setup: ProjectSetupStatus,
+    pub(crate) command: TerminalCommandRecord,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorkspaceHealth {
@@ -212,6 +249,16 @@ pub(crate) struct GatewayStatus {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublicTunnelStatus {
     pub(crate) configured: bool,
+    pub(crate) provider: String,
+    pub(crate) provider_available: bool,
+    pub(crate) cloudflared_available: bool,
+    pub(crate) cloudflare_origin_port: u16,
+    pub(crate) direct_https_port: u16,
+    pub(crate) direct_http_challenge_port: u16,
+    pub(crate) certbot_available: bool,
+    pub(crate) certbot_version: Option<String>,
+    pub(crate) tls_trusted: bool,
+    pub(crate) public_reachable: bool,
     pub(crate) running: bool,
     pub(crate) ready: bool,
     pub(crate) public_url: Option<String>,
@@ -219,6 +266,9 @@ pub(crate) struct PublicTunnelStatus {
     pub(crate) auto_start: bool,
     pub(crate) request_count: u64,
     pub(crate) last_remote_request_at: Option<u64>,
+    pub(crate) usage_label: String,
+    pub(crate) usage_url: String,
+    pub(crate) origin_port: Option<u16>,
     pub(crate) message: Option<String>,
 }
 
@@ -389,7 +439,7 @@ pub(crate) struct VersionTimeline {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VersionRestoreResult {
     pub(crate) current_version_id: Option<String>,
-    pub(crate) recovery_checkpoint_id: String,
+    pub(crate) recovery_checkpoint_id: Option<String>,
     pub(crate) restored_files: usize,
     pub(crate) removed_files: usize,
 }
@@ -416,6 +466,7 @@ pub(crate) struct ChangeRecord {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChangeOutcome {
     pub(crate) applied: bool,
+    pub(crate) queued: bool,
     pub(crate) change: ChangeRecord,
     pub(crate) file: Option<FileInfo>,
 }
@@ -508,6 +559,7 @@ pub(crate) enum CommandStatus {
     Failed,
     Rejected,
     TimedOut,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -789,6 +841,19 @@ pub(crate) struct BrowserPageInspection {
     pub(crate) tag: Option<String>,
     pub(crate) text: String,
     pub(crate) html: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserVisualSelection {
+    pub(crate) workspace_id: String,
+    pub(crate) tab_id: String,
+    pub(crate) url: String,
+    pub(crate) selector: String,
+    pub(crate) tag: String,
+    pub(crate) text: String,
+    pub(crate) html: String,
+    pub(crate) selected_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]

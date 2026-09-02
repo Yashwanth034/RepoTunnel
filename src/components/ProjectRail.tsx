@@ -172,7 +172,7 @@ function ProjectRail({
               <strong>{workspace.name}</strong>
               <small>{compactPath(workspace.path)}</small>
             </span>
-            <span className={`project-ready-dot ${unavailable ? "missing" : ""}`} title={unavailable ? "Project path unavailable" : "Approved workspace"} />
+            {selected ? <span className={`project-ready-dot ${unavailable ? "missing" : ""}`} title={unavailable ? "Project path unavailable" : "Selected project"} /> : null}
           </button>
           <div className="project-rail-actions">
             {selected ? (

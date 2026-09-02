@@ -23,8 +23,8 @@ use url::Url;
 use crate::models::{
     BrowserActionKind, BrowserActionOutcome, BrowserActionRecord, BrowserActionStatus,
     BrowserApplication, BrowserAutomationStatus, BrowserConsoleEntry, BrowserDiagnostics,
-    BrowserNetworkFailure, BrowserPageInspection, BrowserScreenshot, BrowserTab, Workspace,
-    WorkspaceChangePolicy,
+    BrowserNetworkFailure, BrowserPageInspection, BrowserScreenshot, BrowserTab,
+    BrowserVisualSelection, Workspace, WorkspaceChangePolicy,
 };
 
 const BROWSER_HISTORY_FILE: &str = "browser-history.json";
@@ -40,6 +40,8 @@ static BROWSER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static HISTORY_LOCK: Mutex<()> = Mutex::new(());
 static BROWSER_RUNTIMES: OnceLock<Mutex<HashMap<String, BrowserRuntime>>> = OnceLock::new();
 static BROWSER_NODE: OnceLock<PathBuf> = OnceLock::new();
+static VISUAL_SELECTIONS: OnceLock<Mutex<HashMap<String, BrowserVisualSelection>>> =
+    OnceLock::new();
 
 struct BrowserRuntime {
     browser_id: String,
@@ -54,6 +56,18 @@ struct BrowserRuntime {
     monitor_child: Child,
     event_path: PathBuf,
 }
+
+type BrowserRuntimeSnapshot = (
+    String,
+    String,
+    PathBuf,
+    u32,
+    u16,
+    u64,
+    String,
+    Option<String>,
+    PathBuf,
+);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -134,6 +148,10 @@ const BROWSER_CATALOG: &[BrowserCatalogEntry] = &[
 
 fn runtimes() -> &'static Mutex<HashMap<String, BrowserRuntime>> {
     BROWSER_RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn visual_selections() -> &'static Mutex<HashMap<String, BrowserVisualSelection>> {
+    VISUAL_SELECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn now_millis() -> u64 {
@@ -491,19 +509,7 @@ fn stop_runtime_value(mut runtime: BrowserRuntime) {
     let _ = runtime.chrome_child.wait();
 }
 
-fn runtime_snapshot(
-    workspace_id: &str,
-) -> Option<(
-    String,
-    String,
-    PathBuf,
-    u32,
-    u16,
-    u64,
-    String,
-    Option<String>,
-    PathBuf,
-)> {
+fn runtime_snapshot(workspace_id: &str) -> Option<BrowserRuntimeSnapshot> {
     let guard = runtimes().lock().ok()?;
     let runtime = guard.get(workspace_id)?;
     Some((
@@ -519,20 +525,7 @@ fn runtime_snapshot(
     ))
 }
 
-fn ping_runtime(
-    app: &AppHandle,
-    workspace_id: &str,
-) -> Option<(
-    String,
-    String,
-    PathBuf,
-    u32,
-    u16,
-    u64,
-    String,
-    Option<String>,
-    PathBuf,
-)> {
+fn ping_runtime(app: &AppHandle, workspace_id: &str) -> Option<BrowserRuntimeSnapshot> {
     let snapshot = runtime_snapshot(workspace_id)?;
     if run_helper_json(app, snapshot.4, "ping", &[]).is_ok() {
         Some(snapshot)
@@ -756,6 +749,12 @@ fn set_active_tab(workspace_id: &str, tab_id: Option<String>) {
     }
 }
 
+fn clear_visual_selection(workspace_id: &str) {
+    if let Ok(mut selections) = visual_selections().lock() {
+        selections.remove(workspace_id);
+    }
+}
+
 fn execute_request(
     app: &AppHandle,
     workspace: &Workspace,
@@ -763,12 +762,17 @@ fn execute_request(
 ) -> Result<(), String> {
     match request {
         StoredBrowserRequest::Start { application_id } => {
+            clear_visual_selection(&workspace.id);
             start_browser_now(app, workspace, application_id)
         }
-        StoredBrowserRequest::Stop => stop_browser_now(&workspace.id),
+        StoredBrowserRequest::Stop => {
+            clear_visual_selection(&workspace.id);
+            stop_browser_now(&workspace.id)
+        }
         StoredBrowserRequest::OpenTab { url } => {
+            clear_visual_selection(&workspace.id);
             let port = runtime_port(app, &workspace.id)?;
-            let value = run_helper_json(app, port, "new-tab", &[url.clone()])?;
+            let value = run_helper_json(app, port, "new-tab", std::slice::from_ref(url))?;
             let tab_id = value
                 .get("tab")
                 .and_then(|tab| tab.get("id"))
@@ -778,14 +782,16 @@ fn execute_request(
             Ok(())
         }
         StoredBrowserRequest::ActivateTab { tab_id } => {
+            clear_visual_selection(&workspace.id);
             let port = runtime_port(app, &workspace.id)?;
-            run_helper_json(app, port, "activate-tab", &[tab_id.clone()])?;
+            run_helper_json(app, port, "activate-tab", std::slice::from_ref(tab_id))?;
             set_active_tab(&workspace.id, Some(tab_id.clone()));
             Ok(())
         }
         StoredBrowserRequest::CloseTab { tab_id } => {
+            clear_visual_selection(&workspace.id);
             let port = runtime_port(app, &workspace.id)?;
-            run_helper_json(app, port, "close-tab", &[tab_id.clone()])?;
+            run_helper_json(app, port, "close-tab", std::slice::from_ref(tab_id))?;
             if runtime_snapshot(&workspace.id)
                 .and_then(|snapshot| snapshot.7)
                 .as_deref()
@@ -799,12 +805,14 @@ fn execute_request(
             Ok(())
         }
         StoredBrowserRequest::Navigate { tab_id, url } => {
+            clear_visual_selection(&workspace.id);
             let port = runtime_port(app, &workspace.id)?;
             run_helper_json(app, port, "navigate", &[tab_id.clone(), url.clone()])?;
             set_active_tab(&workspace.id, Some(tab_id.clone()));
             Ok(())
         }
         StoredBrowserRequest::Click { tab_id, selector } => {
+            clear_visual_selection(&workspace.id);
             let port = runtime_port(app, &workspace.id)?;
             run_helper_json(app, port, "click", &[tab_id.clone(), selector.clone()])?;
             set_active_tab(&workspace.id, Some(tab_id.clone()));
@@ -816,6 +824,7 @@ fn execute_request(
             text,
             clear_first,
         } => {
+            clear_visual_selection(&workspace.id);
             let port = runtime_port(app, &workspace.id)?;
             run_helper_json(
                 app,
@@ -847,8 +856,9 @@ fn execute_request(
             Ok(())
         }
         StoredBrowserRequest::Reload { tab_id } => {
+            clear_visual_selection(&workspace.id);
             let port = runtime_port(app, &workspace.id)?;
-            run_helper_json(app, port, "reload", &[tab_id.clone()])?;
+            run_helper_json(app, port, "reload", std::slice::from_ref(tab_id))?;
             set_active_tab(&workspace.id, Some(tab_id.clone()));
             Ok(())
         }
@@ -1149,6 +1159,81 @@ pub(crate) fn inspect_page(
     })
 }
 
+pub(crate) fn pick_visual_element(
+    app: &AppHandle,
+    workspace: &Workspace,
+    tab_id: &str,
+    x_ratio: f64,
+    y_ratio: f64,
+) -> Result<BrowserVisualSelection, String> {
+    let tab_id = validate_tab_id(tab_id)?;
+    if !x_ratio.is_finite()
+        || !y_ratio.is_finite()
+        || !(0.0..=1.0).contains(&x_ratio)
+        || !(0.0..=1.0).contains(&y_ratio)
+    {
+        return Err("Preview selection coordinates must be inside the visible page.".to_string());
+    }
+    let port = runtime_port(app, &workspace.id)?;
+    let value = run_helper_json(
+        app,
+        port,
+        "pick-element",
+        &[tab_id.clone(), x_ratio.to_string(), y_ratio.to_string()],
+    )?;
+    let selector = value
+        .get("selector")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if selector.is_empty() {
+        return Err(
+            "RepoTunnel could not identify an element at that preview position.".to_string(),
+        );
+    }
+    let selection = BrowserVisualSelection {
+        workspace_id: workspace.id.clone(),
+        tab_id,
+        url: value
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        selector,
+        tag: value
+            .get("tag")
+            .and_then(Value::as_str)
+            .unwrap_or("ELEMENT")
+            .to_string(),
+        text: value
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        html: value
+            .get("html")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        selected_at: now_millis(),
+    };
+    visual_selections()
+        .lock()
+        .map_err(|_| "Browser visual selection is unavailable.".to_string())?
+        .insert(workspace.id.clone(), selection.clone());
+    Ok(selection)
+}
+
+pub(crate) fn get_visual_selection(
+    workspace_id: &str,
+) -> Result<Option<BrowserVisualSelection>, String> {
+    Ok(visual_selections()
+        .lock()
+        .map_err(|_| "Browser visual selection is unavailable.".to_string())?
+        .get(workspace_id)
+        .cloned())
+}
+
 pub(crate) fn screenshot(
     app: &AppHandle,
     workspace: &Workspace,
@@ -1298,7 +1383,7 @@ pub(crate) fn list_history(
         .map_err(|_| "Browser history is unavailable.".to_string())?;
     let mut records = load_history_unlocked(app)?
         .into_iter()
-        .filter(|entry| workspace_id.map_or(true, |id| entry.record.workspace_id == id))
+        .filter(|entry| workspace_id.is_none_or(|id| entry.record.workspace_id == id))
         .map(|entry| entry.record)
         .collect::<Vec<_>>();
     records.sort_by_key(|record| std::cmp::Reverse(record.created_at));

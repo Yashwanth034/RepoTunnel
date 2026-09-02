@@ -1,42 +1,43 @@
-import type { ChangeRecord, ChatConnectionStatus, GatewayStatus, PublicTunnelStatus, Workspace } from "../types";
+import type {
+  ChatConnectionStatus,
+  GatewayStatus,
+  HomeContextErrorInput,
+  HomeContextTextInput,
+  ModelHubSnapshot,
+  PublicTunnelStatus,
+  Workspace,
+} from "../types";
 import type { AppView, IconName } from "./AppSidebar";
 import { NavIcon } from "./AppSidebar";
-import RepoTunnelLogo from "./RepoTunnelLogo";
+import HomeChat from "./HomeChat";
 
 type HomeWorkspaceProps = {
   gateway: GatewayStatus;
   connection: ChatConnectionStatus;
   publicTunnel: PublicTunnelStatus;
   workspaces: Workspace[];
-  changes: ChangeRecord[];
+  selectedWorkspace: Workspace | null;
+  modelHub: ModelHubSnapshot | null;
+  currentFile: HomeContextTextInput | null;
+  selection: HomeContextTextInput | null;
+  errors: HomeContextErrorInput[];
   gatewayBusy: boolean;
   adding: boolean;
   checkpointBusy: boolean;
   safetyBusy: boolean;
   aiAccessBusy: boolean;
   aiAccessPaused: boolean;
+  onModelHubChange: (snapshot: ModelHubSnapshot) => void;
   onToggleGateway: () => void;
   onAddProject: () => void;
+  onCreateProject: () => void;
   onCreateCheckpoint: () => void;
   onSafetyScan: () => void;
   onToggleAiAccess: () => void;
   onNavigate: (view: AppView) => void;
 };
 
-function basename(path: string): string {
-  const normalized = path.replace(/\\/g, "/").replace(/\/$/, "");
-  return normalized.split("/").filter(Boolean).pop() ?? path;
-}
-
-function relativeTime(timestamp: number): string {
-  const diff = Math.max(0, Date.now() - timestamp);
-  if (diff < 60_000) return "now";
-  if (diff < 3_600_000) return `${Math.max(1, Math.floor(diff / 60_000))}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return `${Math.floor(diff / 86_400_000)}d ago`;
-}
-
-function ActionCard({
+function QuickAction({
   icon,
   title,
   caption,
@@ -53,14 +54,17 @@ function ActionCard({
 }) {
   return (
     <button
-      className={`home-action-card ${active ? "active-safety-action" : ""}`}
+      className={`home-quick-action ${active ? "active-safety-action" : ""}`}
       type="button"
       onClick={onClick}
       disabled={disabled}
     >
-      <NavIcon name={icon} size={27} />
-      <strong>{title}</strong>
-      <span>{caption}</span>
+      <span className="home-quick-action-icon"><NavIcon name={icon} size={18} /></span>
+      <span className="home-quick-action-copy">
+        <strong>{title}</strong>
+        <small>{caption}</small>
+      </span>
+      <span className="home-quick-action-arrow" aria-hidden="true">›</span>
     </button>
   );
 }
@@ -70,21 +74,26 @@ function HomeWorkspace({
   connection,
   publicTunnel,
   workspaces,
-  changes,
+  selectedWorkspace,
+  modelHub,
+  currentFile,
+  selection,
+  errors,
   gatewayBusy,
   adding,
   checkpointBusy,
   safetyBusy,
   aiAccessBusy,
   aiAccessPaused,
+  onModelHubChange,
   onToggleGateway,
   onAddProject,
+  onCreateProject,
   onCreateCheckpoint,
   onSafetyScan,
   onToggleAiAccess,
   onNavigate,
 }: HomeWorkspaceProps) {
-  const recent = changes.slice(0, 4);
   const hasProject = workspaces.length > 0;
   const remoteReady = publicTunnel.ready || connection.ready;
   const remoteTitle = publicTunnel.ready ? "Public MCP ready" : connection.ready ? "Connected" : "Disconnected";
@@ -97,49 +106,19 @@ function HomeWorkspace({
         : "External MCP access";
 
   return (
-    <div className="home-workspace">
+    <div className="home-workspace home-workspace-chat">
       <section className="home-center-stage">
-        <div className="home-center-content">
-          <RepoTunnelLogo size={74} className="home-product-mark" />
-          <h2>{aiAccessPaused ? "AI access is paused." : "Ready when you are."}</h2>
-          <p>{aiAccessPaused ? "Local projects are locked from MCP clients until you resume access." : "Open a project or use a local safety control."}</p>
-
-          <div className="home-action-grid">
-            <ActionCard
-              icon="folder"
-              title={adding ? "Opening..." : "Open project"}
-              caption="Browse workspace"
-              onClick={onAddProject}
-              disabled={adding}
-            />
-            <ActionCard
-              icon="checkpoint"
-              title={checkpointBusy ? "Saving..." : "Create checkpoint"}
-              caption="Save project state"
-              onClick={onCreateCheckpoint}
-              disabled={!hasProject || checkpointBusy}
-            />
-            <ActionCard
-              icon="shield"
-              title={safetyBusy ? "Scanning..." : "Safety scan"}
-              caption="Check protection"
-              onClick={onSafetyScan}
-              disabled={!hasProject || safetyBusy}
-            />
-            <ActionCard
-              icon={aiAccessPaused ? "resume" : "pause"}
-              title={aiAccessBusy ? "Updating..." : aiAccessPaused ? "Resume AI access" : "Pause AI access"}
-              caption={aiAccessPaused ? "Unlock MCP clients" : "Temporarily lock AI"}
-              onClick={onToggleAiAccess}
-              disabled={aiAccessBusy}
-              active={aiAccessPaused}
-            />
-          </div>
+        <div className="home-center-content home-chat-center-content">
+          <HomeChat
+            workspace={selectedWorkspace}
+            modelHub={modelHub}
+            currentFile={currentFile}
+            selection={selection}
+            errors={errors}
+            onModelHubChange={onModelHubChange}
+          />
         </div>
 
-        <div className="home-security-line">
-          Your local AI workspace <span>•</span> Private <span>•</span> {aiAccessPaused ? "AI access paused" : "Secure"}
-        </div>
       </section>
 
       <aside className="home-right-rail">
@@ -169,35 +148,27 @@ function HomeWorkspace({
           </button>
         </section>
 
-        <section className="rail-card activity-card">
+        <section className="rail-card quick-actions-card">
           <div className="rail-card-heading-row">
-            <strong>Recent activity</strong>
-            <button type="button" onClick={() => onNavigate("changes")}>View all</button>
+            <strong>Quick Actions</strong>
+            <span>Existing tools</span>
           </div>
-          {recent.length === 0 ? (
-            <div className="rail-empty">No changes yet</div>
-          ) : (
-            <div className="rail-activity-list">
-              {recent.map((change) => (
-                <button key={change.id} type="button" className="rail-activity-row" onClick={() => onNavigate("changes")}>
-                  <span className={`activity-dot ${change.status}`} />
-                  <span className="rail-activity-copy">
-                    <strong>{basename(change.primaryPath)}</strong>
-                    <small>{change.workspaceName}</small>
-                  </span>
-                  <span className="rail-activity-status">{change.status}</span>
-                  <time>{relativeTime(change.updatedAt)}</time>
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="home-quick-actions">
+            <QuickAction icon="folder" title={adding ? "Opening..." : "Open project"} caption="Browse workspace" onClick={onAddProject} disabled={adding} />
+            <QuickAction icon="plus" title="New project" caption="Create from scratch" onClick={onCreateProject} disabled={adding} />
+            <QuickAction icon="checkpoint" title={checkpointBusy ? "Saving..." : "Create checkpoint"} caption="Save project state" onClick={onCreateCheckpoint} disabled={!hasProject || checkpointBusy} />
+            <QuickAction icon="shield" title={safetyBusy ? "Scanning..." : "Safety scan"} caption="Check protection" onClick={onSafetyScan} disabled={!hasProject || safetyBusy} />
+            <QuickAction
+              icon={aiAccessPaused ? "resume" : "pause"}
+              title={aiAccessBusy ? "Updating..." : aiAccessPaused ? "Resume AI access" : "Pause AI access"}
+              caption={aiAccessPaused ? "Unlock MCP clients" : "Temporarily lock AI"}
+              onClick={onToggleAiAccess}
+              disabled={aiAccessBusy}
+              active={aiAccessPaused}
+            />
+          </div>
         </section>
 
-        <section className="rail-card tips-card">
-          <div className="rail-card-title"><NavIcon name="tip" size={16} /><strong>Tips</strong></div>
-          <p>{aiAccessPaused ? "AI workspace access is paused. Click Resume AI access when you are ready." : workspaces.length === 0 ? "Add a project to begin." : "Create a checkpoint before large AI changes."}</p>
-          <button type="button" onClick={() => onNavigate("projects")}>Learn more <span>→</span></button>
-        </section>
       </aside>
     </div>
   );
