@@ -670,7 +670,7 @@ fn port_listeners(
     #[cfg(not(target_os = "linux"))]
     {
         let _ = processes;
-        return Vec::new();
+        Vec::new()
     }
 
     #[cfg(target_os = "linux")]

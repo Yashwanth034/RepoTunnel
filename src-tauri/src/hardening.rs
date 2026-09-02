@@ -145,6 +145,10 @@ pub(crate) fn log_event(app: &AppHandle, level: &str, event: &str, detail: &str)
 }
 
 fn runtime_file_is_stale(path: &Path, name: &str) -> bool {
+    #[cfg(not(target_os = "linux"))]
+    let _ = name;
+
+    #[cfg(target_os = "linux")]
     let pid = name
         .split('-')
         .nth(2)
@@ -295,7 +299,7 @@ pub(crate) fn set_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), 
     {
         let _ = app;
         let _ = enabled;
-        return Err("Launch at login is currently supported only on Linux.".to_string());
+        Err("Launch at login is currently supported only on Linux.".to_string())
     }
 
     #[cfg(target_os = "linux")]

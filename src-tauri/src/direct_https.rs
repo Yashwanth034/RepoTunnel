@@ -770,9 +770,9 @@ pub(crate) fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        bind_direct_listener, is_non_public_ip, safe_host_component, valid_challenge_token,
-    };
+    #[cfg(target_os = "linux")]
+    use super::bind_direct_listener;
+    use super::{is_non_public_ip, safe_host_component, valid_challenge_token};
     use std::net::IpAddr;
 
     #[test]
