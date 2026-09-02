@@ -41,6 +41,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.97.1"
           components: clippy,rustfmt
 
       - name: Cache Rust
@@ -150,6 +151,8 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -198,6 +201,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.97.1"
           components: clippy
 
       - name: Cache Rust
@@ -272,6 +276,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.97.1"
           targets: ${{ matrix.target }}
           components: clippy
 

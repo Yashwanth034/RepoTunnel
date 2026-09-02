@@ -14,6 +14,8 @@ Instead of copying code between AI chat, your editor, terminal, Git, and browser
 - Expanded cross-platform command isolation and release/security checks.
 - Added refreshed Linux, Windows, and macOS release packaging with SHA-256 verification.
 
+Direct HTTPS / HTTP→MCP setup: [`docs/direct-https.md`](docs/direct-https.md)
+
 ![RepoTunnel home screen](RepoTunnel.png)
 
 ## What RepoTunnel can do
