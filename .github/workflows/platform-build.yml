@@ -212,15 +212,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify Windows build
+      - name: Verify Windows GUI subsystem
         shell: pwsh
         run: |
           $entry = Get-Content "src-tauri/src/main.rs" -Raw
-          if ($entry -notmatch 'windows_subsystem\s*=\s*"windows"') {
+          if (-not $entry.Contains('windows_subsystem = "windows"')) {
             throw "Windows release builds must use the GUI subsystem."
           }
-          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Windows Rust Clippy
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Windows Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Build installers
         run: npm run tauri -- build --bundles nsis,msi
@@ -288,10 +292,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify macOS build
-        run: |
-          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: macOS Rust Clippy
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: macOS Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Build DMG
         run: npm run tauri -- build --target ${{ matrix.target }} --bundles dmg

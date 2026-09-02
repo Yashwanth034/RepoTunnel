@@ -112,7 +112,7 @@ pub fn recover_stale_state() {
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
-    use std::{collections::BTreeSet, os::unix::ffi::OsStrExt};
+    use std::collections::BTreeSet;
 
     const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
