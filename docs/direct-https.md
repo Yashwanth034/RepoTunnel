@@ -250,7 +250,7 @@ Once RepoTunnel Direct HTTPS is running, inbound TCP 443 must reach 43444, and i
 
 ### 9. Create a DuckDNS hostname
 
-Create a DuckDNS subdomain, e.g. `my-repotunnel.duckdns.org` (use your own — not another user's).
+Create a DuckDNS subdomain, e.g. `my-example.duckdns.org` (use your own — not another user's).
 
 Configure:
 
@@ -286,13 +286,13 @@ TLS still terminates on your own RepoTunnel instance — the frontend only makes
 In RepoTunnel, choose the Direct HTTPS public provider. Set the public URL to your DuckDNS hostname:
 
 - Provider: Direct HTTPS
-- Public URL: `https://my-repotunnel.duckdns.org`
+- Public URL: `https://my-example.duckdns.org`
 - Auto-start: enabled
 
 The MCP URL becomes:
 
 ```
-https://my-repotunnel.duckdns.org/mcp
+https://my-example.duckdns.org/mcp
 ```
 
 ### 12. Public route allowlist
@@ -314,7 +314,7 @@ Everything else stays unavailable/404 — this keeps RepoTunnel's app UI, files,
 
 ### 13. Get a trusted Let's Encrypt certificate
 
-Use RepoTunnel's trusted-certificate action after Route64, the port 80 redirect, and the DuckDNS hostname are working. Target hostname: `my-repotunnel.duckdns.org`.
+Use RepoTunnel's trusted-certificate action after Route64, the port 80 redirect, and the DuckDNS hostname are working. Target hostname: `my-example.duckdns.org`.
 
 ```
 Let's Encrypt HTTP-01
@@ -476,6 +476,7 @@ That confirms the entire OAuth + MCP + Direct HTTPS path, not just the health en
 3. Use the MCP server URL: `https://my-example.duckdns.org/mcp`
 4. Choose OAuth authentication.
 5. Allow the OAuth metadata to be discovered from RepoTunnel.
+6.Set Registration method to:Dynamic Client Registration (DCR)
 6. If the UI has a "Base scopes" field, the verified configuration used `offline_access`.
 7. Complete RepoTunnel's browser authorization page.
 8. Allow ChatGPT to scan/refresh actions.
@@ -750,6 +751,6 @@ Expected public health body: `{"service":"RepoTunnel"}`
 
 Service behavior and free-tier policies can change — the architecture is the part that stays stable: stable hostname → trusted HTTPS → authenticated MCP frontend → loopback-only RepoTunnel gateway.
 
-A successful installation keeps the same URL (`https://my-repotunnel.duckdns.org/mcp`) even when the computer restarts, the underlying Wi-Fi changes, you switch to a mobile hotspot, or the local LAN address changes. The constant identity is the public hostname and Route64 tunnel, not the local Wi-Fi address.
+A successful installation keeps the same URL (`https://my-example.duckdns.org/mcp`) even when the computer restarts, the underlying Wi-Fi changes, you switch to a mobile hotspot, or the local LAN address changes. The constant identity is the public hostname and Route64 tunnel, not the local Wi-Fi address.
 
 The final verification isn't just a successful curl — it's a real remote MCP tool call from ChatGPT into an approved local RepoTunnel workspace, with the raw gateway staying private and OAuth staying enabled.
