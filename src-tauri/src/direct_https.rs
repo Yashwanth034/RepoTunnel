@@ -320,43 +320,45 @@ async fn acme_challenge(
 }
 
 fn bind_direct_listener(port: u16, label: &str) -> Result<StdTcpListener, String> {
-    // Prefer one IPv6 wildcard socket with IPV6_V6ONLY disabled. On Linux and other
-    // dual-stack hosts this accepts both native IPv6 and IPv4-mapped connections, so
-    // Direct HTTPS works with either a public IPv4 or a routed/native IPv6 address.
-    let dual_stack = (|| -> Result<StdTcpListener, String> {
-        let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))
-            .map_err(|error| format!("Could not create dual-stack {label} socket: {error}"))?;
-        socket
-            .set_only_v6(false)
-            .map_err(|error| format!("Could not enable IPv4/IPv6 on {label}: {error}"))?;
-        let address = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
-        socket.bind(&address.into()).map_err(|error| {
-            format!("Could not bind dual-stack {label} on local port {port}: {error}")
-        })?;
-        socket
-            .listen(128)
-            .map_err(|error| format!("Could not listen on dual-stack {label}: {error}"))?;
-        let listener: StdTcpListener = socket.into();
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| format!("Could not configure {label}: {error}"))?;
-        Ok(listener)
-    })();
+    const RETRIES: usize = 50;
+    const RETRY_DELAY_MS: u64 = 100;
 
-    match dual_stack {
-        Ok(listener) => Ok(listener),
-        Err(dual_stack_error) => {
-            let listener = StdTcpListener::bind(("0.0.0.0", port)).map_err(|ipv4_error| {
-                format!(
-                    "Could not start {label} on local port {port}. Dual-stack failed: {dual_stack_error}. IPv4 fallback failed: {ipv4_error}"
-                )
-            })?;
-            listener
-                .set_nonblocking(true)
-                .map_err(|error| format!("Could not configure {label}: {error}"))?;
+    for attempt in 0..=RETRIES {
+        let dual_stack = (|| -> Result<StdTcpListener, std::io::Error> {
+            let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+            socket.set_only_v6(false)?;
+            let address = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0);
+            socket.bind(&address.into())?;
+            socket.listen(128)?;
+            let listener: StdTcpListener = socket.into();
+            listener.set_nonblocking(true)?;
             Ok(listener)
+        })();
+
+        match dual_stack {
+            Ok(listener) => return Ok(listener),
+            Err(dual_stack_error) => match StdTcpListener::bind(("0.0.0.0", port)) {
+                Ok(listener) => {
+                    listener
+                        .set_nonblocking(true)
+                        .map_err(|error| format!("Could not configure {label}: {error}"))?;
+                    return Ok(listener);
+                }
+                Err(ipv4_error) => {
+                    if ipv4_error.kind() == std::io::ErrorKind::AddrInUse && attempt < RETRIES {
+                        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                        continue;
+                    }
+
+                    return Err(format!(
+                            "Could not start {label} on local port {port}. Dual-stack failed: {dual_stack_error}. IPv4 fallback failed: {ipv4_error}"
+                        ));
+                }
+            },
         }
     }
+
+    unreachable!("Direct HTTPS bind retry loop must return")
 }
 
 fn probe_public_health(public_url: &str) -> bool {
@@ -797,6 +799,27 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         TcpStream::connect(("127.0.0.1", port)).expect("IPv4 connection");
         TcpStream::connect(("::1", port)).expect("IPv6 connection");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn direct_listener_retries_temporary_address_in_use() {
+        use std::{net::TcpListener, thread, time::Duration};
+
+        let blocker = TcpListener::bind(("0.0.0.0", 0)).expect("bind temporary blocker");
+        let port = blocker.local_addr().expect("blocker address").port();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            drop(blocker);
+        });
+
+        let listener = bind_direct_listener(port, "temporary conflict test")
+            .expect("listener should recover after temporary port conflict");
+        assert_eq!(
+            listener.local_addr().expect("listener address").port(),
+            port
+        );
+        releaser.join().expect("temporary blocker thread");
     }
 
     #[test]
