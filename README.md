@@ -154,8 +154,6 @@ Direct HTTPS is an advanced alternative to the normal ngrok setup. It is intende
 
 The raw gateway must remain loopback-only. Direct HTTPS exposes only the routes needed for MCP, OAuth, authorization, health checks, and certificate handling.
 
-See the complete setup and security requirements in [docs/direct-https.md](docs/direct-https.md).
-
 ## Security
 
 RepoTunnel is designed around explicit project access instead of unrestricted computer access.
@@ -210,7 +208,6 @@ Platform signing and trust behavior may vary by release and operating-system pol
 ## Documentation
 
 - [Security model](docs/security.md)
-- [Direct HTTPS](docs/direct-https.md)
 - [GitHub Releases](https://github.com/Yashwanth034/RepoTunnel/releases)
 
 ## Contributing
