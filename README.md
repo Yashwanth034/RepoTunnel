@@ -150,9 +150,13 @@ For another MCP-compatible AI client, use the same MCP URL shown by RepoTunnel a
 
 ## Direct HTTPS
 
-Direct HTTPS is an advanced alternative to the normal ngrok setup. It is intended for users who want to expose RepoTunnel through their own trusted HTTPS endpoint while keeping the raw MCP gateway private.
+Direct HTTPS is an advanced alternative to the normal ngrok setup. It is useful for users who want a stable HTTPS MCP endpoint through their own network path, including connections behind CGNAT.
 
-The raw gateway must remain loopback-only. Direct HTTPS exposes only the routes needed for MCP, OAuth, authorization, health checks, and certificate handling.
+The verified setup uses Route64 + WireGuard for the public IPv6 path, DuckDNS for a stable hostname, and Let's Encrypt for trusted TLS. The documented free-service path has no mandatory monthly infrastructure cost, although third-party free services are best-effort.
+
+The raw RepoTunnel MCP gateway remains loopback-only and is never exposed directly to the Internet. Only the required HTTPS, OAuth, MCP, health, and certificate routes are exposed by the Direct HTTPS frontend.
+
+**Full setup guide:** [RepoTunnel Direct HTTPS Setup](docs/direct-https.md)
 
 ## Security
 
