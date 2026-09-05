@@ -52,6 +52,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify updater signing secret
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is required for signed RepoTunnel releases." >&2
+            exit 1
+          fi
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD}" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required for RepoTunnel's password-protected updater key." >&2
+            exit 1
+          fi
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.2
 
@@ -124,6 +139,8 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -162,17 +179,25 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build packages
-        run: npm run tauri -- build --bundles deb,rpm,appimage
+      - name: Build signed release packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --config src-tauri/tauri.release.conf.json --bundles deb,rpm,appimage 2>&1 | tee tauri-release-build.log
+          if grep -Fq 'does not match the public key' tauri-release-build.log; then
+            echo "Updater signing key does not match the public key compiled into RepoTunnel." >&2
+            exit 1
+          fi
 
       - name: Collect packages
         shell: bash
         run: |
           mkdir -p platform-artifacts
           find src-tauri/target/release/bundle -type f \
-            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.sig' -o -name '*.tar.gz' \) \
             -exec cp {} platform-artifacts/ \;
-          test "$(find platform-artifacts -type f | wc -l)" -ge 3
+          test "$(find platform-artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \) | wc -l)" -ge 3
+          test "$(find platform-artifacts -type f -name '*.sig' | wc -l)" -ge 3
           ls -lh platform-artifacts
 
       - name: Upload packages
@@ -225,20 +250,31 @@ jobs:
       - name: Windows Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
-      - name: Build installers
+      - name: Build signed installers
         env:
           RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
-        run: npm run tauri -- build --bundles nsis,msi
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: pwsh
+        run: |
+          npm run tauri -- build --config src-tauri/tauri.release.conf.json --bundles nsis,msi 2>&1 | Tee-Object -FilePath tauri-release-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Select-String -Path tauri-release-build.log -SimpleMatch 'does not match the public key') {
+            throw "Updater signing key does not match the public key compiled into RepoTunnel."
+          }
 
       - name: Collect installers
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path platform-artifacts | Out-Null
           Get-ChildItem src-tauri/target/release/bundle -Recurse -File |
-            Where-Object { $_.Extension -in '.msi', '.exe' } |
+            Where-Object { $_.Extension -in '.msi', '.exe', '.sig' -or $_.Name.EndsWith('.zip') } |
             Copy-Item -Destination platform-artifacts
-          if ((Get-ChildItem platform-artifacts -File).Count -lt 2) {
+          if ((Get-ChildItem platform-artifacts -File | Where-Object { $_.Extension -in '.msi', '.exe' }).Count -lt 2) {
             throw "Expected NSIS and MSI installers."
+          }
+          if ((Get-ChildItem platform-artifacts -File -Filter '*.sig').Count -lt 2) {
+            throw "Expected signed Windows updater artifacts."
           }
           Get-ChildItem platform-artifacts
 
@@ -268,6 +304,8 @@ jobs:
     env:
       APPLE_SIGNING_IDENTITY: "-"
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -316,10 +354,17 @@ jobs:
       - name: macOS Rust tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
-      - name: Build DMG
-        run: npm run tauri -- build --target ${{ matrix.target }} --bundles dmg
+      - name: Build signed app and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run tauri -- build --config src-tauri/tauri.release.conf.json --target ${{ matrix.target }} --bundles app,dmg 2>&1 | tee tauri-release-build.log
+          if grep -Fq 'does not match the public key' tauri-release-build.log; then
+            echo "Updater signing key does not match the public key compiled into RepoTunnel." >&2
+            exit 1
+          fi
 
-      - name: Verify and collect DMG
+      - name: Verify and collect macOS artifacts
         shell: bash
         run: |
           set -euo pipefail
@@ -346,15 +391,21 @@ jobs:
           trap - EXIT
 
           VERSION="$(node -p "require('./package.json').version")"
+          UPDATER_PATH="$(find "$BUNDLE_ROOT" -type f -name '*.app.tar.gz' -print -quit)"
+          test -n "$UPDATER_PATH"
+          test -s "$UPDATER_PATH"
+          test -s "$UPDATER_PATH.sig"
           mkdir -p platform-artifacts
           cp "$DMG_PATH" "platform-artifacts/RepoTunnel_${VERSION}_${{ matrix.file_arch }}.dmg"
+          cp "$UPDATER_PATH" "platform-artifacts/RepoTunnel_${VERSION}_${{ matrix.file_arch }}.app.tar.gz"
+          cp "$UPDATER_PATH.sig" "platform-artifacts/RepoTunnel_${VERSION}_${{ matrix.file_arch }}.app.tar.gz.sig"
           ls -lh platform-artifacts
 
-      - name: Upload DMG
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: RepoTunnel-macos-${{ matrix.file_arch }}
-          path: platform-artifacts/*.dmg
+          path: platform-artifacts/*
           if-no-files-found: error
 
   release:
@@ -378,11 +429,7 @@ jobs:
         run: |
           mkdir -p release-files
           find release-artifacts -type f -exec cp {} release-files/ \;
-          test "$(find release-files -maxdepth 1 -type f | wc -l)" -ge 7
-          (
-            cd release-files
-            sha256sum * > RepoTunnel-SHA256SUMS.txt
-          )
+          test "$(find release-files -maxdepth 1 -type f | wc -l)" -ge 14
           VERSION="$(node -p "require('./package.json').version")"
           RELEASE_TAG="v${VERSION}"
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "${GITHUB_ENV}"
@@ -392,6 +439,13 @@ jobs:
             capture { print }
           ' CHANGELOG.md > release-notes.md
           test -s release-notes.md
+          node scripts/generate-updater-manifest.mjs \
+            release-files "$RELEASE_TAG" "$GITHUB_REPOSITORY" release-notes.md
+          test -s release-files/latest.json
+          (
+            cd release-files
+            sha256sum * > RepoTunnel-SHA256SUMS.txt
+          )
           ls -lh release-files
 
       - name: Point final release tag at verified commit

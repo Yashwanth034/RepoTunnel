@@ -20,6 +20,7 @@ Thumbs.db
 
 # Local validation/test artifacts
 .cargo-ci/
+.release-private/
 .aiw-*/
 ai-workspace-*-test/
 src-tauri/browser-fix-*/

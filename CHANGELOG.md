@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0 - 2026-09-05
+
+RepoTunnel v0.3.0 focuses on reliable continuation, safe updates, and a hardened Direct HTTPS connection.
+
+### Highlights
+
+- Added Continuity / Resume v2, which resumes from live Git, activity, process, and bounded project context instead of trusting stale saved next steps.
+- Added signed in-app Auto Update infrastructure and release artifacts, with install-safety checks and persisted-state health verification.
+- Fixed Direct HTTPS startup under Rustls 0.23 by selecting a deterministic crypto provider before TLS initialization.
+- Made Direct HTTPS listener status truthful: `:43183` is reported online only after TLS and ACME listeners initialize successfully.
+- Kept the MCP/Direct HTTPS recovery channel independent from optional product features so normal connection startup cannot be stranded by unrelated UI features.
+- Prevented Ollama Model Hub recovery from triggering privileged system-service password prompts; only the per-user service is attempted.
+- Strengthened Project Memory/continuity persistence and connector safety metadata.
+- Removed the experimental Google account/sync work before release; RepoTunnel remains fully accountless.
+
 ## 0.2.0 - 2026-09-02
 
 RepoTunnel v0.2.0 focuses on reliability, AI Workspace, editor quality, safety, and release hardening.

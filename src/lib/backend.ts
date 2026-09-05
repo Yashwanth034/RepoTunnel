@@ -72,6 +72,9 @@ import type {
   VersionRestoreResult,
   VersionTimeline,
   RuntimeDiagnostics,
+  UpdateStatus,
+  UpdateInstallResult,
+  ResumeSnapshot,
   SafetyScanResult,
   TeamSessionSummary,
   TeamSnapshot,
@@ -151,6 +154,10 @@ export async function prepareProject(workspaceId: string): Promise<ProjectSetupO
 
 export async function getProjectMemory(workspaceId: string): Promise<ProjectMemory> {
   return invoke<ProjectMemory>("get_project_memory", { workspaceId });
+}
+
+export async function getResumeSnapshot(workspaceId: string): Promise<ResumeSnapshot> {
+  return invoke<ResumeSnapshot>("get_resume_snapshot", { workspaceId });
 }
 
 export async function updateProjectMemory(
@@ -949,6 +956,25 @@ export async function setLaunchAtLogin(enabled: boolean): Promise<RuntimeDiagnos
   return invoke<RuntimeDiagnostics>("set_launch_at_login", { enabled });
 }
 
+export async function getUpdateStatus(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("get_update_status");
+}
+
+export async function checkForUpdates(manual = false): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("check_for_updates", { manual });
+}
+
+export async function setAutoUpdateChecks(enabled: boolean): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("set_auto_update_checks", { enabled });
+}
+
+export async function deferUpdate(version: string): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("defer_update", { version });
+}
+
+export async function installUpdateAndRestart(): Promise<UpdateInstallResult> {
+  return invoke<UpdateInstallResult>("install_update_and_restart");
+}
 
 export async function listTeamSessions(workspaceId?: string): Promise<TeamSessionSummary[]> {
   return invoke<TeamSessionSummary[]>("list_team_sessions", { workspaceId: workspaceId ?? null });

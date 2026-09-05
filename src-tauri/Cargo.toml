@@ -1,6 +1,6 @@
 [package]
 name = "repotunnel"
-version = "0.2.0"
+version = "0.3.0"
 description = "Secure local workspace gateway for AI tools"
 edition = "2021"
 
@@ -16,7 +16,7 @@ axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rmcp = { version = "3.1.2", features = ["schemars", "server", "transport-streamable-http-server"] }
 ngrok = "0.19"
-reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
 socket2 = "0.6"
 url = "2"
 serde = { version = "1", features = ["derive"] }
@@ -29,6 +29,8 @@ sha2 = "0.11.0"
 base64 = "0.23.1"
 subtle = "2.6.1"
 libc = "0.2"
+tauri-plugin-updater = "2.10.1"
+rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

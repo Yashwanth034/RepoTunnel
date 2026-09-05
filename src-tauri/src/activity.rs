@@ -8,6 +8,7 @@ use std::{
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager};
 
 use crate::{
+    continuity,
     models::{
         ActivityEvent, ActivityGroup, ActivityKind, ActivityStatus, ActivityTimeline,
         BrowserActionRecord, BrowserActionStatus, ChangeOutcome, ChangeRecord, ChangeStatus,
@@ -242,7 +243,14 @@ pub(crate) fn record(
         }
     }
     trim_global_groups(&mut groups);
+    let continuity_groups = groups
+        .iter()
+        .filter(|group| group.workspace_id == workspace.id && group.updated_at == now)
+        .cloned()
+        .collect::<Vec<_>>();
     save(app, &groups)?;
+    drop(_guard);
+    continuity::capture_activity_groups(app, &continuity_groups);
     let _ = app.emit("repotunnel://activity-updated", ());
     Ok(())
 }
@@ -282,16 +290,47 @@ pub(crate) fn update_source(
     if changed {
         if let Ok(settings) = storage::load_history_settings(app) {
             if let Some(limit) = settings.version_history_limit {
-                for workspace_id in affected_workspaces {
-                    prune_workspace_groups(&mut groups, &workspace_id, limit);
+                for workspace_id in &affected_workspaces {
+                    prune_workspace_groups(&mut groups, workspace_id, limit);
                 }
             }
         }
         trim_global_groups(&mut groups);
+        let continuity_groups = groups
+            .iter()
+            .filter(|group| {
+                affected_workspaces.contains(&group.workspace_id) && group.updated_at == now
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         save(app, &groups)?;
+        drop(_guard);
+        continuity::capture_activity_groups(app, &continuity_groups);
         let _ = app.emit("repotunnel://activity-updated", ());
     }
     Ok(())
+}
+
+fn reconcile_process_event(event: &mut ActivityEvent, process: &ManagedProcessRecord) -> bool {
+    let mut changed = false;
+    if event.source_id.as_deref() != Some(process.id.as_str()) {
+        event.source_id = Some(process.id.clone());
+        changed = true;
+    }
+    let status = process_status(process.status);
+    let detail = process
+        .error
+        .clone()
+        .or_else(|| process.pid.map(|pid| format!("PID: {pid}")));
+    if event.status != status || event.detail != detail || event.updated_at != process.updated_at {
+        event.status = status;
+        event.detail = detail;
+        // Preserve the factual process timestamp. A read/reconcile operation must never make
+        // historical activity appear newer than work that actually happened later.
+        event.updated_at = process.updated_at;
+        changed = true;
+    }
+    changed
 }
 
 pub(crate) fn timeline(
@@ -302,7 +341,6 @@ pub(crate) fn timeline(
         .lock()
         .map_err(|_| "RepoTunnel activity history is temporarily unavailable.".to_string())?;
     let mut groups = load(app)?;
-    let now = now_millis();
     let mut changed = false;
     for group in &mut groups {
         refresh_version_links(app, group);
@@ -325,22 +363,17 @@ pub(crate) fn timeline(
             let Some(process) = process else {
                 continue;
             };
-            if event.source_id.as_deref() != Some(process.id.as_str()) {
-                event.source_id = Some(process.id.clone());
-                changed = true;
-            }
-            let status = process_status(process.status);
-            let detail = process
-                .error
-                .clone()
-                .or_else(|| process.pid.map(|pid| format!("PID: {pid}")));
-            if event.status != status || event.detail != detail {
-                event.status = status;
-                event.detail = detail;
-                event.updated_at = now;
-                group.updated_at = now;
-                changed = true;
-            }
+            changed |= reconcile_process_event(event, process);
+        }
+        let factual_updated_at = group
+            .events
+            .iter()
+            .map(|event| event.updated_at)
+            .max()
+            .unwrap_or(group.created_at);
+        if group.updated_at != factual_updated_at {
+            group.updated_at = factual_updated_at;
+            changed = true;
         }
     }
     if changed {
@@ -800,4 +833,51 @@ pub(crate) fn sync_git(app: &AppHandle, record: &GitActionRecord) {
         status,
         record.error.clone().or_else(|| record.detail.clone()),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_process_event;
+    use crate::models::{
+        ActivityEvent, ActivityKind, ActivityStatus, ManagedProcessRecord, ManagedProcessStatus,
+    };
+
+    #[test]
+    fn process_reconciliation_preserves_factual_timestamp() {
+        let mut event = ActivityEvent {
+            id: "event-old".to_string(),
+            kind: ActivityKind::Process,
+            action: "startProcess".to_string(),
+            summary: "old gate".to_string(),
+            detail: Some("stale detail".to_string()),
+            status: ActivityStatus::Failed,
+            source_id: Some("process-old".to_string()),
+            created_at: 10,
+            // Simulate the previous bug: a resume read had rejuvenated this historical event.
+            updated_at: 10_000,
+        };
+        let process = ManagedProcessRecord {
+            id: "process-old".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            workspace_name: "RepoTunnel".to_string(),
+            label: "old gate".to_string(),
+            command: "cargo test --lib".to_string(),
+            cwd: ".".to_string(),
+            status: ManagedProcessStatus::Exited,
+            pid: None,
+            created_at: 10,
+            started_at: Some(11),
+            updated_at: 30,
+            exited_at: Some(30),
+            exit_code: Some(0),
+            restart_count: 0,
+            error: None,
+        };
+
+        assert!(reconcile_process_event(&mut event, &process));
+        assert_eq!(event.status, ActivityStatus::Succeeded);
+        assert_eq!(event.updated_at, 30);
+        assert_eq!(event.detail, None);
+        assert!(!reconcile_process_event(&mut event, &process));
+    }
 }

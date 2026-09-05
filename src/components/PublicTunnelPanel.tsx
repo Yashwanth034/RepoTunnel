@@ -261,7 +261,7 @@ function PublicTunnelPanel({
             <div><span>Local gateway</span><strong>{gatewayRunning ? "Online" : "Offline"}</strong></div>
             {status.provider === "direct" ? (
               <>
-                <div><span>HTTPS listener</span><strong>{status.running ? `:${status.directHttpsPort} online` : "Offline"}</strong></div>
+                <div><span>HTTPS listener</span><strong>{status.localReady ? `:${status.directHttpsPort} online` : status.running ? "Starting / unavailable" : "Offline"}</strong></div>
                 <div><span>TLS certificate</span><strong>{status.tlsTrusted ? "Trusted" : "Self-signed test"}</strong></div>
                 <div><span>Public route</span><strong>{status.publicReachable ? "Reachable" : "Not confirmed"}</strong></div>
               </>
@@ -300,7 +300,7 @@ function PublicTunnelPanel({
               </small>
               {!status.tlsTrusted && status.certbotAvailable ? (
                 <div className="provider-link-row">
-                  <button className="secondary-button" type="button" onClick={() => void onProvisionCertificate()} disabled={busy || !status.running}>
+                  <button className="secondary-button" type="button" onClick={() => void onProvisionCertificate()} disabled={busy || !status.localReady}>
                     {busy ? "Working…" : "Get trusted IP certificate"}
                   </button>
                 </div>

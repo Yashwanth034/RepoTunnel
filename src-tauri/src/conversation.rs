@@ -262,6 +262,13 @@ pub(crate) fn get(app: &AppHandle, conversation_id: &str) -> Result<HomeConversa
     })
 }
 
+pub(crate) fn has_active_generation() -> bool {
+    ACTIVE_GENERATIONS
+        .get()
+        .and_then(|registry| registry.lock().ok())
+        .is_some_and(|registry| !registry.is_empty())
+}
+
 pub(crate) fn delete(app: &AppHandle, conversation_id: &str) -> Result<(), String> {
     if let Some(registry) = ACTIVE_GENERATIONS.get() {
         let registry = registry

@@ -254,6 +254,14 @@ fn staleness(result: &ModelTrialResult, snapshot: &ModelHubSnapshot) -> Option<S
     }
     None
 }
+pub(crate) fn is_running() -> bool {
+    ACTIVE_TRIAL
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false)
+}
+
 pub(crate) async fn snapshot(app: &AppHandle) -> Result<ModelTrialSnapshot, String> {
     let hub = model_hub::snapshot(app).await?;
     snapshot_with_hub(app, &hub)

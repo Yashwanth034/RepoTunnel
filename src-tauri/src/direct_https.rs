@@ -6,7 +6,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        mpsc, Arc,
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -637,6 +637,7 @@ pub(crate) fn spawn(
     let worker_public_url = public_url.clone();
     let initial_cert = certificate.clone();
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
 
     let worker = thread::Builder::new()
         .name("repotunnel-direct-https".to_string())
@@ -649,7 +650,9 @@ pub(crate) fn spawn(
             {
                 Ok(runtime) => runtime,
                 Err(error) => {
-                    eprintln!("Could not initialize Direct HTTPS runtime: {error}");
+                    let message = format!("Could not initialize Direct HTTPS runtime: {error}");
+                    let _ = ready_tx.send(Err(message.clone()));
+                    eprintln!("{message}");
                     return;
                 }
             };
@@ -658,7 +661,9 @@ pub(crate) fn spawn(
                 let tls_config = match RustlsConfig::from_pem_file(&initial_cert.cert, &initial_cert.key).await {
                     Ok(config) => config,
                     Err(error) => {
-                        eprintln!("Could not load Direct HTTPS certificate: {error}");
+                        let message = format!("Could not load Direct HTTPS certificate: {error}");
+                        let _ = ready_tx.send(Err(message.clone()));
+                        eprintln!("{message}");
                         return;
                     }
                 };
@@ -697,14 +702,18 @@ pub(crate) fn spawn(
                 let tls_server = match axum_server::from_tcp_rustls(https_listener, tls_config.clone()) {
                     Ok(server) => server.serve(proxy.into_make_service()),
                     Err(error) => {
-                        eprintln!("Could not initialize Direct HTTPS listener: {error}");
+                        let message = format!("Could not initialize Direct HTTPS listener: {error}");
+                        let _ = ready_tx.send(Err(message.clone()));
+                        eprintln!("{message}");
                         return;
                     }
                 };
                 let challenge_listener = match TcpListener::from_std(challenge_listener) {
                     Ok(listener) => listener,
                     Err(error) => {
-                        eprintln!("Could not initialize Direct HTTPS ACME listener: {error}");
+                        let message = format!("Could not initialize Direct HTTPS ACME listener: {error}");
+                        let _ = ready_tx.send(Err(message.clone()));
+                        eprintln!("{message}");
                         return;
                     }
                 };
@@ -720,6 +729,7 @@ pub(crate) fn spawn(
 
                 worker_local_ready.store(true, Ordering::SeqCst);
                 worker_public_reachable.store(probe_public_health(&worker_public_url), Ordering::SeqCst);
+                let _ = ready_tx.send(Ok(()));
 
                 loop {
                     tokio::select! {
@@ -761,6 +771,24 @@ pub(crate) fn spawn(
         })
         .map_err(|error| format!("Could not start Direct HTTPS worker: {error}"))?;
 
+    match ready_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let _ = shutdown_tx.send(());
+            let _ = worker.join();
+            return Err(error);
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            return Err("Direct HTTPS worker stopped during listener initialization.".to_string());
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = shutdown_tx.send(());
+            let _ = worker.join();
+            return Err("Timed out while initializing the Direct HTTPS listeners.".to_string());
+        }
+    }
+
     Ok(DirectHttpsRuntime {
         local_ready,
         public_reachable,
@@ -776,6 +804,13 @@ mod tests {
     use super::bind_direct_listener;
     use super::{is_non_public_ip, safe_host_component, valid_challenge_token};
     use std::net::IpAddr;
+
+    #[test]
+    fn process_crypto_provider_makes_rustls_server_builder_unambiguous() {
+        crate::install_rustls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+        let _ = rustls::ServerConfig::builder();
+    }
 
     #[test]
     fn sanitizes_ipv6_for_private_storage_paths() {

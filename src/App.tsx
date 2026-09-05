@@ -38,6 +38,7 @@ import {
 } from "./lib/filesystem";
 import {
   addWorkspace,
+  checkForUpdates,
   createProject,
   approveChange,
   createCheckpoint,
@@ -114,6 +115,7 @@ const initialPublicTunnelStatus: PublicTunnelStatus = {
   certbotVersion: null,
   tlsTrusted: false,
   publicReachable: false,
+  localReady: false,
   running: false,
   ready: false,
   publicUrl: null,
@@ -512,11 +514,31 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setLoading(true);
     refresh()
       .catch((error) => setNotice(`RepoTunnel could not initialize: ${errorMessage(error)}`))
       .finally(() => setLoading(false));
     void refreshModelHub(true);
   }, [refresh, refreshModelHub]);
+
+  useEffect(() => {
+    let active = true;
+    const check = () => {
+      checkForUpdates(false)
+        .then((status) => {
+          if (active && status.shouldNotify && status.update) {
+            setNotice(`RepoTunnel ${status.update.version} is available. Open Settings to update.`);
+          }
+        })
+        .catch(() => undefined);
+    };
+    check();
+    const timer = window.setInterval(check, 6 * 60 * 60 * 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (activeView !== "overview") return;
@@ -1621,6 +1643,7 @@ function App() {
         onNotice={setNotice}
         uiScale={uiScale}
         onUiScaleChange={setUiScale}
+        hasUnsavedChanges={editorSavingKey !== null || editorTabs.some((tab) => tab.dirty)}
       />
     );
   }

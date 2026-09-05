@@ -54,6 +54,10 @@ pub(crate) struct ProjectMemory {
     pub(crate) preferences: Vec<String>,
     pub(crate) next_steps: Vec<String>,
     pub(crate) updated_at: u64,
+    #[serde(default)]
+    pub(crate) git_head_at_update: Option<String>,
+    #[serde(default)]
+    pub(crate) activity_updated_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -259,6 +263,7 @@ pub(crate) struct PublicTunnelStatus {
     pub(crate) certbot_version: Option<String>,
     pub(crate) tls_trusted: bool,
     pub(crate) public_reachable: bool,
+    pub(crate) local_ready: bool,
     pub(crate) running: bool,
     pub(crate) ready: bool,
     pub(crate) public_url: Option<String>,

@@ -3,7 +3,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,6 +25,13 @@ const OLLAMA_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const OLLAMA_SERVICE_GRACE: Duration = Duration::from_millis(1600);
 const OLLAMA_STARTUP_POLL: Duration = Duration::from_millis(180);
 const OLLAMA_USER_FALLBACK_ENDPOINT: &str = "http://127.0.0.1:11435";
+const OLLAMA_USER_SERVICE_START_ARGS: &[&str] = &[
+    "--user",
+    "start",
+    "ollama.service",
+    "--no-ask-password",
+    "--no-block",
+];
 const INFERENCE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DISCOVERY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_INFERENCE_BYTES: usize = 512 * 1024;
@@ -37,6 +47,7 @@ struct OwnedOllama {
 }
 
 static OWNED_OLLAMA: OnceLock<Mutex<Option<OwnedOllama>>> = OnceLock::new();
+static OLLAMA_USER_SERVICE_START_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 fn ollama_autostart_supported_endpoint(endpoint: &str) -> bool {
     let Ok(endpoint) = validate_loopback_endpoint(endpoint) else {
@@ -81,21 +92,20 @@ fn spawn_ollama_server() -> std::io::Result<Child> {
 }
 
 fn try_start_existing_ollama_service() {
-    let attempts: &[&[&str]] = &[
-        &["--user", "start", "ollama.service", "--no-ask-password"],
-        &["start", "ollama.service", "--no-ask-password"],
-    ];
-    for args in attempts {
-        let status = Command::new("systemctl")
-            .args(*args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if status.is_ok_and(|status| status.success()) {
-            return;
-        }
+    if OLLAMA_USER_SERVICE_START_ATTEMPTED.swap(true, Ordering::SeqCst) {
+        return;
     }
+
+    // Never ask the OS to start a privileged/system Ollama service from RepoTunnel.
+    // A system-level `systemctl start ollama.service` can invoke PolicyKit and show a
+    // desktop password prompt; Model Hub refreshes can then repeat that prompt. Only
+    // try a per-user service, which cannot require administrative authentication.
+    let _ = Command::new("systemctl")
+        .args(OLLAMA_USER_SERVICE_START_ARGS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 async fn wait_for_ollama_api(tags_url: &str, timeout: Duration, window: Duration) -> Option<Value> {
@@ -277,9 +287,9 @@ async fn recover_ollama_tags(
         ));
     }
 
-    // Prefer the installer-managed Ollama service first. Models pulled through the
-    // normal Linux Ollama service live with that service, so this preserves the
-    // user's existing model library when the service can be started without a prompt.
+    // Prefer an existing per-user Ollama service first. RepoTunnel never requests
+    // a privileged/system service start here, so normal Model Hub refreshes cannot
+    // trigger an OS administrator-password prompt.
     try_start_existing_ollama_service();
     if let Some(value) = wait_for_ollama_api(tags_url, timeout, OLLAMA_SERVICE_GRACE).await {
         return Ok(value);
@@ -1868,7 +1878,7 @@ mod tests {
         chat_connect_timed_out, chat_idle_timed_out, discover_provider_with_timeout,
         load_config_path, run_model_test_with_timeout, save_config_path, stream_chat,
         stream_chat_structured, validate_loopback_endpoint, LocalChatErrorKind, LocalChatMessage,
-        ModelHubConfig, ModelProviderId, ModelSelection,
+        ModelHubConfig, ModelProviderId, ModelSelection, OLLAMA_USER_SERVICE_START_ARGS,
     };
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -1930,6 +1940,23 @@ mod tests {
             "repotunnel-model-hub-test-{}-{label}-{id}.json",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn ollama_autostart_never_requests_a_privileged_system_service() {
+        assert_eq!(
+            OLLAMA_USER_SERVICE_START_ARGS.first().copied(),
+            Some("--user")
+        );
+        assert!(OLLAMA_USER_SERVICE_START_ARGS.contains(&"--no-ask-password"));
+        assert!(OLLAMA_USER_SERVICE_START_ARGS.contains(&"--no-block"));
+        assert_eq!(
+            OLLAMA_USER_SERVICE_START_ARGS
+                .iter()
+                .filter(|arg| **arg == "ollama.service")
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -41,6 +41,55 @@ export type ProjectMemory = {
   preferences: string[];
   nextSteps: string[];
   updatedAt: number;
+  gitHeadAtUpdate: string | null;
+  activityUpdatedAt: number;
+};
+
+export type ContinuityMilestone = {
+  id: string;
+  summary: string;
+  outcome: string;
+  facts: string[];
+  completedAt: number;
+  versionIds: string[];
+  important: boolean;
+  compacted: boolean;
+};
+
+export type ResumeSnapshot = {
+  schemaVersion: number;
+  workspaceId: string;
+  workspaceName: string;
+  generatedAt: number;
+  brief: {
+    git: {
+      available: boolean;
+      branch: string | null;
+      head: string | null;
+      workingTree: string;
+      ahead: number;
+      behind: number;
+    };
+    active: string[];
+    lastCompleted: string[];
+    lastFailed: string[];
+    attentionRequired: boolean;
+    next: string[];
+    lastActivityAt: number;
+  };
+  context: {
+    summary: string;
+    goals: string[];
+    decisions: string[];
+    constraints: string[];
+    savedNextSteps: string[];
+    memoryState: "empty" | "current" | "stale";
+    memoryStaleReason: string | null;
+    memoryUpdatedAt: number;
+    fullContextTool: string;
+  };
+  milestones: ContinuityMilestone[];
+  detailsAvailable: string[];
 };
 
 export type WorkspaceHealth = {
@@ -376,6 +425,7 @@ export type PublicTunnelStatus = {
   certbotVersion: string | null;
   tlsTrusted: boolean;
   publicReachable: boolean;
+  localReady: boolean;
   running: boolean;
   ready: boolean;
   publicUrl: string | null;
@@ -1031,6 +1081,30 @@ export type RuntimeDiagnostics = {
   warnings: string[];
 };
 
+export type AvailableUpdate = {
+  version: string;
+  notes: string | null;
+  publishedAt: string | null;
+  target: string;
+};
+
+export type UpdateStatus = {
+  currentVersion: string;
+  autoCheck: boolean;
+  checkIntervalSeconds: number;
+  lastCheckedAt: number | null;
+  update: AvailableUpdate | null;
+  shouldNotify: boolean;
+  deferredUntil: number | null;
+  lastSuccessfulVersion: string | null;
+  lastError: string | null;
+  installBlockedReason: string | null;
+};
+
+export type UpdateInstallResult = {
+  version: string;
+  restartRequested: boolean;
+};
 
 export type TeamSessionStatus = "active" | "paused" | "completed" | "cancelled";
 export type TeamPhase = "planning" | "executing" | "reviewing" | "verifying" | "complete";

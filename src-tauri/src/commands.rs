@@ -11,8 +11,8 @@ use crate::{
     access::{resolve_workspace_path, validate_workspace_root, AccessOperation},
     activity, ai_workspace,
     app_state::AppState,
-    browser, changes, checkpoint, conversation, desktop_control, execution, filesystem, git,
-    hardening, integrations, launcher, mcp_auth,
+    browser, changes, checkpoint, continuity, conversation, desktop_control, execution, filesystem,
+    git, hardening, integrations, launcher, mcp_auth,
     model_hub::{
         self, ModelHubSnapshot, ModelProviderId, ModelSelection, ModelTestResult, RuntimeStatus,
     },
@@ -41,7 +41,7 @@ use crate::{
         load_history_settings, load_workspaces, save_ai_access_paused, save_history_settings,
         save_workspaces,
     },
-    team, terminal, versioning, workflow,
+    team, terminal, updates, versioning, workflow,
 };
 
 fn canonical_workspace_path(path: &str) -> Result<PathBuf, String> {
@@ -236,6 +236,7 @@ pub fn remove_workspace(
     save_workspaces(&app, &workspaces)?;
     monitoring::forget_workspace(&app, &id);
     project_memory::forget(&app, &id);
+    continuity::forget(&app, &id);
     team::forget_workspace(&app, &id);
     integrations::forget_workspace(&app, &id);
     desktop_control::forget_workspace(&app, &id);
@@ -659,6 +660,15 @@ pub async fn prepare_project(
 pub fn get_project_memory(app: AppHandle, workspace_id: String) -> Result<ProjectMemory, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
     project_memory::get(&app, &workspace)
+}
+
+#[tauri::command]
+pub fn get_resume_snapshot(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<continuity::ResumeSnapshot, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    continuity::resume_snapshot(&app, &workspace)
 }
 
 #[tauri::command]
@@ -2575,6 +2585,49 @@ pub fn get_runtime_diagnostics(app: AppHandle) -> Result<RuntimeDiagnostics, Str
 pub fn set_launch_at_login(app: AppHandle, enabled: bool) -> Result<RuntimeDiagnostics, String> {
     hardening::set_launch_at_login(&app, enabled)?;
     hardening::diagnostics(&app)
+}
+
+#[tauri::command]
+pub fn get_update_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<updates::UpdateStatus, String> {
+    updates::status(&app, Some(state.inner()))
+}
+
+#[tauri::command]
+pub async fn check_for_updates(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    manual: bool,
+) -> Result<updates::UpdateStatus, String> {
+    updates::check(&app, manual, Some(state.inner())).await
+}
+
+#[tauri::command]
+pub fn set_auto_update_checks(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<updates::UpdateStatus, String> {
+    updates::set_auto_check(&app, enabled, Some(state.inner()))
+}
+
+#[tauri::command]
+pub fn defer_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    version: String,
+) -> Result<updates::UpdateStatus, String> {
+    updates::defer(&app, &version, Some(state.inner()))
+}
+
+#[tauri::command]
+pub async fn install_update_and_restart(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<updates::UpdateInstallResult, String> {
+    updates::install_and_restart(&app, state.inner()).await
 }
 
 #[tauri::command]

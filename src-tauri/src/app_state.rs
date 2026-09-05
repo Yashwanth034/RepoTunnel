@@ -377,6 +377,7 @@ impl AppState {
             certbot_version,
             tls_trusted,
             public_reachable,
+            local_ready: local_healthy,
             running,
             ready,
             public_url,
