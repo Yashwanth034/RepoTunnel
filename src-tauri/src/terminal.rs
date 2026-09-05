@@ -2127,11 +2127,13 @@ mod tests {
     #[test]
     fn one_shot_terminal_timeout_remains_enforced() {
         let (root, workspace) = temp_workspace("one-shot-timeout");
-        let record = pending_terminal_record(
-            &workspace,
-            "python3 -c 'import time; time.sleep(5)'".to_string(),
-            ".".to_string(),
-        );
+        #[cfg(windows)]
+        let timeout_command = "ping -n 6 127.0.0.1 >NUL";
+        #[cfg(not(windows))]
+        let timeout_command = "sleep 5";
+
+        let record =
+            pending_terminal_record(&workspace, timeout_command.to_string(), ".".to_string());
         let finished = execute_terminal_command(
             record,
             root.clone(),
