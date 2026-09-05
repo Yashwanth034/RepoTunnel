@@ -72,7 +72,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNGQzYxMjAwOEM5M0MzMUMKUldRY3c1T01BQkxHUDg3dkg5RWhhZURqWFYwcTVxRWpNRlRCMmJxVW8xTlRjajdrR1ozRVVqQ3MK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJBMTg2QTdFNjBGNkFFODUKUldTRnJ2WmdmbW9ZS2tBRHdCZ1VOL28raXlNQ3ZBVUpOTGlMOG9Td0czNmtHUWFpc2RiUDZTZk8K",
       "endpoints": [
         "https://github.com/Yashwanth034/RepoTunnel/releases/latest/download/latest.json"
       ]
