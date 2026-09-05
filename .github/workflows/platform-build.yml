@@ -248,6 +248,8 @@ jobs:
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings
 
       - name: Windows Rust tests
+        env:
+          REPOTUNNEL_WINDOWS_TEST_MANIFEST: "1"
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Build signed installers

@@ -1871,7 +1871,7 @@ mod tests {
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use super::{
@@ -1892,11 +1892,24 @@ mod tests {
 
     fn mock_server(responses: Vec<MockResponse>) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock server");
+        listener
+            .set_nonblocking(true)
+            .expect("set mock server nonblocking");
         let address = listener.local_addr().expect("mock address");
         let worker = thread::spawn(move || {
             for response in responses {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => return,
+                    }
                 };
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
                 let mut request = [0u8; 8192];
