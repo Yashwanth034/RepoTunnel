@@ -7710,6 +7710,28 @@ body,
   background: var(--rt-panel, #0d141c);
 }
 
+.projects-page-stack {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.projects-page-stack > * {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.project-memory-panel {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  container-type: inline-size;
+  container-name: projectmemory;
+  overflow: hidden;
+}
+
 .project-setup-heading,
 .project-memory-heading {
   display: flex;
@@ -7860,11 +7882,31 @@ body,
 }
 .project-memory-actions { margin-top: 10px; text-align: right; }
 .project-memory-empty { margin-top: 14px; padding: 12px; border: 1px dashed var(--rt-line); border-radius: 8px; }
-.project-memory-summary { margin-top: 14px; }
-.project-memory-summary > p { margin: 0 0 10px; color: var(--rt-text-2); font-size: 11px; line-height: 1.55; }
-.project-memory-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.project-memory-chips span {
+.project-memory-summary {
+  min-width: 0;
   max-width: 100%;
+  margin-top: 14px;
+}
+.project-memory-summary > p {
+  max-width: 100%;
+  margin: 0 0 10px;
+  color: var(--rt-text-2);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.project-memory-chips {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.project-memory-chips span {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 5px 8px;
   overflow: hidden;
   border: 1px solid var(--rt-line);
@@ -7874,6 +7916,33 @@ body,
   font-size: 9.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-memory-heading,
+.continuity-status-grid,
+.continuity-note,
+.project-memory-editor,
+.project-memory-grid {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.continuity-status-grid > div,
+.continuity-status-grid strong {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.continuity-note {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@container projectmemory (max-width: 720px) {
+  .continuity-status-grid,
+  .project-memory-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .new-project-copy { color: var(--rt-text-3); font-size: 11px; line-height: 1.55; }

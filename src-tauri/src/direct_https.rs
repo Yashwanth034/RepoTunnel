@@ -6,10 +6,10 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -30,6 +30,16 @@ pub(crate) const HTTP_CHALLENGE_PORT: u16 = 43184;
 const DIRECT_ROOT: &str = "direct-https";
 const RENEW_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const PUBLIC_PROBE_INTERVAL: Duration = Duration::from_secs(15);
+const TOOL_PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Debug)]
+pub(crate) struct ToolAvailability {
+    pub(crate) openssl_available: bool,
+    pub(crate) certbot_available: bool,
+    pub(crate) certbot_version: Option<String>,
+}
+
+static TOOL_PROBE_CACHE: OnceLock<Mutex<Option<(Instant, ToolAvailability)>>> = OnceLock::new();
 
 #[derive(Clone)]
 struct ProxyState {
@@ -419,6 +429,39 @@ fn supported_version(version: &(u64, u64, u64, String)) -> bool {
     version.0 > 5 || (version.0 == 5 && version.1 >= 4)
 }
 
+pub(crate) fn tool_availability() -> ToolAvailability {
+    let cache = TOOL_PROBE_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((checked_at, value)) = guard.as_ref() {
+            if checked_at.elapsed() < TOOL_PROBE_CACHE_TTL {
+                return value.clone();
+            }
+        }
+    }
+
+    let system_certbot = system_certbot_version_tuple();
+    let system_supported = system_certbot.as_ref().is_some_and(supported_version);
+    let pipx_available = if system_supported {
+        false
+    } else {
+        pipx_available()
+    };
+    let certbot_version = system_certbot
+        .as_ref()
+        .map(|(_, _, _, text)| text.clone())
+        .or_else(|| pipx_available.then(|| "Certbot 5.4+ via pipx (on demand)".to_string()));
+    let availability = ToolAvailability {
+        openssl_available: openssl_available(),
+        certbot_available: system_supported || pipx_available,
+        certbot_version,
+    };
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), availability.clone()));
+    }
+    availability
+}
+
 fn certbot_command() -> Result<Command, String> {
     if system_certbot_version_tuple()
         .as_ref()
@@ -436,13 +479,6 @@ fn certbot_command() -> Result<Command, String> {
         return Ok(command);
     }
     Err("Certbot 5.4+ is unavailable and pipx was not found for RepoTunnel's rootless on-demand Certbot fallback.".to_string())
-}
-
-pub(crate) fn certbot_version() -> Option<String> {
-    if let Some((_, _, _, text)) = system_certbot_version_tuple() {
-        return Some(text);
-    }
-    pipx_available().then(|| "Certbot 5.4+ via pipx (on demand)".to_string())
 }
 
 pub(crate) fn certbot_supports_ip_certificates() -> bool {

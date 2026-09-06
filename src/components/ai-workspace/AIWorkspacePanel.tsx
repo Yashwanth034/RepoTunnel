@@ -94,7 +94,7 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   useEffect(() => {
     if (!status?.running || !status.ready) return;
     void refreshFrame();
-    const timer = window.setInterval(() => void refreshFrame(), 200);
+    const timer = window.setInterval(() => void refreshFrame(), 700);
     return () => window.clearInterval(timer);
   }, [refreshFrame, status?.ready, status?.running]);
 
@@ -220,7 +220,7 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
           <div className="ai-workspace-meta">
             <span className="ai-workspace-live-dot" aria-hidden="true" />
             <span>AI control isolated from your desktop</span>
-            <span className="ai-workspace-quality">Sharp · 1440×900 PNG</span>
+            <span className="ai-workspace-quality">Live preview · 1440×900</span>
             {frame?.activeTitle ? <span>{frame.activeTitle}</span> : null}
           </div>
           <div className={`ai-workspace-screen-shell ${expanded ? "expanded" : ""}`}>

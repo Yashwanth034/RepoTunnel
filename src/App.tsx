@@ -758,21 +758,70 @@ function App() {
 
   useEffect(() => {
     if (!publicTunnelStatus.configured) return;
-    const timer = window.setInterval(() => {
-      getPublicTunnelStatus().then(setPublicTunnelStatus).catch(() => undefined);
-    }, 4000);
+    let polling = false;
+    const poll = () => {
+      if (polling) return;
+      polling = true;
+      getPublicTunnelStatus()
+        .then(setPublicTunnelStatus)
+        .catch(() => undefined)
+        .finally(() => { polling = false; });
+    };
+    const timer = window.setInterval(poll, 4000);
     return () => window.clearInterval(timer);
   }, [publicTunnelStatus.configured]);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
+    let timer: number | null = null;
+    let refreshRunning = false;
+    let refreshQueued = false;
+
+    const refreshAfterChange = async () => {
+      if (disposed) return;
+      if (refreshRunning) {
+        refreshQueued = true;
+        return;
+      }
+      refreshRunning = true;
+      try {
+        await refreshPendingChanges().catch(() => undefined);
+        if (activeView === "changes" && selectedWorkspaceId) {
+          await Promise.all([
+            getVersionTimeline(selectedWorkspaceId),
+            getActivityTimeline(selectedWorkspaceId),
+          ]).then(([versions, activities]) => {
+            setVersionTimeline(versions);
+            setActivityTimeline(activities);
+          }).catch(() => undefined);
+        }
+        if (editorTabsRef.current.length > 0) {
+          await syncEditorFiles().catch(() => undefined);
+        }
+        if (activeView === "git" || activeView === "editor") {
+          await refreshGitStatus().catch(() => undefined);
+        }
+        setProjectTreeRefreshToken((current) => current + 1);
+      } finally {
+        refreshRunning = false;
+        if (refreshQueued && !disposed) {
+          refreshQueued = false;
+          timer = window.setTimeout(() => {
+            timer = null;
+            void refreshAfterChange();
+          }, 500);
+        }
+      }
+    };
 
     listen("repotunnel://changes-updated", () => {
-      refreshChanges().catch(() => undefined);
-      syncEditorFiles().catch(() => undefined);
-      setProjectTreeRefreshToken((current) => current + 1);
-      refreshGitStatus().catch(() => undefined);
+      if (disposed) return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void refreshAfterChange();
+      }, 500);
     })
       .then((stopListening) => {
         if (disposed) stopListening();
@@ -782,17 +831,36 @@ function App() {
 
     return () => {
       disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
       unlisten?.();
     };
-  }, [refreshChanges, syncEditorFiles, refreshGitStatus]);
+  }, [activeView, selectedWorkspaceId, refreshPendingChanges, syncEditorFiles, refreshGitStatus]);
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
+    let timer: number | null = null;
+    let refreshRunning = false;
+
+    const refreshActivity = async () => {
+      if (disposed || activeView !== "changes" || !selectedWorkspaceId || refreshRunning) return;
+      refreshRunning = true;
+      try {
+        setActivityTimeline(await getActivityTimeline(selectedWorkspaceId));
+      } catch {
+        // Keep the last successful history snapshot during active AI work.
+      } finally {
+        refreshRunning = false;
+      }
+    };
 
     listen("repotunnel://activity-updated", () => {
-      if (activeView !== "changes" || !selectedWorkspaceId) return;
-      getActivityTimeline(selectedWorkspaceId).then(setActivityTimeline).catch(() => undefined);
+      if (disposed || activeView !== "changes" || !selectedWorkspaceId) return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void refreshActivity();
+      }, 700);
     })
       .then((stopListening) => {
         if (disposed) stopListening();
@@ -802,6 +870,7 @@ function App() {
 
     return () => {
       disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
       unlisten?.();
     };
   }, [activeView, selectedWorkspaceId]);
@@ -1488,7 +1557,7 @@ function App() {
   function renderPage() {
     if (activeView === "projects") {
       return (
-        <div className="page-stack">
+        <div className="page-stack projects-page-stack">
           <WorkspaceList
             workspaces={workspaces}
             adding={adding}

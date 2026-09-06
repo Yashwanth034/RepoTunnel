@@ -73,7 +73,8 @@ const repoTunnelTheme = EditorView.theme({
   },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": {
-    overflow: "auto",
+    overflowX: "hidden",
+    overflowY: "auto",
     overscrollBehavior: "contain",
     fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", monospace',
     lineHeight: "19px",
@@ -295,6 +296,7 @@ export default function CodeMirrorSurface({
       doc: content,
       extensions: [
         basicSetup,
+        EditorView.lineWrapping,
         repoTunnelTheme,
         syntaxHighlighting(repoTunnelHighlight),
         EditorState.tabSize.of(unit.length),

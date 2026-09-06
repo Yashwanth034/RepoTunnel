@@ -57,6 +57,17 @@ fn install_rustls_crypto_provider() {
 }
 
 fn initialize_local_runtime(app: &tauri::AppHandle) {
+    let stale_ai_workspace_processes = ai_workspace::cleanup_stale_processes(app);
+    if stale_ai_workspace_processes > 0 {
+        hardening::log_event(
+            app,
+            "INFO",
+            "ai_workspace.cleanup",
+            &format!(
+                "Stopped {stale_ai_workspace_processes} stale RepoTunnel AI Workspace processes."
+            ),
+        );
+    }
     if let Err(error) = terminal::initialize(app) {
         hardening::log_event(app, "WARN", "terminal.initialize", &error);
     }

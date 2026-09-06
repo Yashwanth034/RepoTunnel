@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.1 - 2026-09-06
+
+RepoTunnel v0.3.1 is a focused reliability and editor-quality update for v0.3.0.
+
+### Highlights
+
+- Fixed Projects / Continuity layouts so long live context cannot stretch the application horizontally or distort the page.
+- Restored normal editor long-line behavior with visual line wrapping, while preserving the file contents unless the user explicitly inserts a newline.
+- Added editor regression coverage for Backspace, undo/redo, caret stability, and long-line wrapping.
+- Reduced UI stalls by moving heavier status/history/workspace operations off the frontend command path and coalescing repeated activity refreshes.
+- Reduced AI Workspace preview polling pressure and cleaned up stale isolated-session processes more reliably.
+- Cached external connection-tool probes so routine connection-status refreshes do not repeatedly spawn expensive checks.
+
 ## 0.3.0 - 2026-09-05
 
 RepoTunnel v0.3.0 focuses on reliable continuation, safe updates, and a hardened Direct HTTPS connection.

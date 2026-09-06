@@ -56,7 +56,7 @@ function createView(doc = "abcdef") {
     state: EditorState.create({
       doc,
       selection: { anchor: doc.length },
-      extensions: [basicSetup],
+      extensions: [basicSetup, EditorView.lineWrapping],
     }),
   });
   activeView = view;
@@ -115,5 +115,14 @@ describe("CodeMirror editor input regressions", () => {
 
     expect(view.state.selection.main.head).toBe(middle - 1);
     expect(view.state.doc.toString()).toBe("first\nseond\nthird");
+  });
+
+  it("wraps long editor lines visually without inserting file newlines", () => {
+    const longLine = "x".repeat(400);
+    const view = createView(longLine);
+
+    expect(view.contentDOM.classList.contains("cm-lineWrapping")).toBe(true);
+    expect(view.state.doc.lines).toBe(1);
+    expect(view.state.doc.toString()).toBe(longLine);
   });
 });

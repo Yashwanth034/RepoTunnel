@@ -5,7 +5,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex, OnceLock,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -25,6 +25,16 @@ use crate::direct_https;
 
 const CONFIG_FILE: &str = "public-tunnel.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+const TOOL_PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Debug)]
+struct CachedCloudflaredVersion {
+    checked_at: Instant,
+    value: Option<String>,
+}
+
+static CLOUDFLARED_VERSION_CACHE: OnceLock<Mutex<Option<CachedCloudflaredVersion>>> =
+    OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -270,6 +280,26 @@ pub(crate) fn cloudflared_version() -> Option<String> {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+pub(crate) fn cached_cloudflared_version() -> Option<String> {
+    let cache = CLOUDFLARED_VERSION_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.as_ref() {
+            if cached.checked_at.elapsed() < TOOL_PROBE_CACHE_TTL {
+                return cached.value.clone();
+            }
+        }
+    }
+
+    let value = cloudflared_version();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(CachedCloudflaredVersion {
+            checked_at: Instant::now(),
+            value: value.clone(),
+        });
+    }
+    value
 }
 
 fn probe_public_health(public_url: &str) -> Option<bool> {

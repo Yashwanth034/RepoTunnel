@@ -62,11 +62,37 @@ function ProjectMemoryPanel({ workspaces, selectedWorkspaceId, onNotice }: Proje
     let disposed = false;
     let unlisten: (() => void) | null = null;
     let timer: number | null = null;
+    let refreshRunning = false;
+    let refreshQueued = false;
+
+    const refreshAfterActivity = async () => {
+      if (disposed) return;
+      if (refreshRunning) {
+        refreshQueued = true;
+        return;
+      }
+      refreshRunning = true;
+      try {
+        await load(true);
+      } finally {
+        refreshRunning = false;
+        if (refreshQueued && !disposed) {
+          refreshQueued = false;
+          timer = window.setTimeout(() => {
+            timer = null;
+            void refreshAfterActivity();
+          }, 900);
+        }
+      }
+    };
 
     void listen("repotunnel://activity-updated", () => {
       if (disposed) return;
       if (timer !== null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => void load(true), 180);
+      timer = window.setTimeout(() => {
+        timer = null;
+        void refreshAfterActivity();
+      }, 1200);
     }).then((remove) => {
       if (disposed) remove();
       else unlisten = remove;

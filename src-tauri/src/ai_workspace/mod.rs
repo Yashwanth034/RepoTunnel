@@ -28,6 +28,7 @@ const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
 const DISPLAY_START: u16 = 91;
 const DISPLAY_END: u16 = 119;
+const SESSION_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_SESSION";
 const GNOME_TERMINAL_PRIVATE_SERVER_SCRIPT: &str = r#"
 server="$1"
 terminal="$2"
@@ -107,6 +108,114 @@ fn now_ms() -> u64 {
         .ok()
         .and_then(|value| u64::try_from(value).ok())
         .unwrap_or(0)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_env_value<'a>(environ: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    environ.split(|byte| *byte == 0).find_map(|entry| {
+        let rest = entry.strip_prefix(key)?.strip_prefix(b"=")?;
+        Some(rest)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn reserved_display(environ: &[u8]) -> bool {
+    let Some(value) = linux_env_value(environ, b"DISPLAY") else {
+        return false;
+    };
+    let display = String::from_utf8_lossy(value);
+    display
+        .strip_prefix(':')
+        .and_then(|value| value.split('.').next())
+        .and_then(|value| value.parse::<u16>().ok())
+        .is_some_and(|number| (DISPLAY_START..=DISPLAY_END).contains(&number))
+}
+
+#[cfg(target_os = "linux")]
+fn stale_profile_process(environ: &[u8], profile_prefix: &str) -> bool {
+    if !reserved_display(environ) {
+        return false;
+    }
+    [
+        b"XDG_CONFIG_HOME".as_slice(),
+        b"XDG_CACHE_HOME",
+        b"XDG_DATA_HOME",
+        b"XDG_STATE_HOME",
+    ]
+    .into_iter()
+    .filter_map(|key| linux_env_value(environ, key))
+    .any(|value| String::from_utf8_lossy(value).starts_with(profile_prefix))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_ids_matching(matches: &impl Fn(&[u8]) -> bool) -> Vec<u32> {
+    let current_pid = std::process::id();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|pid| *pid != current_pid)
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/environ"))
+                .ok()
+                .is_some_and(|environ| matches(&environ))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn signal_linux_processes(pids: &[u32], signal: &str) {
+    if pids.is_empty() {
+        return;
+    }
+    let mut command = Command::new("kill");
+    command.arg(signal).arg("--");
+    for pid in pids {
+        command.arg(pid.to_string());
+    }
+    let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).status();
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_linux_processes(matches: impl Fn(&[u8]) -> bool) -> usize {
+    let initial = linux_process_ids_matching(&matches);
+    signal_linux_processes(&initial, "-TERM");
+    if !initial.is_empty() {
+        thread::sleep(Duration::from_millis(300));
+    }
+    let remaining = linux_process_ids_matching(&matches);
+    signal_linux_processes(&remaining, "-KILL");
+    initial.len()
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_session_processes(session_id: &str) {
+    let expected = session_id.as_bytes().to_vec();
+    terminate_linux_processes(|environ| {
+        linux_env_value(environ, SESSION_ENV.as_bytes()).is_some_and(|value| value == expected)
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cleanup_session_processes(_session_id: &str) {}
+
+pub(crate) fn cleanup_stale_processes(app: &AppHandle) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(root) = app_data(app) else {
+            return 0;
+        };
+        let profile_root = root.join("ai-workspace/profiles");
+        let profile_prefix = format!("{}/", profile_root.to_string_lossy().trim_end_matches('/'));
+        terminate_linux_processes(|environ| stale_profile_process(environ, &profile_prefix))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        0
+    }
 }
 
 fn helper_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -200,6 +309,7 @@ fn stop_child(child: &mut Child) {
 
 fn stop_runtime(runtime: &mut Runtime) {
     stop_child(&mut runtime.application);
+    cleanup_session_processes(&runtime.session_id);
     stop_child(&mut runtime.wm);
     stop_child(&mut runtime.xephyr);
     let _ = fs::remove_file(&runtime.xauth_path);
@@ -479,11 +589,13 @@ fn configure_application_command(
     display: &str,
     xauth: &Path,
     profile: &BTreeMap<&'static str, PathBuf>,
+    session_id: &str,
 ) {
     command
         .current_dir(working_dir)
         .env("DISPLAY", display)
         .env("XAUTHORITY", xauth)
+        .env(SESSION_ENV, session_id)
         .env("GDK_BACKEND", "x11")
         .env("QT_QPA_PLATFORM", "xcb")
         .stdout(Stdio::null())
@@ -687,6 +799,8 @@ impl AiWorkspaceState {
         }
 
         let display_number = choose_display()?;
+        let started_at = now_ms();
+        let session_id = format!("aiw-{display_number}-{started_at}");
         let display = format!(":{display_number}");
         let xauth = xauth_file(app, &display)?;
         let title = format!("RepoTunnel AI Workspace {display_number}");
@@ -746,7 +860,14 @@ impl AiWorkspaceState {
         let profile = profile_env(app, &application.id)?;
         let window_lifecycle_application = uses_window_lifecycle(&application);
         let mut app_cmd = build_application_command(&application, &working_dir)?;
-        configure_application_command(&mut app_cmd, &working_dir, &display, &xauth, &profile);
+        configure_application_command(
+            &mut app_cmd,
+            &working_dir,
+            &display,
+            &xauth,
+            &profile,
+            &session_id,
+        );
         if application.id == "gnome-terminal" {
             app_cmd.stderr(Stdio::piped());
         }
@@ -807,6 +928,7 @@ impl AiWorkspaceState {
                             &display,
                             &xauth,
                             &profile,
+                            &session_id,
                         );
                         command.stderr(Stdio::piped());
                         let mut child = match spawn_group(&mut command) {
@@ -861,8 +983,6 @@ impl AiWorkspaceState {
             }
         }
 
-        let started_at = now_ms();
-        let session_id = format!("aiw-{display_number}-{started_at}");
         {
             let mut guard = self
                 .runtime
@@ -1327,6 +1447,37 @@ mod tests {
         assert!(debug.contains("--norc"));
         assert!(debug.contains("LANG=\"C.UTF-8\""));
         assert!(debug.contains("LC_ALL=\"C.UTF-8\""));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_cleanup_matches_only_reserved_repotunnel_profiles() {
+        let profile = "/home/test/.local/share/repotunnel/ai-workspace/profiles/";
+        let owned = b"DISPLAY=:91\0XDG_CONFIG_HOME=/home/test/.local/share/repotunnel/ai-workspace/profiles/vscode/config\0";
+        let normal_desktop = b"DISPLAY=:0\0XDG_CONFIG_HOME=/home/test/.local/share/repotunnel/ai-workspace/profiles/vscode/config\0";
+        let unrelated_reserved = b"DISPLAY=:91\0XDG_CONFIG_HOME=/home/test/.config/Code\0";
+        let outside_range = b"DISPLAY=:120\0XDG_CONFIG_HOME=/home/test/.local/share/repotunnel/ai-workspace/profiles/vscode/config\0";
+
+        assert!(super::stale_profile_process(owned, profile));
+        assert!(!super::stale_profile_process(normal_desktop, profile));
+        assert!(!super::stale_profile_process(unrelated_reserved, profile));
+        assert!(!super::stale_profile_process(outside_range, profile));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_environment_lookup_requires_an_exact_key() {
+        let environ =
+            b"DISPLAY=:91.0\0NOT_DISPLAY=:0\0REPOTUNNEL_AI_WORKSPACE_SESSION=aiw-91-test\0";
+        assert_eq!(
+            super::linux_env_value(environ, b"DISPLAY"),
+            Some(b":91.0".as_slice())
+        );
+        assert!(super::reserved_display(environ));
+        assert_eq!(
+            super::linux_env_value(environ, super::SESSION_ENV.as_bytes()),
+            Some(b"aiw-91-test".as_slice())
+        );
     }
 
     #[cfg(unix)]

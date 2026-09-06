@@ -657,18 +657,29 @@ pub async fn prepare_project(
 }
 
 #[tauri::command]
-pub fn get_project_memory(app: AppHandle, workspace_id: String) -> Result<ProjectMemory, String> {
-    let workspace = approved_workspace(&app, &workspace_id)?;
-    project_memory::get(&app, &workspace)
+pub async fn get_project_memory(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<ProjectMemory, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app, &workspace_id)?;
+        project_memory::get(&app, &workspace)
+    })
+    .await
+    .map_err(|error| format!("Project memory task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn get_resume_snapshot(
+pub async fn get_resume_snapshot(
     app: AppHandle,
     workspace_id: String,
 ) -> Result<continuity::ResumeSnapshot, String> {
-    let workspace = approved_workspace(&app, &workspace_id)?;
-    continuity::resume_snapshot(&app, &workspace)
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app, &workspace_id)?;
+        continuity::resume_snapshot(&app, &workspace)
+    })
+    .await
+    .map_err(|error| format!("Resume snapshot task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -838,19 +849,25 @@ pub fn get_file_info(
 }
 
 #[tauri::command]
-pub fn get_version_timeline(
+pub async fn get_version_timeline(
     app: AppHandle,
     workspace_id: Option<String>,
 ) -> Result<VersionTimeline, String> {
-    versioning::timeline(&app, workspace_id.as_deref())
+    tauri::async_runtime::spawn_blocking(move || {
+        versioning::timeline(&app, workspace_id.as_deref())
+    })
+    .await
+    .map_err(|error| format!("Version timeline task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn get_activity_timeline(
+pub async fn get_activity_timeline(
     app: AppHandle,
     workspace_id: Option<String>,
 ) -> Result<ActivityTimeline, String> {
-    activity::timeline(&app, workspace_id.as_deref())
+    tauri::async_runtime::spawn_blocking(move || activity::timeline(&app, workspace_id.as_deref()))
+        .await
+        .map_err(|error| format!("Activity timeline task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -1307,57 +1324,83 @@ pub fn set_desktop_control_enabled(
 }
 
 #[tauri::command]
-pub fn get_ai_workspace_status(
+pub async fn get_ai_workspace_status(
     app: AppHandle,
-    state: State<'_, AppState>,
     workspace_id: String,
 ) -> Result<ai_workspace::AiWorkspaceStatus, String> {
-    let _workspace = approved_workspace(&app, &workspace_id)?;
-    state.ai_workspace.status(&app, &workspace_id)
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        let state = app_for_task.state::<AppState>();
+        state.ai_workspace.status(&app_for_task, &workspace_id)
+    })
+    .await
+    .map_err(|error| format!("AI Workspace status task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn start_ai_workspace(
+pub async fn start_ai_workspace(
     app: AppHandle,
-    state: State<'_, AppState>,
     workspace_id: String,
     application_id: String,
     target: Option<String>,
 ) -> Result<ai_workspace::AiWorkspaceStatus, String> {
-    let workspace = approved_workspace(&app, &workspace_id)?;
-    state
-        .ai_workspace
-        .start(&app, &workspace, &application_id, target.as_deref())
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        let state = app_for_task.state::<AppState>();
+        state.ai_workspace.start(
+            &app_for_task,
+            &workspace,
+            &application_id,
+            target.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| format!("AI Workspace start task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn stop_ai_workspace(
+pub async fn stop_ai_workspace(
     app: AppHandle,
-    state: State<'_, AppState>,
     workspace_id: String,
 ) -> Result<ai_workspace::AiWorkspaceStatus, String> {
-    let _workspace = approved_workspace(&app, &workspace_id)?;
-    state.ai_workspace.stop(&app, &workspace_id)
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        let state = app_for_task.state::<AppState>();
+        state.ai_workspace.stop(&app_for_task, &workspace_id)
+    })
+    .await
+    .map_err(|error| format!("AI Workspace stop task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn get_ai_workspace_frame(
+pub async fn get_ai_workspace_frame(
     app: AppHandle,
-    state: State<'_, AppState>,
     workspace_id: String,
     max_width: Option<u32>,
 ) -> Result<ai_workspace::AiWorkspaceFrame, String> {
-    let _workspace = approved_workspace(&app, &workspace_id)?;
-    state
-        .ai_workspace
-        .frame(&app, &workspace_id, None, max_width.unwrap_or(1440), true)
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        let state = app_for_task.state::<AppState>();
+        state.ai_workspace.frame(
+            &app_for_task,
+            &workspace_id,
+            None,
+            max_width.unwrap_or(1440),
+            false,
+        )
+    })
+    .await
+    .map_err(|error| format!("AI Workspace frame task could not complete: {error}"))?
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn ai_workspace_action(
+pub async fn ai_workspace_action(
     app: AppHandle,
-    state: State<'_, AppState>,
     workspace_id: String,
     action: String,
     window_id: Option<String>,
@@ -1369,34 +1412,45 @@ pub fn ai_workspace_action(
     delta_x: Option<i32>,
     delta_y: Option<i32>,
 ) -> Result<serde_json::Value, String> {
-    let _workspace = approved_workspace(&app, &workspace_id)?;
-    state.ai_workspace.action(
-        &app,
-        &workspace_id,
-        &action,
-        window_id.as_deref(),
-        x_ratio,
-        y_ratio,
-        click_count,
-        shortcut.as_deref(),
-        text.as_deref(),
-        delta_x,
-        delta_y,
-    )
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        let state = app_for_task.state::<AppState>();
+        state.ai_workspace.action(
+            &app_for_task,
+            &workspace_id,
+            &action,
+            window_id.as_deref(),
+            x_ratio,
+            y_ratio,
+            click_count,
+            shortcut.as_deref(),
+            text.as_deref(),
+            delta_x,
+            delta_y,
+        )
+    })
+    .await
+    .map_err(|error| format!("AI Workspace action task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn ai_workspace_sequence(
+pub async fn ai_workspace_sequence(
     app: AppHandle,
-    state: State<'_, AppState>,
     workspace_id: String,
     window_id: Option<String>,
     steps: Vec<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
-    let _workspace = approved_workspace(&app, &workspace_id)?;
-    state
-        .ai_workspace
-        .sequence(&app, &workspace_id, window_id.as_deref(), &steps)
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        let state = app_for_task.state::<AppState>();
+        state
+            .ai_workspace
+            .sequence(&app_for_task, &workspace_id, window_id.as_deref(), &steps)
+    })
+    .await
+    .map_err(|error| format!("AI Workspace sequence task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -1817,9 +1871,16 @@ pub fn list_monitoring_file_events(
 }
 
 #[tauri::command]
-pub fn get_git_status(app: AppHandle, workspace_id: String) -> Result<GitRepositoryStatus, String> {
-    let workspace = approved_workspace(&app, &workspace_id)?;
-    Ok(git::repository_status(&workspace))
+pub async fn get_git_status(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<GitRepositoryStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app, &workspace_id)?;
+        Ok(git::repository_status(&workspace))
+    })
+    .await
+    .map_err(|error| format!("Git status task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -2285,11 +2346,14 @@ pub async fn stop_gateway(app: AppHandle) -> Result<GatewayStatus, String> {
 }
 
 #[tauri::command]
-pub fn get_public_tunnel_status(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<PublicTunnelStatus, String> {
-    state.public_tunnel_status(&app)
+pub async fn get_public_tunnel_status(app: AppHandle) -> Result<PublicTunnelStatus, String> {
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app_for_task.state::<AppState>();
+        state.public_tunnel_status(&app_for_task)
+    })
+    .await
+    .map_err(|error| format!("Public connection status task could not complete: {error}"))?
 }
 
 #[tauri::command]

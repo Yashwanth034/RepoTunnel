@@ -316,13 +316,14 @@ impl AppState {
             .map(|url| format!("{}/mcp", url.trim_end_matches('/')));
         let last = self.last_remote_request_at.load(Ordering::SeqCst);
 
-        let cloudflared_available = public_tunnel::cloudflared_version().is_some();
-        let certbot_version = direct_https::certbot_version();
-        let certbot_available = direct_https::certbot_supports_ip_certificates();
+        let cloudflared_available = public_tunnel::cached_cloudflared_version().is_some();
+        let direct_tools = direct_https::tool_availability();
+        let certbot_version = direct_tools.certbot_version;
+        let certbot_available = direct_tools.certbot_available;
         let provider_available = match provider {
             PublicTunnelProvider::Ngrok => true,
             PublicTunnelProvider::Cloudflare => cloudflared_available,
-            PublicTunnelProvider::Direct => direct_https::openssl_available(),
+            PublicTunnelProvider::Direct => direct_tools.openssl_available,
         };
         let (usage_label, usage_url) = match provider {
             PublicTunnelProvider::Ngrok => (

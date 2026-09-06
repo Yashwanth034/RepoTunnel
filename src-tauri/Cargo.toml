@@ -1,6 +1,6 @@
 [package]
 name = "repotunnel"
-version = "0.3.0"
+version = "0.3.1"
 description = "Secure local workspace gateway for AI tools"
 edition = "2021"
 
