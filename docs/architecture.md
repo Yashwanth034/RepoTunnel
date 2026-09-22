@@ -128,6 +128,14 @@ Before execution RepoTunnel verifies that the native sandbox for the current OS 
 Pending command requests are fingerprinted and revalidated before local approval. MCP can request and inspect commands but cannot approve or reject its own pending execution.
 
 
+## Video Intelligence
+
+`src-tauri/src/video.rs` owns optional media understanding as a separate product capability. It accepts public HTTP/HTTPS media URLs and workspace-relative local media, prefers existing captions, extracts bounded smart visual frames when needed, and prepares compact audio only when captions are unavailable. Work runs as cancellable background jobs so media processing never blocks the MCP gateway or desktop UI.
+
+RepoTunnel reuses host `yt-dlp` and `ffmpeg` when present. Missing helpers can be provisioned privately under application data with HTTPS, fixed trusted download hosts, published SHA-256 verification, private file permissions, and no PATH/admin changes. Video results are cached under a bounded application-data cache; no media artifacts are written into the user's project.
+
+MCP receives transcript text plus actual image/audio content for model grounding. Video Intelligence never interprets media instructions as execution authorization: installs, edits, browser actions, Git operations and desktop actions continue through their existing policy/security layers.
+
 ## Git integration layer
 
 `src-tauri/src/git.rs` provides a fixed Git capability surface rather than accepting arbitrary Git arguments from MCP. Git integration is enabled only when the approved workspace root owns its `.git` directory and Git reports both the worktree root and metadata directory inside that same approved boundary.

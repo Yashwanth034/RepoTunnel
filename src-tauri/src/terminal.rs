@@ -477,17 +477,140 @@ fn host_program(name: &str) -> Option<String> {
     .find(|path| Path::new(path).is_file())
 }
 
+fn parse_host_command(command_text: &str) -> Option<Vec<String>> {
+    if contains_shell_control(command_text) {
+        return None;
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    let mut quote = Quote::None;
+    let mut escaped = false;
+    let mut current = String::new();
+    let mut words = Vec::new();
+
+    for ch in command_text.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match quote {
+            Quote::Single => {
+                if ch == '\'' {
+                    quote = Quote::None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Quote::Double => match ch {
+                '"' => quote = Quote::None,
+                '\\' => escaped = true,
+                _ => current.push(ch),
+            },
+            Quote::None => match ch {
+                '\'' => quote = Quote::Single,
+                '"' => quote = Quote::Double,
+                '\\' => escaped = true,
+                ch if ch.is_whitespace() => {
+                    if !current.is_empty() {
+                        words.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+
+    if escaped || quote != Quote::None {
+        return None;
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Some(words)
+}
+
+fn host_argument_escapes_workspace(argument: &str) -> bool {
+    let candidate = argument
+        .split_once('=')
+        .map(|(_, value)| value)
+        .unwrap_or(argument);
+    let candidate = candidate
+        .split_once('@')
+        .map(|(_, path)| path)
+        .unwrap_or(candidate);
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate == "-" {
+        return false;
+    }
+    if candidate.starts_with('/')
+        || candidate.starts_with("~/")
+        || candidate == "~"
+        || candidate.starts_with("\\\\")
+        || candidate.as_bytes().get(1) == Some(&b':')
+    {
+        return true;
+    }
+    Path::new(candidate)
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+fn gh_arguments_stay_in_workspace(parts: &[&str]) -> bool {
+    const FILE_FLAGS: [&str; 7] = [
+        "--input",
+        "--body-file",
+        "--template",
+        "--source",
+        "--notes-file",
+        "--key",
+        "--public-key",
+    ];
+
+    let api_command = parts.get(1).copied() == Some("api");
+    let mut previous_was_file_flag = false;
+    for argument in parts.iter().skip(2).copied() {
+        if previous_was_file_flag {
+            if host_argument_escapes_workspace(argument) {
+                return false;
+            }
+            previous_was_file_flag = false;
+            continue;
+        }
+
+        if FILE_FLAGS.contains(&argument) {
+            previous_was_file_flag = true;
+            continue;
+        }
+        if FILE_FLAGS
+            .iter()
+            .any(|flag| argument.starts_with(&format!("{flag}=")))
+            && host_argument_escapes_workspace(argument)
+        {
+            return false;
+        }
+        if argument.contains('@') && host_argument_escapes_workspace(argument) {
+            return false;
+        }
+        if !api_command && host_argument_escapes_workspace(argument) {
+            return false;
+        }
+    }
+    !previous_was_file_flag
+}
+
 fn safe_host_passthrough(
     command_text: &str,
     allow_git_push: bool,
 ) -> Option<(String, Vec<String>)> {
-    if contains_shell_control(command_text)
-        || command_text.contains('\'')
-        || command_text.contains('\"')
-    {
-        return None;
-    }
-    let parts = command_text.split_whitespace().collect::<Vec<_>>();
+    let parsed = parse_host_command(command_text)?;
+    let parts = parsed.iter().map(String::as_str).collect::<Vec<_>>();
     if parts.len() < 2 {
         return None;
     }
@@ -527,24 +650,32 @@ fn safe_host_passthrough(
         return Some((host_program("git")?, args));
     }
 
-    if parts[0] == "gh" && matches!(parts[1], "run" | "workflow") {
-        let allowed = match (parts[1], parts.get(2).copied()) {
-            ("run", Some(action)) => {
-                matches!(action, "list" | "view" | "watch" | "cancel" | "rerun")
-            }
-            ("workflow", Some(action)) => matches!(action, "list" | "view" | "run"),
-            _ => false,
-        };
-        if allowed
-            && !parts
-                .iter()
-                .any(|part| matches!(*part, "--repo" | "-R") || part.starts_with("--repo="))
-        {
-            return Some((
-                host_program("gh")?,
-                parts[1..].iter().map(|part| (*part).to_string()).collect(),
-            ));
+    if parts[0] == "gh" {
+        if matches!(parts[1], "config" | "alias" | "extension") {
+            return None;
         }
+        let repo_create_push = parts[1] == "repo"
+            && parts.get(2).copied() == Some("create")
+            && parts.contains(&"--push");
+        if repo_create_push && !allow_git_push {
+            return None;
+        }
+        if parts[1] == "auth" {
+            let status_only = parts.get(2).copied() == Some("status")
+                && !parts
+                    .iter()
+                    .any(|part| matches!(*part, "--show-token" | "-t"));
+            if !status_only {
+                return None;
+            }
+        }
+        if !gh_arguments_stay_in_workspace(&parts) {
+            return None;
+        }
+        return Some((
+            host_program("gh")?,
+            parts[1..].iter().map(|part| (*part).to_string()).collect(),
+        ));
     }
     None
 }
@@ -2111,8 +2242,33 @@ mod tests {
         assert!(safe_host_passthrough("git push https://example.com/x/y main", true).is_none());
         assert!(safe_host_passthrough("git push upstream main", true).is_none());
         assert!(safe_host_passthrough("gh auth token", false).is_none());
+        assert!(safe_host_passthrough("gh auth logout --hostname github.com", false).is_none());
+        assert!(safe_host_passthrough("gh auth status --show-token", false).is_none());
+        assert!(
+            safe_host_passthrough("gh repo create example --source ../outside", false).is_none()
+        );
+        assert!(safe_host_passthrough("gh repo create example --source . --push", false).is_none());
+        assert!(safe_host_passthrough("gh release download --dir=/home/example", false).is_none());
+        assert!(safe_host_passthrough("gh pr create --body-file=../outside.md", false).is_none());
+        assert!(safe_host_passthrough("gh api repos/example --input /etc/passwd", false).is_none());
         if super::host_program("gh").is_some() {
             assert!(safe_host_passthrough("gh run list", false).is_some());
+            assert!(safe_host_passthrough("gh auth status --hostname github.com", false).is_some());
+            assert!(
+                safe_host_passthrough("gh repo create example --private --source .", false)
+                    .is_some()
+            );
+            assert!(safe_host_passthrough(
+                "gh repo create example --private --source . --push",
+                true
+            )
+            .is_some());
+            assert!(safe_host_passthrough(
+                "gh pr create --title 'Fix editor wrap' --body 'Ready to merge'",
+                false
+            )
+            .is_some());
+            assert!(safe_host_passthrough("gh workflow run release.yml", false).is_some());
         }
         assert!(safe_host_passthrough("gh run list; cat ~/.ssh/id_ed25519", false).is_none());
     }

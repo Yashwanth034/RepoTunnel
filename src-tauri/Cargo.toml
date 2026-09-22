@@ -16,12 +16,14 @@ axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 rmcp = { version = "3.1.2", features = ["schemars", "server", "transport-streamable-http-server"] }
 ngrok = "0.19"
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "stream", "rustls-tls"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 socket2 = "0.6"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+schemars = "1.2.2"
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
 getrandom = "0.4.3"
@@ -29,8 +31,22 @@ sha2 = "0.11.0"
 base64 = "0.23.1"
 subtle = "2.6.1"
 libc = "0.2"
-tauri-plugin-updater = "2.10.1"
-rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+resvg = "0.47.0"
+bzip2 = "0.6.1"
+tar = "0.4.44"
+rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+
+# Reqwest 0.13 switched its Rustls path to the platform certificate verifier.
+# On Linux RepoTunnel uses native-tls for updater traffic so update checks use the
+# same system OpenSSL/CA trust path that normal system HTTPS tools rely on.
+[target.'cfg(target_os = "linux")'.dependencies]
+tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "zip"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "=2.11.0"
+
+[dev-dependencies]
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

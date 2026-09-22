@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "feature": "RepoTunnel Video Production",
+  "status": "completed",
+  "lockedScope": "minimal complete AI tutorial/video production inside the existing Video section",
+  "completedAt": "2026-09-21",
+  "referenceReview": {
+    "complete": true,
+    "videoIds": [
+      "hUZNPCSZDaQ",
+      "qUHyCjOo8Z8",
+      "U2hZFMVNSE0",
+      "YmLp8qe87A0",
+      "IauULFe1j-A",
+      "ZaPbP9DwBOE",
+      "kn6dxL53NkM",
+      "7yNvsFrwpp0",
+      "dt_OMxufoGE",
+      "LPZh9BOjkQs",
+      "q1QQN08ZK6I",
+      "aX7QAfld7hs"
+    ]
+  },
+  "stages": [
+    {
+      "id": 1,
+      "name": "Durable Video Project model and workspace folders",
+      "status": "completed"
+    },
+    {
+      "id": 2,
+      "name": "Video Project list/create/open UI",
+      "status": "completed"
+    },
+    {
+      "id": 3,
+      "name": "Script/storyboard/timeline persistence",
+      "status": "completed"
+    },
+    {
+      "id": 4,
+      "name": "Recording job API and permission/resource checks",
+      "status": "completed"
+    },
+    {
+      "id": 5,
+      "name": "Generated 2D scene renderer",
+      "status": "completed"
+    },
+    {
+      "id": 6,
+      "name": "Narration provider abstraction and subtitles",
+      "status": "completed"
+    },
+    {
+      "id": 7,
+      "name": "FFmpeg assembly/edit/render pipeline",
+      "status": "completed"
+    },
+    {
+      "id": 8,
+      "name": "Video Project preview/player",
+      "status": "completed"
+    },
+    {
+      "id": 9,
+      "name": "AI/MCP production tools",
+      "status": "completed"
+    },
+    {
+      "id": 10,
+      "name": "End-to-end tutorial production validation",
+      "status": "completed"
+    }
+  ],
+  "validation": {
+    "frontend": {
+      "typescript": "pass",
+      "tests": "6 passed, 0 failed",
+      "productionBuild": "pass",
+      "npmAudit": "0 vulnerabilities"
+    },
+    "rust": {
+      "tests": "198 passed, 0 failed, 1 ignored",
+      "clippyWarningsDenied": "pass",
+      "ignoredTest": "managed_supertonic_provisions_and_synthesizes_english_and_hindi",
+      "ignoredTestValidatedSeparately": true
+    },
+    "realMediaSmokeTests": {
+      "x11Recording": "pass",
+      "generatedScenePng": "pass",
+      "ffmpegVideoNarrationAssembly": "pass",
+      "endToEndTutorialPipeline": "pass",
+      "managedSupertonicEnglishHindi": "pass"
+    },
+    "release": {
+      "cargoAudit": "pass; no release-blocking vulnerabilities",
+      "rustls": "0.23.45",
+      "directHttpsRegression": "6 passed, 0 failed",
+      "debianPackage": "src-tauri/target/release/bundle/deb/RepoTunnel_0.3.1_amd64.deb",
+      "debianSizeBytes": 15988858,
+      "debianSha256": "de64e3138f631363c8d59cccb22b45dcaee0af3597614f9bca411e75393949c7",
+      "maintainerScripts": "none",
+      "isolatedPackagedBinarySmoke": "pass"
+    }
+  },
+  "invariants": [
+    "all production files stay under video-projects/<slug> inside the approved workspace",
+    "Video Intelligence remains intact",
+    "Direct HTTPS/MCP/OAuth/continuity/Commands are not regressed",
+    "no stage is marked complete without implementation and tests",
+    "no stage/commit/push/install without explicit user request for those Git/install actions",
+    "external animation/media sources use an expandable provider registry with per-asset license metadata",
+    "multilingual narration uses BCP-47 language tags and provider-independent voice settings; no paid provider is mandatory"
+  ],
+  "releaseNotes": [
+    "rustls was updated from 0.23.44 to 0.23.45 after RUSTSEC-2026-0285 was discovered by the release gate",
+    "no Direct HTTPS source implementation was changed for the rustls security update",
+    "the final Debian artifact was built and smoke-started from an extracted package under isolated HOME/XDG directories",
+    "the final package has no preinst, postinst, prerm, or postrm maintainer scripts"
+  ],
+  "nextAction": "Locked Video Production scope is complete. Do not install, stage, commit, push, publish, or change the locked scope unless the user explicitly requests it."
+}

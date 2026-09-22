@@ -68,6 +68,14 @@ pub(crate) struct AiWorkspaceStatus {
     pub(crate) message: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct AiWorkspaceRecordingTarget {
+    pub(crate) display: String,
+    pub(crate) xauth_path: PathBuf,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiWorkspaceFrame {
@@ -1031,6 +1039,26 @@ impl AiWorkspaceState {
             stop_runtime(&mut runtime);
         }
         self.status(app, workspace_id)
+    }
+
+    pub(crate) fn recording_target(
+        &self,
+        workspace_id: &str,
+    ) -> Result<AiWorkspaceRecordingTarget, String> {
+        let guard = self
+            .runtime
+            .lock()
+            .map_err(|_| "AI Workspace state is unavailable.".to_string())?;
+        let runtime = guard
+            .as_ref()
+            .filter(|runtime| runtime.workspace_id == workspace_id)
+            .ok_or_else(|| "No AI Workspace is running for this project.".to_string())?;
+        Ok(AiWorkspaceRecordingTarget {
+            display: runtime.display.clone(),
+            xauth_path: runtime.xauth_path.clone(),
+            width: WIDTH,
+            height: HEIGHT,
+        })
     }
 
     pub(crate) fn frame(

@@ -744,9 +744,11 @@ pub(crate) fn validate_ai_terminal_git_command(
     {
         return Err("Use RepoTunnel's dedicated Git stage/commit tools instead of raw git add/git commit. This keeps AI Auto behavior auditable and ensures the secret guard runs before Git history changes.".to_string());
     }
-    if normalized.contains("git push") {
+    let github_repo_create_push = normalized.contains("gh repo create")
+        && normalized.split_whitespace().any(|part| part == "--push");
+    if normalized.contains("git push") || github_repo_create_push {
         if !user_requested_push {
-            return Err("Git push is blocked until the user explicitly asks for the current work to be pushed. AI Auto removes approval popups; it does not grant standing permission to publish changes to a remote repository.".to_string());
+            return Err("Publishing local commits is blocked until the user explicitly asks for the current work to be pushed. AI Auto removes approval popups; it does not grant standing permission to publish changes to a remote repository.".to_string());
         }
         preflight_ai_push(workspace)?;
     }

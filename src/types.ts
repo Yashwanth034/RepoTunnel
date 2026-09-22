@@ -789,6 +789,16 @@ export type LaunchApplication = {
   supportsPaths: boolean;
 };
 
+export type GithubConnectionStatus = {
+  available: boolean;
+  connected: boolean;
+  connecting: boolean;
+  username: string | null;
+  deviceCode: string | null;
+  verificationUrl: string | null;
+  message: string | null;
+};
+
 export type DesktopControlApplication = {
   id: string;
   name: string;
@@ -1067,6 +1077,306 @@ export type WorkflowReadiness = {
   nextStep: string;
 };
 
+
+export type VideoAnalysisMode = "transcript" | "visual" | "instruction" | "full";
+export type VideoAnalysisStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export type VideoToolState = {
+  available: boolean;
+  source: string;
+  version: string | null;
+};
+
+export type VideoToolsStatus = {
+  ready: boolean;
+  ytDlp: VideoToolState;
+  ffmpeg: VideoToolState;
+  cacheBytes: number;
+  cacheItems: number;
+  cacheLimitBytes: number;
+  message: string;
+};
+
+export type VideoFrameInfo = {
+  index: number;
+  timestampSeconds: number;
+};
+
+export type VideoAnalysisJob = {
+  id: string;
+  workspaceId: string;
+  source: string;
+  mode: VideoAnalysisMode;
+  status: VideoAnalysisStatus;
+  phase: string;
+  progress: number;
+  message: string;
+  title: string | null;
+  durationSeconds: number | null;
+  transcriptAvailable: boolean;
+  frameCount: number;
+  audioChunkCount: number;
+  cacheKey: string | null;
+  cacheHit: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type VideoAnalysisResult = {
+  jobId: string;
+  cacheKey: string;
+  source: string;
+  sourceKind: string;
+  mode: VideoAnalysisMode;
+  title: string;
+  durationSeconds: number | null;
+  analysisStartSeconds: number;
+  analysisEndSeconds: number | null;
+  transcript: string | null;
+  transcriptSource: string | null;
+  frames: VideoFrameInfo[];
+  audioChunkCount: number;
+  cacheHit: boolean;
+  completedAt: number;
+};
+
+export type VideoProductionAsset = {
+  kind: string;
+  relativePath: string;
+  createdAt: number;
+  label: string | null;
+};
+
+export type VideoProductionCheckpoint = {
+  stage: string;
+  status: string;
+  updatedAt: number;
+  detail: string | null;
+};
+
+export type VideoProductionProject = {
+  schemaVersion: number;
+  id: string;
+  workspaceId: string;
+  name: string;
+  slug: string;
+  relativePath: string;
+  status: string;
+  pinned: boolean;
+  aspectRatio: "16:9" | "9:16" | "1:1" | "4:5";
+  width: number;
+  height: number;
+  fps: number;
+  createdAt: number;
+  updatedAt: number;
+  scriptPath: string | null;
+  storyboardPath: string | null;
+  timelinePath: string | null;
+  currentPreview: string | null;
+  latestDraft: string | null;
+  finalExport: string | null;
+  currentSubtitle: string | null;
+  assets: VideoProductionAsset[];
+  checkpoints: VideoProductionCheckpoint[];
+  attentionRequired: boolean;
+  lastError: string | null;
+};
+
+export type VideoProductionDocument = {
+  projectId: string;
+  document: "script" | "storyboard" | "timeline";
+  relativePath: string;
+  content: string;
+  updatedAt: number;
+};
+
+export type VideoProjectFile = {
+  relativePath: string;
+  name: string;
+  kind: "video" | "audio" | "subtitle" | "image" | "text" | "file";
+  sizeBytes: number;
+  modifiedAt: number;
+};
+
+export type VideoRecordingStatus = {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  status: "recording" | "completed" | "failed";
+  captureTarget: "aiWorkspace";
+  relativePath: string;
+  width: number;
+  height: number;
+  fps: number;
+  startedAt: number;
+  stoppedAt: number | null;
+  message: string;
+};
+
+export type VideoSceneAnimation = "none" | "fade" | "slideUp" | "slideLeft" | "scale" | "draw";
+
+export type VideoSceneElement = {
+  kind: "text" | "rect" | "circle" | "line" | "arrow";
+  text?: string | null;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  x2?: number;
+  y2?: number;
+  radius?: number;
+  cornerRadius?: number;
+  fontSize?: number;
+  strokeWidth?: number;
+  fill?: string | null;
+  stroke?: string | null;
+  fontFamily?: string | null;
+  startSeconds?: number;
+  endSeconds?: number | null;
+  animation?: VideoSceneAnimation | null;
+};
+
+export type VideoSceneSpec = {
+  version?: number;
+  id: string;
+  durationSeconds: number;
+  background?: string | null;
+  elements: VideoSceneElement[];
+};
+
+export type VideoSceneRender = {
+  projectId: string;
+  sceneId: string;
+  sourcePath: string;
+  outputPath: string;
+  durationSeconds: number;
+  frameCount: number;
+  width: number;
+  height: number;
+  fps: number;
+};
+
+export type VideoAssetSource = {
+  id: string;
+  name: string;
+  sourceType: string;
+  categories: string[];
+  freeScope: string;
+  commercialUse: string;
+  attribution: string;
+  accountRequired: boolean;
+  automationMode: string;
+  preferred: boolean;
+  homepage: string;
+  licenseReference: string;
+  notes: string;
+  githubStars: number | null;
+};
+
+export type VideoAssetLicenseInput = {
+  providerId: string;
+  assetKind: string;
+  projectRelativePath: string;
+  sourceUrl: string;
+  creator?: string | null;
+  licenseId: string;
+  licenseUrl?: string | null;
+  attributionRequired: boolean;
+  attributionText?: string | null;
+  notes?: string | null;
+};
+
+export type VideoAssetLicenseRecord = {
+  id: string;
+  providerId: string;
+  providerName: string;
+  assetKind: string;
+  projectRelativePath: string;
+  sourceUrl: string;
+  creator: string | null;
+  licenseId: string;
+  licenseUrl: string | null;
+  attributionRequired: boolean;
+  attributionText: string | null;
+  notes: string | null;
+  retrievedAt: number;
+};
+
+export type NarrationProviderStatus = {
+  id: string;
+  available: boolean;
+  quality: string;
+  languages: string;
+  message: string;
+};
+
+export type SubtitleAsset = {
+  projectId: string;
+  language: string;
+  srtPath: string;
+  vttPath: string;
+  cueCount: number;
+  durationSeconds: number;
+};
+
+export type NarrationRequest = {
+  text: string;
+  language: string;
+  provider?: "auto" | "supertonic-3" | "piper" | "espeak-ng";
+  voice?: string | null;
+  voiceModelPath?: string | null;
+  rate?: number | null;
+};
+
+export type NarrationAsset = {
+  projectId: string;
+  provider: string;
+  language: string;
+  voice: string | null;
+  audioPath: string;
+  durationSeconds: number;
+  subtitles: SubtitleAsset;
+};
+
+export type VideoTimelineClip = {
+  sourcePath: string;
+  startSeconds?: number | null;
+  endSeconds?: number | null;
+};
+
+export type VideoRenderRequest = {
+  version?: number;
+  clips: VideoTimelineClip[];
+  narrationPath?: string | null;
+  subtitlePath?: string | null;
+  musicPath?: string | null;
+  musicVolume?: number | null;
+  preserveSourceAudio?: boolean;
+  finalRender?: boolean;
+};
+
+export type VideoRenderResult = {
+  projectId: string;
+  outputPath: string;
+  subtitlePath: string | null;
+  clipCount: number;
+  width: number;
+  height: number;
+  fps: number;
+  finalRender: boolean;
+};
+
+export type VideoPreviewSource = {
+  projectId: string;
+  videoPath: string;
+  playbackUrl: string | null;
+  subtitlePath: string | null;
+  subtitleUrl: string | null;
+  subtitleLanguage: string | null;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: number;
+};
 
 export type RuntimeDiagnostics = {
   version: string;

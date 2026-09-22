@@ -11,6 +11,7 @@ export type AppView =
   | "git"
   | "connections"
   | "commands"
+  | "video"
   | "system"
   | "help";
 
@@ -36,6 +37,7 @@ export type IconName =
   | "gateway"
   | "remote"
   | "play"
+  | "video"
   | "stop"
   | "tip"
   | "help"
@@ -50,7 +52,8 @@ export type IconName =
 const navItems: Array<{ id: AppView; label: string; icon: IconName }> = [
   { id: "overview", label: "Home", icon: "home" },
   { id: "projects", label: "Projects", icon: "folder" },
-  { id: "team", label: "GTP Agents", icon: "team" },
+  { id: "team", label: "GPT Agents", icon: "team" },
+  { id: "video", label: "Video", icon: "video" },
   { id: "changes", label: "History", icon: "changes" },
   { id: "checks", label: "Checks", icon: "checks" },
   { id: "git", label: "Git", icon: "git" },
@@ -91,6 +94,7 @@ export function NavIcon({ name, size = 17 }: { name: IconName; size?: number }) 
   if (name === "gateway") return <svg {...common}><path d="m12 3 7 4v10l-7 4-7-4V7l7-4Z"/><circle cx="12" cy="12" r="2.5"/></svg>;
   if (name === "remote") return <svg {...common}><path d="M8.5 15.5 15.5 8.5"/><path d="m7 17-1.5 1.5a3 3 0 0 1-4.2-4.2l3-3a3 3 0 0 1 4.2 0" transform="translate(3 -2)"/><path d="m17 7 1.5-1.5a3 3 0 1 1 4.2 4.2l-3 3a3 3 0 0 1-4.2 0" transform="translate(-3 2)"/></svg>;
   if (name === "play") return <svg {...common}><path d="m8 5 11 7-11 7V5Z"/></svg>;
+  if (name === "video") return <svg {...common}><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="m10 9 5 3-5 3V9Z"/><path d="M7 5v14M17 5v14"/></svg>;
   if (name === "stop") return <svg {...common}><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>;
   if (name === "tip") return <svg {...common}><path d="M9 18h6"/><path d="M10 21h4"/><path d="M8.5 15.5A7 7 0 1 1 15.5 15.5C14.5 16.3 14 17 14 18h-4c0-1-.5-1.7-1.5-2.5Z"/></svg>;
   if (name === "help") return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M9.8 9.5a2.4 2.4 0 1 1 4 1.8c-1 .8-1.8 1.2-1.8 2.7"/><path d="M12 17h.01"/></svg>;

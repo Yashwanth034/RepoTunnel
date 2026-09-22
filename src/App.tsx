@@ -21,6 +21,7 @@ import ProjectSetupPanel from "./components/ProjectSetupPanel";
 import ProjectMemoryPanel from "./components/ProjectMemoryPanel";
 import ProjectRail from "./components/ProjectRail";
 import TeamPanel from "./components/TeamPanel";
+import VideoPanel from "./components/VideoPanel";
 import WindowChrome from "./components/WindowChrome";
 import ProjectOverviewPanel from "./components/ProjectOverviewPanel";
 import PublicTunnelPanel from "./components/PublicTunnelPanel";
@@ -183,18 +184,6 @@ const EDITOR_SESSION_KEY = "repotunnel.editorSession.v1";
 const MAX_RESTORED_TABS = 16;
 const MAX_DRAFT_BYTES = 700 * 1024;
 const EDITOR_RECENT_PREFIX = "repotunnel.editorRecent.";
-const UI_SCALE_KEY = "repotunnel.uiScale.v1";
-const UI_SCALE_STEPS = [100, 110, 125, 140, 150] as const;
-
-function initialUiScale(): number {
-  try {
-    const stored = Number(window.localStorage.getItem(UI_SCALE_KEY));
-    return UI_SCALE_STEPS.includes(stored as (typeof UI_SCALE_STEPS)[number]) ? stored : 100;
-  } catch {
-    return 100;
-  }
-}
-
 function rememberRecentEditorFile(workspaceId: string, path: string) {
   try {
     const key = `${EDITOR_RECENT_PREFIX}${workspaceId}`;
@@ -295,7 +284,6 @@ function App() {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [changeBusyId, setChangeBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [uiScale, setUiScale] = useState(initialUiScale);
   const [focusMode, setFocusMode] = useState(false);
   const [workspaceHealth, setWorkspaceHealth] = useState<Record<string, WorkspaceHealth>>({});
   const [relocatingWorkspaceId, setRelocatingWorkspaceId] = useState<string | null>(null);
@@ -559,31 +547,10 @@ function App() {
   }, [notice]);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(UI_SCALE_KEY, String(uiScale));
-    } catch {
-      // Interface scaling remains available for this session even if storage is unavailable.
-    }
-    document.documentElement.style.setProperty("--repotunnel-ui-scale", String(uiScale / 100));
-    document.documentElement.style.setProperty("--repotunnel-ui-extent", `${10_000 / uiScale}%`);
-  }, [uiScale]);
-
-  useEffect(() => {
     function handleAppShortcuts(event: KeyboardEvent) {
       if (!(event.ctrlKey || event.metaKey)) return;
-      if (event.key === "+" || event.key === "=") {
+      if (event.key === "+" || event.key === "=" || event.key === "-" || event.key === "0") {
         event.preventDefault();
-        setUiScale((current) => UI_SCALE_STEPS.find((value) => value > current) ?? UI_SCALE_STEPS[UI_SCALE_STEPS.length - 1]);
-        return;
-      }
-      if (event.key === "-") {
-        event.preventDefault();
-        setUiScale((current) => [...UI_SCALE_STEPS].reverse().find((value) => value < current) ?? UI_SCALE_STEPS[0]);
-        return;
-      }
-      if (event.key === "0") {
-        event.preventDefault();
-        setUiScale(100);
         return;
       }
       if (event.shiftKey && event.key === "Enter") {
@@ -591,8 +558,16 @@ function App() {
         setFocusMode((current) => !current);
       }
     }
+    function blockDesktopZoomWheel(event: WheelEvent) {
+      if (event.ctrlKey || event.metaKey) event.preventDefault();
+    }
+
     window.addEventListener("keydown", handleAppShortcuts, true);
-    return () => window.removeEventListener("keydown", handleAppShortcuts, true);
+    window.addEventListener("wheel", blockDesktopZoomWheel, { capture: true, passive: false });
+    return () => {
+      window.removeEventListener("keydown", handleAppShortcuts, true);
+      window.removeEventListener("wheel", blockDesktopZoomWheel, true);
+    };
   }, []);
 
   useEffect(() => {
@@ -1661,6 +1636,16 @@ function App() {
       );
     }
 
+    if (activeView === "video") {
+      return (
+        <VideoPanel
+          workspaces={workspaces}
+          selectedWorkspaceId={selectedWorkspaceId}
+          onNotice={setNotice}
+        />
+      );
+    }
+
     if (activeView === "git") {
       return (
         <GitPanel
@@ -1710,8 +1695,6 @@ function App() {
       <ProductionPanel
         onError={(message) => setNotice(`Runtime: ${message}`)}
         onNotice={setNotice}
-        uiScale={uiScale}
-        onUiScaleChange={setUiScale}
         hasUnsavedChanges={editorSavingKey !== null || editorTabs.some((tab) => tab.dirty)}
       />
     );
@@ -1720,32 +1703,34 @@ function App() {
   return (
     <div className="desktop-app">
       <WindowChrome />
-      <div className={`desktop-shell ${focusMode ? "focus-mode" : ""}`}>
+      <div className={`desktop-shell ${focusMode ? "focus-mode" : ""} ${activeView === "video" ? "video-view" : ""}`}>
         <AppSidebar
           activeView={activeView}
           pendingCount={pendingCount}
           onNavigate={setActiveView}
         />
 
-        <ProjectRail
-          workspaces={workspaces}
-          selectedWorkspaceId={selectedWorkspaceId}
-          activeEditorPath={activeEditorDocument?.workspaceId === selectedWorkspaceId ? activeEditorDocument.path : null}
-          refreshToken={projectTreeRefreshToken}
-          gitChanges={gitStatus?.available ? gitStatus.changes : []}
-          workspaceHealth={workspaceHealth}
-          relocatingWorkspaceId={relocatingWorkspaceId}
-          onSelectWorkspace={handleSelectWorkspaceSafe}
-          onRemoveWorkspace={setWorkspaceToRemove}
-          onOpenFile={(workspace, entry) => void handleOpenEditorFile(workspace, entry)}
-          onEntryRemoved={handleEntryRemoved}
-          onEntryRenamed={handleEntryRenamed}
-          onRelocateWorkspace={(workspace) => void handleRelocateWorkspace(workspace)}
-          onRetryWorkspace={(workspaceId) => void handleWorkspaceHealthRetry(workspaceId)}
-          onNotice={setNotice}
-        />
+        {activeView !== "video" ? (
+          <ProjectRail
+            workspaces={workspaces}
+            selectedWorkspaceId={selectedWorkspaceId}
+            activeEditorPath={activeEditorDocument?.workspaceId === selectedWorkspaceId ? activeEditorDocument.path : null}
+            refreshToken={projectTreeRefreshToken}
+            gitChanges={gitStatus?.available ? gitStatus.changes : []}
+            workspaceHealth={workspaceHealth}
+            relocatingWorkspaceId={relocatingWorkspaceId}
+            onSelectWorkspace={handleSelectWorkspaceSafe}
+            onRemoveWorkspace={setWorkspaceToRemove}
+            onOpenFile={(workspace, entry) => void handleOpenEditorFile(workspace, entry)}
+            onEntryRemoved={handleEntryRemoved}
+            onEntryRenamed={handleEntryRenamed}
+            onRelocateWorkspace={(workspace) => void handleRelocateWorkspace(workspace)}
+            onRetryWorkspace={(workspaceId) => void handleWorkspaceHealthRetry(workspaceId)}
+            onNotice={setNotice}
+          />
+        ) : null}
 
-        <main className={`main-view ${activeView === "overview" ? "home-main-view" : ""} ${activeView === "editor" ? "editor-main-view" : ""}`}>
+        <main className={`main-view ${activeView === "overview" ? "home-main-view" : ""} ${activeView === "editor" ? "editor-main-view" : ""} ${activeView === "video" ? "video-main-view" : ""}`}>
           <AppHeader
             view={activeView}
             gatewayRunning={gatewayStatus.running}

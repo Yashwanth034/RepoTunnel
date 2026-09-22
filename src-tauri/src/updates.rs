@@ -1,4 +1,5 @@
 use std::{
+    error::Error as StdError,
     fs,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -104,6 +105,23 @@ fn now_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn updater_error_detail(error: &(dyn StdError + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && parts.last().is_none_or(|last| last != &text) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
+fn update_check_user_message() -> String {
+    "Could not check for updates. Check your internet connection and try again.".to_string()
 }
 
 fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -391,11 +409,19 @@ pub(crate) async fn check(
             Ok(status_from(app, state, app_state))
         }
         Err(error) => {
+            let detail = updater_error_detail(&error);
+            let message = update_check_user_message();
             let mut state = load(app).unwrap_or_default();
             state.last_checked_at = Some(now);
-            state.last_error = Some(format!("Update check failed: {error}"));
+            state.last_error = Some(message.clone());
             let _ = save(app, &state);
-            Err(format!("Could not check for RepoTunnel updates: {error}"))
+            hardening::log_event(
+                app,
+                "WARN",
+                "updates.check_failed",
+                &format!("Update transport failed: {detail}"),
+            );
+            Err(message)
         }
     }
 }

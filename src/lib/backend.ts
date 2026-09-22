@@ -32,6 +32,7 @@ import type {
   LaunchActionOutcome,
   LaunchActionRecord,
   LaunchApplication,
+  GithubConnectionStatus,
   DeepIntegration,
   DesktopControlApplication,
   AiWorkspaceFrame,
@@ -78,6 +79,26 @@ import type {
   SafetyScanResult,
   TeamSessionSummary,
   TeamSnapshot,
+  VideoAnalysisJob,
+  VideoAnalysisMode,
+  VideoAnalysisResult,
+  VideoAssetLicenseInput,
+  VideoAssetLicenseRecord,
+  VideoAssetSource,
+  VideoProductionDocument,
+  VideoProductionProject,
+  VideoProjectFile,
+  NarrationAsset,
+  NarrationProviderStatus,
+  NarrationRequest,
+  SubtitleAsset,
+  VideoRecordingStatus,
+  VideoPreviewSource,
+  VideoRenderRequest,
+  VideoRenderResult,
+  VideoSceneRender,
+  VideoSceneSpec,
+  VideoToolsStatus,
 } from "../types";
 
 export async function selectWorkspace(): Promise<string | null> {
@@ -389,6 +410,22 @@ export async function restartManagedProcess(processId: string): Promise<ManagedP
 
 export async function listLaunchableApplications(workspaceId: string): Promise<LaunchApplication[]> {
   return invoke<LaunchApplication[]>("list_launchable_applications", { workspaceId });
+}
+
+export async function getGithubConnectionStatus(): Promise<GithubConnectionStatus> {
+  return invoke<GithubConnectionStatus>("get_github_connection_status");
+}
+
+export async function connectGithub(): Promise<GithubConnectionStatus> {
+  return invoke<GithubConnectionStatus>("connect_github");
+}
+
+export async function cancelGithubConnection(): Promise<GithubConnectionStatus> {
+  return invoke<GithubConnectionStatus>("cancel_github_connection");
+}
+
+export async function disconnectGithub(): Promise<GithubConnectionStatus> {
+  return invoke<GithubConnectionStatus>("disconnect_github");
 }
 
 export async function listDeepIntegrations(workspaceId: string): Promise<DeepIntegration[]> {
@@ -867,6 +904,304 @@ export async function stopChatConnection(): Promise<ChatConnectionStatus> {
   return invoke<ChatConnectionStatus>("stop_chat_connection");
 }
 
+
+export async function getVideoToolsStatus(): Promise<VideoToolsStatus> {
+  return invoke<VideoToolsStatus>("get_video_tools_status");
+}
+
+export async function installVideoTools(): Promise<VideoToolsStatus> {
+  return invoke<VideoToolsStatus>("install_video_tools");
+}
+
+export async function startVideoAnalysis(
+  workspaceId: string,
+  source: string,
+  mode: VideoAnalysisMode,
+  startSeconds?: number,
+  endSeconds?: number,
+  maxFrames?: number,
+): Promise<VideoAnalysisJob> {
+  return invoke<VideoAnalysisJob>("start_video_analysis", {
+    workspaceId,
+    source,
+    mode,
+    startSeconds: startSeconds ?? null,
+    endSeconds: endSeconds ?? null,
+    maxFrames: maxFrames ?? null,
+  });
+}
+
+export async function getVideoAnalysisJob(jobId: string): Promise<VideoAnalysisJob> {
+  return invoke<VideoAnalysisJob>("get_video_analysis_job", { jobId });
+}
+
+export async function listVideoAnalysisJobs(workspaceId?: string, limit = 20): Promise<VideoAnalysisJob[]> {
+  return invoke<VideoAnalysisJob[]>("list_video_analysis_jobs", {
+    workspaceId: workspaceId ?? null,
+    limit,
+  });
+}
+
+export async function getVideoAnalysisResult(jobId: string): Promise<VideoAnalysisResult> {
+  return invoke<VideoAnalysisResult>("get_video_analysis_result", { jobId });
+}
+
+export async function cancelVideoAnalysis(jobId: string): Promise<VideoAnalysisJob> {
+  return invoke<VideoAnalysisJob>("cancel_video_analysis", { jobId });
+}
+
+export async function clearVideoCache(): Promise<VideoToolsStatus> {
+  return invoke<VideoToolsStatus>("clear_video_cache");
+}
+
+export async function createVideoProject(
+  workspaceId: string,
+  name: string,
+  aspectRatio: "16:9" | "9:16" | "1:1" | "4:5" = "16:9",
+  width?: number,
+  height?: number,
+  fps?: number,
+): Promise<VideoProductionProject> {
+  return invoke<VideoProductionProject>("create_video_project", {
+    workspaceId,
+    name,
+    aspectRatio,
+    width: width ?? null,
+    height: height ?? null,
+    fps: fps ?? null,
+  });
+}
+
+export async function listVideoProjects(workspaceId: string): Promise<VideoProductionProject[]> {
+  return invoke<VideoProductionProject[]>("list_video_projects", { workspaceId });
+}
+
+export async function importVideoProjectFolder(
+  workspaceId: string,
+  folderPath: string,
+): Promise<VideoProductionProject> {
+  return invoke<VideoProductionProject>("import_video_project_folder", {
+    workspaceId,
+    folderPath,
+  });
+}
+
+export async function setVideoProjectPinned(
+  workspaceId: string,
+  projectId: string,
+  pinned: boolean,
+): Promise<VideoProductionProject> {
+  return invoke<VideoProductionProject>("set_video_project_pinned", { workspaceId, projectId, pinned });
+}
+
+export async function listVideoProjectFiles(
+  workspaceId: string,
+  projectId: string,
+): Promise<VideoProjectFile[]> {
+  return invoke<VideoProjectFile[]>("list_video_project_files", { workspaceId, projectId });
+}
+
+export async function readVideoProjectTextFile(
+  workspaceId: string,
+  projectId: string,
+  relativePath: string,
+): Promise<string> {
+  return invoke<string>("read_video_project_text_file", { workspaceId, projectId, relativePath });
+}
+
+export async function deleteVideoProject(
+  workspaceId: string,
+  projectId: string,
+): Promise<void> {
+  return invoke<void>("delete_video_project", { workspaceId, projectId });
+}
+
+export async function getVideoProject(
+  workspaceId: string,
+  projectId: string,
+): Promise<VideoProductionProject> {
+  return invoke<VideoProductionProject>("get_video_project", { workspaceId, projectId });
+}
+
+export async function updateVideoProjectStatus(
+  workspaceId: string,
+  projectId: string,
+  status: string,
+  detail?: string,
+): Promise<VideoProductionProject> {
+  return invoke<VideoProductionProject>("update_video_project_status", {
+    workspaceId,
+    projectId,
+    status,
+    detail: detail ?? null,
+  });
+}
+
+export async function writeVideoProjectDocument(
+  workspaceId: string,
+  projectId: string,
+  document: "script" | "storyboard" | "timeline",
+  content: string,
+): Promise<VideoProductionDocument> {
+  return invoke<VideoProductionDocument>("write_video_project_document", {
+    workspaceId,
+    projectId,
+    document,
+    content,
+  });
+}
+
+export async function readVideoProjectDocument(
+  workspaceId: string,
+  projectId: string,
+  document: "script" | "storyboard" | "timeline",
+): Promise<VideoProductionDocument> {
+  return invoke<VideoProductionDocument>("read_video_project_document", {
+    workspaceId,
+    projectId,
+    document,
+  });
+}
+
+export async function startVideoProjectRecording(
+  workspaceId: string,
+  projectId: string,
+  fps = 30,
+  maxSeconds = 900,
+): Promise<VideoRecordingStatus> {
+  return invoke<VideoRecordingStatus>("start_video_project_recording", {
+    workspaceId,
+    projectId,
+    fps,
+    maxSeconds,
+  });
+}
+
+export async function getVideoProjectRecording(
+  workspaceId: string,
+  projectId?: string,
+): Promise<VideoRecordingStatus | null> {
+  return invoke<VideoRecordingStatus | null>("get_video_project_recording", {
+    workspaceId,
+    projectId: projectId ?? null,
+  });
+}
+
+export async function stopVideoProjectRecording(
+  workspaceId: string,
+  projectId: string,
+): Promise<VideoRecordingStatus> {
+  return invoke<VideoRecordingStatus>("stop_video_project_recording", {
+    workspaceId,
+    projectId,
+  });
+}
+
+export async function renderVideoProjectScene(
+  workspaceId: string,
+  projectId: string,
+  scene: VideoSceneSpec,
+): Promise<VideoSceneRender> {
+  return invoke<VideoSceneRender>("render_video_project_scene", {
+    workspaceId,
+    projectId,
+    scene,
+  });
+}
+
+export async function renderVideoProjectTimeline(
+  workspaceId: string,
+  projectId: string,
+  request: VideoRenderRequest,
+): Promise<VideoRenderResult> {
+  return invoke<VideoRenderResult>("render_video_project_timeline", {
+    workspaceId,
+    projectId,
+    request,
+  });
+}
+
+export async function prepareVideoProjectPreview(
+  workspaceId: string,
+  projectId: string,
+): Promise<VideoPreviewSource> {
+  return invoke<VideoPreviewSource>("prepare_video_project_preview", {
+    workspaceId,
+    projectId,
+  });
+}
+
+export async function prepareVideoProjectFilePreview(
+  workspaceId: string,
+  projectId: string,
+  relativePath: string,
+): Promise<VideoPreviewSource> {
+  return invoke<VideoPreviewSource>("prepare_video_project_file_preview", {
+    workspaceId,
+    projectId,
+    relativePath,
+  });
+}
+
+export async function readVideoPreviewChunk(
+  previewPath: string,
+  offset: number,
+  length: number,
+): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_video_preview_chunk", {
+    previewPath,
+    offset,
+    length,
+  });
+}
+
+export async function listVideoAssetSources(): Promise<VideoAssetSource[]> {
+  return invoke<VideoAssetSource[]>("list_video_asset_sources");
+}
+
+export async function recordVideoAssetLicense(
+  workspaceId: string,
+  projectId: string,
+  input: VideoAssetLicenseInput,
+): Promise<VideoAssetLicenseRecord> {
+  return invoke<VideoAssetLicenseRecord>("record_video_asset_license", {
+    workspaceId,
+    projectId,
+    input,
+  });
+}
+
+export async function getVideoNarrationProviders(): Promise<NarrationProviderStatus[]> {
+  return invoke<NarrationProviderStatus[]>("get_video_narration_providers");
+}
+
+export async function createVideoProjectSubtitles(
+  workspaceId: string,
+  projectId: string,
+  language: string,
+  text: string,
+  durationSeconds?: number,
+): Promise<SubtitleAsset> {
+  return invoke<SubtitleAsset>("create_video_project_subtitles", {
+    workspaceId,
+    projectId,
+    language,
+    text,
+    durationSeconds: durationSeconds ?? null,
+  });
+}
+
+export async function synthesizeVideoProjectNarration(
+  workspaceId: string,
+  projectId: string,
+  request: NarrationRequest,
+): Promise<NarrationAsset> {
+  return invoke<NarrationAsset>("synthesize_video_project_narration", {
+    workspaceId,
+    projectId,
+    request,
+  });
+}
 
 export async function getModelHub(): Promise<ModelHubSnapshot> {
   return invoke<ModelHubSnapshot>("get_model_hub");

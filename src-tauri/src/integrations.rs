@@ -90,7 +90,25 @@ pub(crate) struct IntegrationActionResult {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct IntegrationStore {
+    #[serde(default)]
+    enabled: BTreeSet<String>,
+    #[serde(default)]
     workspaces: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl IntegrationStore {
+    fn enabled_ids(&self) -> BTreeSet<String> {
+        let mut enabled = self.enabled.clone();
+        for items in self.workspaces.values() {
+            enabled.extend(items.iter().cloned());
+        }
+        enabled
+    }
+
+    fn migrate_to_global(&mut self) {
+        self.enabled = self.enabled_ids();
+        self.workspaces.clear();
+    }
 }
 
 fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -140,23 +158,20 @@ fn detected_application(application_id: &str) -> Option<crate::models::LaunchApp
         .find(|application| application.id == application_id)
 }
 
-fn is_enabled(app: &AppHandle, workspace_id: &str, integration_id: &str) -> Result<bool, String> {
+fn is_enabled(app: &AppHandle, _workspace_id: &str, integration_id: &str) -> Result<bool, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Integration settings are unavailable.".to_string())?;
-    let store = load_store_unlocked(app)?;
-    Ok(store
-        .workspaces
-        .get(workspace_id)
-        .is_some_and(|enabled| enabled.contains(integration_id)))
+    Ok(load_store_unlocked(app)?
+        .enabled_ids()
+        .contains(integration_id))
 }
 
-pub(crate) fn list(app: &AppHandle, workspace_id: &str) -> Result<Vec<DeepIntegration>, String> {
+pub(crate) fn list(app: &AppHandle, _workspace_id: &str) -> Result<Vec<DeepIntegration>, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Integration settings are unavailable.".to_string())?;
-    let store = load_store_unlocked(app)?;
-    let enabled = store.workspaces.get(workspace_id);
+    let enabled = load_store_unlocked(app)?.enabled_ids();
     let applications = launcher::list_applications();
 
     Ok(INTEGRATIONS
@@ -165,7 +180,7 @@ pub(crate) fn list(app: &AppHandle, workspace_id: &str) -> Result<Vec<DeepIntegr
             let available = applications
                 .iter()
                 .any(|application| application.id == spec.application_id);
-            let allowed = available && enabled.is_some_and(|items| items.contains(spec.id));
+            let allowed = available && enabled.contains(spec.id);
             DeepIntegration {
                 id: spec.id.to_string(),
                 name: spec.name.to_string(),
@@ -179,9 +194,9 @@ pub(crate) fn list(app: &AppHandle, workspace_id: &str) -> Result<Vec<DeepIntegr
                 message: Some(if !available {
                     "Not installed or not detected".to_string()
                 } else if allowed {
-                    "ChatGPT access enabled for this project".to_string()
+                    "ChatGPT access enabled for all approved projects".to_string()
                 } else {
-                    "Click to allow ChatGPT access for this project".to_string()
+                    "Click to allow ChatGPT access for all approved projects".to_string()
                 }),
             }
         })
@@ -207,17 +222,11 @@ pub(crate) fn set_enabled(
             .lock()
             .map_err(|_| "Integration settings are unavailable.".to_string())?;
         let mut store = load_store_unlocked(app)?;
-        let items = store
-            .workspaces
-            .entry(workspace_id.to_string())
-            .or_default();
+        store.migrate_to_global();
         if enabled {
-            items.insert(integration.id.to_string());
+            store.enabled.insert(integration.id.to_string());
         } else {
-            items.remove(integration.id);
-        }
-        if items.is_empty() {
-            store.workspaces.remove(workspace_id);
+            store.enabled.remove(integration.id);
         }
         save_store_unlocked(app, &store)?;
     }
@@ -227,21 +236,22 @@ pub(crate) fn set_enabled(
         "INFO",
         "integration.access",
         &format!(
-            "workspace_id={} integration={} enabled={}",
+            "scope=global requested_workspace_id={} integration={} enabled={}",
             workspace_id, integration.id, enabled
         ),
     );
     list(app, workspace_id)
 }
 
-pub(crate) fn forget_workspace(app: &AppHandle, workspace_id: &str) {
+pub(crate) fn forget_workspace(app: &AppHandle, _workspace_id: &str) {
     let Ok(_guard) = STORE_LOCK.lock() else {
         return;
     };
     let Ok(mut store) = load_store_unlocked(app) else {
         return;
     };
-    if store.workspaces.remove(workspace_id).is_some() {
+    if !store.workspaces.is_empty() {
+        store.migrate_to_global();
         let _ = save_store_unlocked(app, &store);
     }
 }
@@ -364,7 +374,7 @@ pub(crate) fn run_action(
     })?;
     if !is_enabled(app, &workspace.id, integration.id)? {
         return Err(format!(
-            "{} access is off for this project. Enable it locally in Commands → Applications & links first.",
+            "{} access is off. Enable it locally in Commands → Applications & links first.",
             integration.name
         ));
     }
@@ -553,7 +563,7 @@ pub(crate) fn run_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{shell_quote, INTEGRATIONS};
+    use super::{shell_quote, IntegrationStore, INTEGRATIONS};
 
     #[test]
     fn exposes_exactly_five_integrations() {
@@ -563,5 +573,31 @@ mod tests {
     #[test]
     fn shell_quotes_workspace_targets() {
         assert_eq!(shell_quote("a'b.py"), "'a'\"'\"'b.py'");
+    }
+
+    #[test]
+    fn legacy_workspace_integrations_migrate_to_global() {
+        let mut store = IntegrationStore::default();
+        store
+            .workspaces
+            .entry("workspace-a".to_string())
+            .or_default()
+            .insert("android-studio".to_string());
+        store
+            .workspaces
+            .entry("workspace-b".to_string())
+            .or_default()
+            .insert("docker".to_string());
+
+        assert_eq!(
+            store.enabled_ids().into_iter().collect::<Vec<_>>(),
+            vec!["android-studio".to_string(), "docker".to_string()]
+        );
+
+        store.migrate_to_global();
+
+        assert!(store.workspaces.is_empty());
+        assert!(store.enabled.contains("android-studio"));
+        assert!(store.enabled.contains("docker"));
     }
 }

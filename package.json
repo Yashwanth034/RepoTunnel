@@ -32,6 +32,7 @@
     "@codemirror/view": "^6.43.10",
     "@lezer/highlight": "^1.2.3",
     "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "codemirror": "^6.0.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

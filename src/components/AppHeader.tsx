@@ -21,6 +21,7 @@ const titles: Record<AppView, string> = {
   git: "Git",
   connections: "Connect",
   commands: "Commands",
+  video: "Video",
   system: "Settings",
   help: "Help",
 };
@@ -36,6 +37,7 @@ const icons: Record<AppView, Parameters<typeof NavIcon>[0]["name"]> = {
   git: "git",
   connections: "link",
   commands: "terminal",
+  video: "video",
   system: "settings",
   help: "help",
 };

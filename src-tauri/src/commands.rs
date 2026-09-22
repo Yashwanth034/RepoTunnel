@@ -12,7 +12,7 @@ use crate::{
     activity, ai_workspace,
     app_state::AppState,
     browser, changes, checkpoint, continuity, conversation, desktop_control, execution, filesystem,
-    git, hardening, integrations, launcher, mcp_auth,
+    git, github, hardening, integrations, launcher, mcp_auth,
     model_hub::{
         self, ModelHubSnapshot, ModelProviderId, ModelSelection, ModelTestResult, RuntimeStatus,
     },
@@ -41,7 +41,8 @@ use crate::{
         load_history_settings, load_workspaces, save_ai_access_paused, save_history_settings,
         save_workspaces,
     },
-    team, terminal, updates, versioning, workflow,
+    team, terminal, updates, versioning, video, video_assets, video_narration, video_preview,
+    video_production, video_render, video_scene, workflow,
 };
 
 fn canonical_workspace_path(path: &str) -> Result<PathBuf, String> {
@@ -1279,6 +1280,34 @@ pub fn list_launchable_applications(
 }
 
 #[tauri::command]
+pub async fn get_github_connection_status() -> Result<github::GithubConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(github::status)
+        .await
+        .map_err(|error| format!("The GitHub status check could not complete: {error}"))
+}
+
+#[tauri::command]
+pub async fn connect_github() -> Result<github::GithubConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(github::connect)
+        .await
+        .map_err(|error| format!("The GitHub connection task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn cancel_github_connection() -> Result<github::GithubConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(github::cancel_connection)
+        .await
+        .map_err(|error| format!("The GitHub connection cancel task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn disconnect_github() -> Result<github::GithubConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(github::disconnect)
+        .await
+        .map_err(|error| format!("The GitHub disconnect task could not complete: {error}"))?
+}
+
+#[tauri::command]
 pub fn list_deep_integrations(
     app: AppHandle,
     workspace_id: String,
@@ -2267,6 +2296,371 @@ pub fn run_safety_scan(app: AppHandle, workspace_id: String) -> Result<SafetySca
 }
 
 #[tauri::command]
+pub fn get_video_tools_status(app: AppHandle) -> Result<video::VideoToolsStatus, String> {
+    video::tools_status(&app)
+}
+
+#[tauri::command]
+pub async fn install_video_tools(app: AppHandle) -> Result<video::VideoToolsStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || video::install_missing_tools(&app))
+        .await
+        .map_err(|error| format!("Video helper installation task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub fn start_video_analysis(
+    app: AppHandle,
+    workspace_id: String,
+    source: String,
+    mode: String,
+    start_seconds: Option<f64>,
+    end_seconds: Option<f64>,
+    max_frames: Option<usize>,
+) -> Result<video::VideoAnalysisJob, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video::start_analysis(
+        app,
+        workspace,
+        source,
+        mode,
+        start_seconds,
+        end_seconds,
+        max_frames,
+    )
+}
+
+#[tauri::command]
+pub fn get_video_analysis_job(job_id: String) -> Result<video::VideoAnalysisJob, String> {
+    video::get_job(&job_id)
+}
+
+#[tauri::command]
+pub fn list_video_analysis_jobs(
+    workspace_id: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<video::VideoAnalysisJob>, String> {
+    video::list_jobs(workspace_id.as_deref(), limit.unwrap_or(20))
+}
+
+#[tauri::command]
+pub fn get_video_analysis_result(
+    app: AppHandle,
+    job_id: String,
+) -> Result<video::VideoAnalysisResult, String> {
+    video::get_result(&app, &job_id)
+}
+
+#[tauri::command]
+pub fn cancel_video_analysis(job_id: String) -> Result<video::VideoAnalysisJob, String> {
+    video::cancel_analysis(&job_id)
+}
+
+#[tauri::command]
+pub fn clear_video_cache(app: AppHandle) -> Result<video::VideoToolsStatus, String> {
+    video::clear_cache(&app)
+}
+
+#[tauri::command]
+pub fn create_video_project(
+    app: AppHandle,
+    workspace_id: String,
+    name: String,
+    aspect_ratio: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
+) -> Result<video_production::VideoProductionProject, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::create_project(
+        &workspace,
+        &name,
+        aspect_ratio.as_deref(),
+        width,
+        height,
+        fps,
+    )
+}
+
+#[tauri::command]
+pub fn list_video_projects(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<Vec<video_production::VideoProductionProject>, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::list_projects(&workspace)
+}
+
+#[tauri::command]
+pub fn import_video_project_folder(
+    app: AppHandle,
+    workspace_id: String,
+    folder_path: String,
+) -> Result<video_production::VideoProductionProject, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::import_folder(&workspace, &folder_path)
+}
+
+#[tauri::command]
+pub fn set_video_project_pinned(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    pinned: bool,
+) -> Result<video_production::VideoProductionProject, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::set_project_pinned(&workspace, &project_id, pinned)
+}
+
+#[tauri::command]
+pub fn list_video_project_files(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+) -> Result<Vec<video_production::VideoProjectFile>, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::list_project_files(&workspace, &project_id)
+}
+
+#[tauri::command]
+pub fn read_video_project_text_file(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    relative_path: String,
+) -> Result<String, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::read_project_text_file(&workspace, &project_id, &relative_path)
+}
+
+#[tauri::command]
+pub fn delete_video_project(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+) -> Result<(), String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::delete_project(&workspace, &project_id)?;
+    video_preview::clear_all(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_video_project(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+) -> Result<video_production::VideoProductionProject, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::get_project(&workspace, &project_id)
+}
+
+#[tauri::command]
+pub fn update_video_project_status(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    status: String,
+    detail: Option<String>,
+) -> Result<video_production::VideoProductionProject, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::update_project_status(&workspace, &project_id, &status, detail.as_deref())
+}
+
+#[tauri::command]
+pub fn write_video_project_document(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    document: String,
+    content: String,
+) -> Result<video_production::VideoProductionDocument, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::write_document(&workspace, &project_id, &document, &content)
+}
+
+#[tauri::command]
+pub fn read_video_project_document(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    document: String,
+) -> Result<video_production::VideoProductionDocument, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_production::read_document(&workspace, &project_id, &document)
+}
+
+#[tauri::command]
+pub fn start_video_project_recording(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    workspace_id: String,
+    project_id: String,
+    fps: Option<u32>,
+    max_seconds: Option<u32>,
+) -> Result<video_production::VideoRecordingStatus, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    let target = state.ai_workspace.recording_target(&workspace_id)?;
+    video_production::start_ai_workspace_recording(
+        &app,
+        &workspace,
+        &project_id,
+        &target.display,
+        &target.xauth_path,
+        target.width,
+        target.height,
+        fps,
+        max_seconds,
+    )
+}
+
+#[tauri::command]
+pub fn get_video_project_recording(
+    workspace_id: String,
+    project_id: Option<String>,
+) -> Result<Option<video_production::VideoRecordingStatus>, String> {
+    video_production::get_recording_status(&workspace_id, project_id.as_deref())
+}
+
+#[tauri::command]
+pub fn stop_video_project_recording(
+    workspace_id: String,
+    project_id: String,
+) -> Result<video_production::VideoRecordingStatus, String> {
+    video_production::stop_recording(&workspace_id, &project_id)
+}
+
+#[tauri::command]
+pub async fn render_video_project_scene(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    scene: video_scene::VideoSceneSpec,
+) -> Result<video_scene::VideoSceneRender, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_scene::render_scene(&app_for_task, &workspace, &project_id, scene)
+    })
+    .await
+    .map_err(|error| format!("Generated-scene render task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn render_video_project_timeline(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    request: video_render::VideoRenderRequest,
+) -> Result<video_render::VideoRenderResult, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_render::render_project(&app_for_task, &workspace, &project_id, request)
+    })
+    .await
+    .map_err(|error| format!("Video timeline render task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn prepare_video_project_preview(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+) -> Result<video_preview::VideoPreviewSource, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_preview::prepare_preview(&app_for_task, &workspace, &project_id)
+    })
+    .await
+    .map_err(|error| format!("Video preview preparation could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn prepare_video_project_file_preview(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    relative_path: String,
+) -> Result<video_preview::VideoPreviewSource, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_preview::prepare_file_preview(&app_for_task, &workspace, &project_id, &relative_path)
+    })
+    .await
+    .map_err(|error| format!("Video file preview preparation could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn read_video_preview_chunk(
+    app: AppHandle,
+    preview_path: String,
+    offset: u64,
+    length: u64,
+) -> Result<tauri::ipc::Response, String> {
+    let app_for_task = app.clone();
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        video_preview::read_preview_chunk(&app_for_task, &preview_path, offset, length)
+    })
+    .await
+    .map_err(|error| format!("Video preview read task could not complete: {error}"))??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn list_video_asset_sources() -> Vec<video_assets::VideoAssetSource> {
+    video_assets::registry()
+}
+
+#[tauri::command]
+pub fn record_video_asset_license(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    input: video_assets::VideoAssetLicenseInput,
+) -> Result<video_assets::VideoAssetLicenseRecord, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_assets::record_license(&workspace, &project_id, input)
+}
+
+#[tauri::command]
+pub fn get_video_narration_providers(
+    app: AppHandle,
+) -> Vec<video_narration::NarrationProviderStatus> {
+    video_narration::provider_status(&app)
+}
+
+#[tauri::command]
+pub fn create_video_project_subtitles(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    language: String,
+    text: String,
+    duration_seconds: Option<f64>,
+) -> Result<video_narration::SubtitleAsset, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    video_narration::create_subtitles(&workspace, &project_id, &language, &text, duration_seconds)
+}
+
+#[tauri::command]
+pub async fn synthesize_video_project_narration(
+    app: AppHandle,
+    workspace_id: String,
+    project_id: String,
+    request: video_narration::NarrationRequest,
+) -> Result<video_narration::NarrationAsset, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        video_narration::synthesize(&app_for_task, &workspace, &project_id, request)
+    })
+    .await
+    .map_err(|error| format!("Narration task could not complete: {error}"))?
+}
+
+#[tauri::command]
 pub fn get_ai_access_status(state: State<'_, AppState>) -> Result<AiAccessStatus, String> {
     Ok(AiAccessStatus {
         paused: state.ai_access_paused(),
@@ -2284,6 +2678,8 @@ pub fn set_ai_access_paused(
     if paused {
         terminal::stop_all_activity(&app);
         browser::stop_all_activity();
+        video::stop_all_activity();
+        video_production::stop_all_activity();
     }
     hardening::log_event(
         &app,

@@ -56,7 +56,25 @@ pub(crate) struct DesktopScreenshot {
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PermissionStore {
+    #[serde(default)]
+    global_enabled: bool,
+    #[serde(default)]
     workspaces: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl PermissionStore {
+    fn enabled(&self) -> bool {
+        self.global_enabled
+            || self
+                .workspaces
+                .values()
+                .any(|items| items.contains(GLOBAL_PERMISSION))
+    }
+
+    fn migrate_to_global(&mut self) {
+        self.global_enabled = self.enabled();
+        self.workspaces.clear();
+    }
 }
 
 fn protected_application(id: &str) -> bool {
@@ -171,23 +189,18 @@ fn discovered(app: &AppHandle) -> Result<Vec<HelperApplication>, String> {
 
 pub(crate) fn list(
     app: &AppHandle,
-    workspace_id: &str,
+    _workspace_id: &str,
 ) -> Result<Vec<DesktopControlApplication>, String> {
-    let permissions = {
+    let enabled = {
         let _guard = STORE_LOCK
             .lock()
             .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
-        load_store_unlocked(app)?
-            .workspaces
-            .get(workspace_id)
-            .cloned()
-            .unwrap_or_default()
+        load_store_unlocked(app)?.enabled()
     };
     let mut applications = discovered(app)?
         .into_iter()
         .filter(|item| !protected_application(&item.id))
         .map(|item| {
-            let enabled = permissions.contains(GLOBAL_PERMISSION);
             DesktopControlApplication {
                 id: item.id,
                 name: item.name,
@@ -196,9 +209,9 @@ pub(crate) fn list(
                 window_count: item.window_count,
                 enabled,
                 message: if enabled {
-                    "ChatGPT desktop control enabled for this project".to_string()
+                    "ChatGPT desktop control enabled for all approved projects".to_string()
                 } else {
-                    "Enable Desktop locally in Commands → Applications & links to allow control for this project".to_string()
+                    "Enable Desktop locally in Commands → Applications & links to allow control for all approved projects".to_string()
                 },
             }
         })
@@ -211,15 +224,11 @@ pub(crate) fn list(
     Ok(applications)
 }
 
-pub(crate) fn is_enabled(app: &AppHandle, workspace_id: &str) -> Result<bool, String> {
+pub(crate) fn is_enabled(app: &AppHandle, _workspace_id: &str) -> Result<bool, String> {
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
-    let store = load_store_unlocked(app)?;
-    Ok(store
-        .workspaces
-        .get(workspace_id)
-        .is_some_and(|items| items.contains(GLOBAL_PERMISSION)))
+    Ok(load_store_unlocked(app)?.enabled())
 }
 
 pub(crate) fn set_global_enabled(
@@ -232,30 +241,22 @@ pub(crate) fn set_global_enabled(
             .lock()
             .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
         let mut store = load_store_unlocked(app)?;
-        if enabled {
-            let items = store
-                .workspaces
-                .entry(workspace_id.to_string())
-                .or_default();
-            items.clear();
-            items.insert(GLOBAL_PERMISSION.to_string());
-        } else {
-            store.workspaces.remove(workspace_id);
-        }
+        store.global_enabled = enabled;
+        store.workspaces.clear();
         save_store_unlocked(app, &store)?;
     }
     hardening::log_event(
         app,
         "INFO",
         "desktop-control.access",
-        &format!("workspace_id={workspace_id} global=true enabled={enabled}"),
+        &format!("scope=global requested_workspace_id={workspace_id} enabled={enabled}"),
     );
     Ok(enabled)
 }
 
 fn require_enabled(
     app: &AppHandle,
-    workspace_id: &str,
+    _workspace_id: &str,
     application_id: &str,
 ) -> Result<(), String> {
     if protected_application(application_id) {
@@ -264,13 +265,8 @@ fn require_enabled(
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
-    let store = load_store_unlocked(app)?;
-    if !store
-        .workspaces
-        .get(workspace_id)
-        .is_some_and(|items| items.contains(GLOBAL_PERMISSION))
-    {
-        return Err("Desktop control is off for this project. Enable Desktop locally in Commands → Applications & links first.".to_string());
+    if !load_store_unlocked(app)?.enabled() {
+        return Err("Desktop control is off. Enable Desktop locally in Commands → Applications & links first.".to_string());
     }
     Ok(())
 }
@@ -380,26 +376,45 @@ pub(crate) fn screenshot(
     })
 }
 
-pub(crate) fn forget_workspace(app: &AppHandle, workspace_id: &str) {
+pub(crate) fn forget_workspace(app: &AppHandle, _workspace_id: &str) {
     let Ok(_guard) = STORE_LOCK.lock() else {
         return;
     };
     let Ok(mut store) = load_store_unlocked(app) else {
         return;
     };
-    if store.workspaces.remove(workspace_id).is_some() {
+    if !store.workspaces.is_empty() {
+        store.migrate_to_global();
         let _ = save_store_unlocked(app, &store);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::protected_application;
+    use super::{protected_application, PermissionStore, GLOBAL_PERMISSION};
 
     #[test]
     fn blocks_repotunnel_self_control() {
         assert!(protected_application("repotunnel"));
         assert!(protected_application("app.repotunnel.desktop"));
         assert!(!protected_application("android-studio"));
+    }
+
+    #[test]
+    fn legacy_workspace_permission_migrates_to_global() {
+        let mut store = PermissionStore::default();
+        store
+            .workspaces
+            .entry("workspace-a".to_string())
+            .or_default()
+            .insert(GLOBAL_PERMISSION.to_string());
+
+        assert!(store.enabled());
+
+        store.migrate_to_global();
+
+        assert!(store.global_enabled);
+        assert!(store.workspaces.is_empty());
+        assert!(store.enabled());
     }
 }

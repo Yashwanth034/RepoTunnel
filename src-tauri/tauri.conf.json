@@ -28,6 +28,7 @@
         "default-src": "'self'",
         "connect-src": "ipc: http://ipc.localhost",
         "img-src": "'self' asset: http://asset.localhost data:",
+        "media-src": "'self' asset: http://asset.localhost http://127.0.0.1:*",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
         "object-src": "'none'",
@@ -38,11 +39,18 @@
         "default-src": "'self'",
         "connect-src": "ipc: http://ipc.localhost ws://localhost:1421 ws://127.0.0.1:1421",
         "img-src": "'self' asset: http://asset.localhost data:",
+        "media-src": "'self' asset: http://asset.localhost http://127.0.0.1:*",
         "style-src": "'self' 'unsafe-inline'",
         "font-src": "'self' data:",
         "object-src": "'none'",
         "base-uri": "'self'",
         "frame-ancestors": "'none'"
+      },
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/video-preview/**"
+        ]
       },
       "headers": {
         "X-Content-Type-Options": "nosniff",

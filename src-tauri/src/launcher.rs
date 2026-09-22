@@ -643,6 +643,32 @@ fn validate_url(value: &str) -> Result<String, String> {
     Ok(parsed.to_string())
 }
 
+pub(crate) fn open_default_url_now(value: &str) -> Result<(), String> {
+    let url = validate_url(value)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let executable = PathBuf::from("explorer.exe");
+        return spawn_detached(&executable, &[url]).map(|_| ());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let executable = PathBuf::from("/usr/bin/open");
+        return spawn_detached(&executable, &[url]).map(|_| ());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let (executable, mut args) = default_opener()?;
+        args.push(url);
+        return spawn_detached(&executable, &args).map(|_| ());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Opening a default browser is not supported on this platform.".to_string())
+}
+
 fn validate_relative_target(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.len() > MAX_TARGET_LENGTH {

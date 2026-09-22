@@ -16,6 +16,7 @@ mod external_access;
 mod filesystem;
 mod gateway;
 mod git;
+mod github;
 mod hardening;
 mod integrations;
 mod launcher;
@@ -38,6 +39,14 @@ mod team;
 mod terminal;
 mod updates;
 mod versioning;
+mod video;
+mod video_assets;
+mod video_narration;
+mod video_narration_managed;
+mod video_preview;
+mod video_production;
+mod video_render;
+mod video_scene;
 mod workflow;
 
 use app_state::AppState;
@@ -175,6 +184,10 @@ pub fn run() {
                 commands::stop_managed_process,
                 commands::restart_managed_process,
                 commands::list_launchable_applications,
+                commands::get_github_connection_status,
+                commands::connect_github,
+                commands::cancel_github_connection,
+                commands::disconnect_github,
                 commands::list_deep_integrations,
                 commands::set_deep_integration_enabled,
                 commands::list_desktop_control_applications,
@@ -213,6 +226,38 @@ pub fn run() {
                 commands::list_browser_history,
                 commands::approve_browser_action,
                 commands::reject_browser_action,
+                commands::get_video_tools_status,
+                commands::install_video_tools,
+                commands::start_video_analysis,
+                commands::get_video_analysis_job,
+                commands::list_video_analysis_jobs,
+                commands::get_video_analysis_result,
+                commands::cancel_video_analysis,
+                commands::clear_video_cache,
+                commands::create_video_project,
+                commands::list_video_projects,
+                commands::import_video_project_folder,
+                commands::set_video_project_pinned,
+                commands::list_video_project_files,
+                commands::read_video_project_text_file,
+                commands::delete_video_project,
+                commands::get_video_project,
+                commands::update_video_project_status,
+                commands::write_video_project_document,
+                commands::read_video_project_document,
+                commands::start_video_project_recording,
+                commands::get_video_project_recording,
+                commands::stop_video_project_recording,
+                commands::render_video_project_scene,
+                commands::render_video_project_timeline,
+                commands::prepare_video_project_preview,
+                commands::prepare_video_project_file_preview,
+                commands::read_video_preview_chunk,
+                commands::list_video_asset_sources,
+                commands::record_video_asset_license,
+                commands::get_video_narration_providers,
+                commands::create_video_project_subtitles,
+                commands::synthesize_video_project_narration,
                 commands::get_monitoring_status,
                 commands::start_workspace_monitoring,
                 commands::stop_workspace_monitoring,
@@ -303,6 +348,9 @@ pub fn run() {
                 monitoring::stop_all_activity();
                 terminal::stop_all_activity(app_handle);
                 browser::stop_all_activity();
+                video::stop_all_activity();
+                video_production::stop_all_activity();
+                video_preview::clear_all(app_handle);
                 model_hub::stop_owned_local_runtimes();
                 let state = app_handle.state::<AppState>();
                 let _ = state.stop_gateway();
