@@ -14,6 +14,12 @@ fn main() {
     if let Some(exit_code) = repotunnel_lib::maybe_run_platform_sandbox_helper() {
         std::process::exit(exit_code);
     }
+    if let Some(exit_code) = repotunnel_lib::maybe_run_ai_workspace_github_proxy() {
+        std::process::exit(exit_code);
+    }
+    if let Some(exit_code) = repotunnel_lib::maybe_run_managed_process_supervisor() {
+        std::process::exit(exit_code);
+    }
     repotunnel_lib::run();
 }
 

@@ -345,6 +345,17 @@ pub(crate) struct SearchMatch {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SearchFilesResult {
+    pub(crate) matches: Vec<SearchMatch>,
+    pub(crate) searched_file_count: usize,
+    pub(crate) skipped_entry_count: usize,
+    pub(crate) skipped_io_count: usize,
+    pub(crate) skipped_policy_count: usize,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct LanguageStat {
     pub(crate) name: String,
     pub(crate) files: usize,
@@ -510,6 +521,38 @@ pub(crate) struct GitRepositoryStatus {
 pub(crate) struct GitDiff {
     pub(crate) staged: bool,
     pub(crate) content: String,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitDiffStats {
+    pub(crate) staged: bool,
+    pub(crate) changed_path_count: usize,
+    pub(crate) paths: Vec<String>,
+    pub(crate) paths_truncated: bool,
+    pub(crate) insertions: usize,
+    pub(crate) deletions: usize,
+    pub(crate) binary_path_count: usize,
+    pub(crate) blocked_path_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitDiffCheckIssue {
+    pub(crate) path: String,
+    pub(crate) line: Option<usize>,
+    pub(crate) message: String,
+    pub(crate) context: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitDiffCheck {
+    pub(crate) staged: bool,
+    pub(crate) passed: bool,
+    pub(crate) issue_count: usize,
+    pub(crate) issues: Vec<GitDiffCheckIssue>,
     pub(crate) truncated: bool,
 }
 
@@ -702,6 +745,25 @@ pub(crate) struct ManagedProcessOutput {
     pub(crate) output_truncated: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ManagedProcessWaitReason {
+    SuccessPattern,
+    FailurePattern,
+    ProcessExited,
+    Timeout,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ManagedProcessWaitResult {
+    pub(crate) process: ManagedProcessRecord,
+    pub(crate) reason: ManagedProcessWaitReason,
+    pub(crate) matched_pattern: Option<String>,
+    pub(crate) output: ManagedProcessOutput,
+    pub(crate) waited_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum LaunchActionKind {
@@ -765,6 +827,7 @@ pub(crate) enum BrowserActionKind {
     Navigate,
     Click,
     Type,
+    Sequence,
     Scroll,
     Reload,
 }
@@ -828,11 +891,54 @@ pub(crate) struct BrowserActionRecord {
     pub(crate) error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserNavigationRedirect {
+    pub(crate) from_url: String,
+    pub(crate) to_url: String,
+    pub(crate) status: Option<u16>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserNavigationNetworkError {
+    pub(crate) url: Option<String>,
+    pub(crate) method: Option<String>,
+    pub(crate) error_text: String,
+    pub(crate) resource_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserNavigationReceipt {
+    pub(crate) requested_url: String,
+    pub(crate) final_url: String,
+    pub(crate) title: String,
+    pub(crate) ready_state: String,
+    pub(crate) http_status: Option<u16>,
+    pub(crate) timed_out: bool,
+    pub(crate) load_state: String,
+    pub(crate) navigation_generation: Option<String>,
+    pub(crate) document_generation: Option<String>,
+    pub(crate) document_matches_navigation: bool,
+    pub(crate) document_text: String,
+    pub(crate) document_html: String,
+    pub(crate) redirects: Vec<BrowserNavigationRedirect>,
+    pub(crate) network_errors: Vec<BrowserNavigationNetworkError>,
+    pub(crate) request_count: usize,
+    pub(crate) cookies_changed: Vec<String>,
+    pub(crate) duration_ms: u64,
+    pub(crate) error_code: Option<String>,
+    pub(crate) error_text: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserActionOutcome {
     pub(crate) queued: bool,
     pub(crate) action: BrowserActionRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) navigation_receipt: Option<BrowserNavigationReceipt>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -841,11 +947,28 @@ pub(crate) struct BrowserPageInspection {
     pub(crate) tab_id: String,
     pub(crate) title: String,
     pub(crate) url: String,
+    pub(crate) document_generation: Option<String>,
     pub(crate) selector: Option<String>,
     pub(crate) found: bool,
     pub(crate) tag: Option<String>,
     pub(crate) text: String,
     pub(crate) html: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserNetworkEntry {
+    pub(crate) tab_id: String,
+    pub(crate) request_id: String,
+    pub(crate) url: String,
+    pub(crate) method: Option<String>,
+    pub(crate) status: Option<u16>,
+    pub(crate) status_text: Option<String>,
+    pub(crate) resource_type: Option<String>,
+    pub(crate) mime_type: Option<String>,
+    pub(crate) failed: bool,
+    pub(crate) error_text: Option<String>,
+    pub(crate) timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -900,6 +1023,102 @@ pub(crate) struct BrowserNetworkFailure {
 pub(crate) struct BrowserDiagnostics {
     pub(crate) console_entries: Vec<BrowserConsoleEntry>,
     pub(crate) network_failures: Vec<BrowserNetworkFailure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum BrowserDownloadStatus {
+    InProgress,
+    Completed,
+    Cancelled,
+    Interrupted,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserDownload {
+    pub(crate) guid: String,
+    pub(crate) tab_id: String,
+    pub(crate) url: String,
+    pub(crate) suggested_filename: String,
+    pub(crate) relative_path: String,
+    pub(crate) received_bytes: u64,
+    pub(crate) total_bytes: Option<u64>,
+    pub(crate) percent: Option<f64>,
+    pub(crate) bytes_per_second: Option<f64>,
+    pub(crate) status: BrowserDownloadStatus,
+    pub(crate) started_at: u64,
+    pub(crate) updated_at: u64,
+    pub(crate) resumable: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserDownloadSetup {
+    pub(crate) task_id: String,
+    pub(crate) tab_id: String,
+    pub(crate) relative_directory: String,
+    pub(crate) exact_paths_use_download_guid: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserUploadResult {
+    pub(crate) tab_id: String,
+    pub(crate) selector: String,
+    pub(crate) relative_path: String,
+    pub(crate) file_name: String,
+    pub(crate) size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaStreamInfo {
+    pub(crate) index: u32,
+    pub(crate) codec_type: String,
+    pub(crate) codec_name: Option<String>,
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+    pub(crate) fps: Option<f64>,
+    pub(crate) sample_rate: Option<u32>,
+    pub(crate) channels: Option<u32>,
+    pub(crate) language: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaInspection {
+    pub(crate) relative_path: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) mime_type: String,
+    pub(crate) media_kind: String,
+    pub(crate) format_name: Option<String>,
+    pub(crate) duration_seconds: Option<f64>,
+    pub(crate) width: Option<u32>,
+    pub(crate) height: Option<u32>,
+    pub(crate) fps: Option<f64>,
+    pub(crate) video_streams: Vec<MediaStreamInfo>,
+    pub(crate) audio_streams: Vec<MediaStreamInfo>,
+    pub(crate) subtitle_streams: Vec<MediaStreamInfo>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaFrameExtraction {
+    pub(crate) source_relative_path: String,
+    pub(crate) timestamp_seconds: f64,
+    pub(crate) relative_path: String,
+    pub(crate) size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MediaDecodeValidation {
+    pub(crate) relative_path: String,
+    pub(crate) passed: bool,
+    pub(crate) checked_seconds: Option<f64>,
+    pub(crate) full_decode: bool,
+    pub(crate) error_excerpt: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1049,6 +1268,102 @@ pub(crate) struct RuntimeDiagnostics {
     pub(crate) tunnel_client_available: bool,
     pub(crate) git_available: bool,
     pub(crate) warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnvironmentToolDiagnostic {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) category: String,
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) supported_file_types: Vec<String>,
+    pub(crate) cli: bool,
+    pub(crate) scriptable: bool,
+    pub(crate) gui_controllable: bool,
+    pub(crate) launchable: bool,
+    pub(crate) host_available: bool,
+    pub(crate) host_executable: Option<String>,
+    pub(crate) host_version: Option<String>,
+    pub(crate) sandbox_available: bool,
+    pub(crate) sandbox_executable: Option<String>,
+    pub(crate) installation_required: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EnvironmentVariableDiagnostic {
+    pub(crate) name: String,
+    pub(crate) present: bool,
+    pub(crate) value: Option<String>,
+    pub(crate) hidden: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspaceEnvironmentDiagnostics {
+    pub(crate) workspace_id: String,
+    pub(crate) workspace_name: String,
+    pub(crate) platform: String,
+    pub(crate) architecture: String,
+    pub(crate) host_workspace_path: String,
+    pub(crate) sandbox_workspace_path: String,
+    pub(crate) host_process_path: String,
+    pub(crate) sandbox_path: String,
+    pub(crate) tools: Vec<EnvironmentToolDiagnostic>,
+    pub(crate) sdk_variables: Vec<EnvironmentVariableDiagnostic>,
+    pub(crate) gui_variables: Vec<EnvironmentVariableDiagnostic>,
+    pub(crate) differences: Vec<String>,
+    pub(crate) notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TempWorkspaceInfo {
+    pub(crate) task_id: String,
+    pub(crate) label: String,
+    pub(crate) relative_path: String,
+    pub(crate) created_at: u64,
+    pub(crate) modified_at: u64,
+    pub(crate) size_bytes: u64,
+    pub(crate) file_count: usize,
+    pub(crate) directory_count: usize,
+    pub(crate) preserved: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TempWorkspaceCleanupResult {
+    pub(crate) task_id: String,
+    pub(crate) removed: bool,
+    pub(crate) freed_bytes: u64,
+    pub(crate) preserved: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TempWorkspaceFileResult {
+    pub(crate) task_id: String,
+    pub(crate) source: String,
+    pub(crate) destination: Option<String>,
+    pub(crate) operation: String,
+    pub(crate) size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystemResourceSnapshot {
+    pub(crate) platform: String,
+    pub(crate) architecture: String,
+    pub(crate) logical_cpu_count: usize,
+    pub(crate) load_average_1m: Option<f64>,
+    pub(crate) memory_total_bytes: Option<u64>,
+    pub(crate) memory_available_bytes: Option<u64>,
+    pub(crate) workspace_disk_total_bytes: Option<u64>,
+    pub(crate) workspace_disk_available_bytes: Option<u64>,
+    pub(crate) gpu_available: bool,
+    pub(crate) gpu_devices: Vec<String>,
+    pub(crate) notes: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]

@@ -1,9 +1,11 @@
 mod access;
 mod activity;
+mod ai_resources;
 mod ai_workspace;
 mod app_state;
 mod browser;
 mod changes;
+mod chatgpt_bridge;
 mod checkpoint;
 mod commands;
 mod connection;
@@ -11,17 +13,23 @@ mod continuity;
 mod conversation;
 mod desktop_control;
 mod direct_https;
+mod environment;
 mod execution;
 mod external_access;
 mod filesystem;
 mod gateway;
 mod git;
 mod github;
+mod gmail_access;
 mod hardening;
+mod https_setup;
 mod integrations;
 mod launcher;
+#[cfg(any(target_os = "macos", test))]
+mod macos_ax;
 mod mcp_auth;
 mod mcp_server;
+mod media_inspection;
 mod model_hub;
 mod model_trial;
 mod models;
@@ -34,19 +42,28 @@ mod project_setup;
 mod public_tunnel;
 mod repository;
 mod secret_guard;
+mod self_continuation;
+mod semantic;
 mod storage;
+mod system_resources;
 mod team;
+mod temp_workspace;
 mod terminal;
 mod updates;
 mod versioning;
 mod video;
 mod video_assets;
+mod video_director;
 mod video_narration;
 mod video_narration_managed;
 mod video_preview;
 mod video_production;
+mod video_qa;
 mod video_render;
 mod video_scene;
+mod video_story_render;
+#[cfg(any(windows, test))]
+mod windows_uia;
 mod workflow;
 
 use app_state::AppState;
@@ -54,6 +71,14 @@ use tauri::Manager;
 
 pub fn maybe_run_platform_sandbox_helper() -> Option<i32> {
     platform_sandbox::maybe_run_helper()
+}
+
+pub fn maybe_run_managed_process_supervisor() -> Option<i32> {
+    terminal::maybe_run_managed_process_supervisor()
+}
+
+pub fn maybe_run_ai_workspace_github_proxy() -> Option<i32> {
+    terminal::maybe_run_ai_workspace_github_proxy()
 }
 
 fn install_rustls_crypto_provider() {
@@ -66,19 +91,35 @@ fn install_rustls_crypto_provider() {
 }
 
 fn initialize_local_runtime(app: &tauri::AppHandle) {
-    let stale_ai_workspace_processes = ai_workspace::cleanup_stale_processes(app);
-    if stale_ai_workspace_processes > 0 {
-        hardening::log_event(
+    // GitHub CLI authentication is global RepoTunnel state, not a Commands-page
+    // feature. Prewarm it at application startup using the existing persistent
+    // human gh profile. This is read-only: it never logs out, refreshes, replaces,
+    // or copies the user's credential.
+    if let Err(error) = std::thread::Builder::new()
+        .name("repotunnel-github-status".to_string())
+        .spawn(|| {
+            let _ = github::status();
+        })
+    {
+        eprintln!("RepoTunnel GitHub status prewarm warning: {error}");
+    }
+
+    let state = app.state::<AppState>();
+    match state.ai_workspace.initialize(app) {
+        Ok(true) => hardening::log_event(
             app,
             "INFO",
-            "ai_workspace.cleanup",
-            &format!(
-                "Stopped {stale_ai_workspace_processes} stale RepoTunnel AI Workspace processes."
-            ),
-        );
+            "ai_workspace.recover",
+            "Reattached the durable RepoTunnel AI Workspace session.",
+        ),
+        Ok(false) => {}
+        Err(error) => hardening::log_event(app, "WARN", "ai_workspace.recover", &error),
     }
     if let Err(error) = terminal::initialize(app) {
         hardening::log_event(app, "WARN", "terminal.initialize", &error);
+    }
+    if let Err(error) = chatgpt_bridge::initialize(app) {
+        hardening::log_event(app, "WARN", "chatgpt_bridge.initialize", &error);
     }
     if let Err(error) = monitoring::initialize(app) {
         hardening::log_event(app, "WARN", "monitoring.initialize", &error);
@@ -147,6 +188,15 @@ pub fn run() {
                 commands::update_project_memory,
                 commands::inspect_project,
                 commands::get_workflow_readiness,
+                commands::get_environment_diagnostics,
+                commands::list_tool_capabilities,
+                commands::get_system_resource_snapshot,
+                commands::create_temp_workspace,
+                commands::list_temp_workspaces,
+                commands::inspect_temp_workspace,
+                commands::set_temp_workspace_preserved,
+                commands::cleanup_temp_workspace,
+                commands::temp_workspace_file_action,
                 commands::create_file,
                 commands::write_file,
                 commands::patch_file,
@@ -179,6 +229,7 @@ pub fn run() {
                 commands::start_local_managed_process,
                 commands::list_managed_processes,
                 commands::read_managed_process_output,
+                commands::wait_managed_process,
                 commands::approve_managed_process,
                 commands::reject_managed_process,
                 commands::stop_managed_process,
@@ -193,6 +244,8 @@ pub fn run() {
                 commands::list_desktop_control_applications,
                 commands::get_desktop_control_enabled,
                 commands::set_desktop_control_enabled,
+                commands::get_gmail_access_enabled,
+                commands::set_gmail_access_enabled,
                 commands::get_ai_workspace_status,
                 commands::start_ai_workspace,
                 commands::stop_ai_workspace,
@@ -218,6 +271,10 @@ pub fn run() {
                 commands::browser_type,
                 commands::browser_scroll,
                 commands::browser_reload,
+                commands::browser_configure_downloads,
+                commands::list_browser_downloads,
+                commands::cancel_browser_download,
+                commands::browser_upload_file,
                 commands::browser_inspect_page,
                 commands::browser_pick_element,
                 commands::get_browser_visual_selection,
@@ -226,6 +283,9 @@ pub fn run() {
                 commands::list_browser_history,
                 commands::approve_browser_action,
                 commands::reject_browser_action,
+                commands::inspect_media_file,
+                commands::extract_media_frame,
+                commands::validate_media_decode,
                 commands::get_video_tools_status,
                 commands::install_video_tools,
                 commands::start_video_analysis,
@@ -238,17 +298,41 @@ pub fn run() {
                 commands::list_video_projects,
                 commands::import_video_project_folder,
                 commands::set_video_project_pinned,
+                commands::set_video_project_resource_policy,
+                commands::upsert_video_project_scene,
+                commands::get_video_project_scene,
+                commands::list_video_project_scenes,
                 commands::list_video_project_files,
                 commands::read_video_project_text_file,
                 commands::delete_video_project,
                 commands::get_video_project,
+                commands::get_video_story_capabilities,
+                commands::compile_video_story_plan,
+                commands::get_video_story_plan,
+                commands::get_video_story_animatic_plan,
+                commands::render_video_story_animatic,
+                commands::get_video_story_qa,
+                commands::get_video_story_render_queue,
+                commands::record_video_story_shot_render,
+                commands::start_video_story_shot_render,
+                commands::get_video_story_shot_render,
+                commands::cancel_video_story_shot_render,
                 commands::update_video_project_status,
                 commands::write_video_project_document,
                 commands::read_video_project_document,
                 commands::start_video_project_recording,
                 commands::get_video_project_recording,
                 commands::stop_video_project_recording,
+                commands::validate_video_project_scene,
                 commands::render_video_project_scene,
+                commands::render_video_project_diagram,
+                commands::start_video_project_render,
+                commands::get_video_project_render,
+                commands::list_video_project_renders,
+                commands::cancel_video_project_render,
+                commands::get_video_project_pipeline_status,
+                commands::clean_video_project,
+                commands::qa_video_project,
                 commands::render_video_project_timeline,
                 commands::prepare_video_project_preview,
                 commands::prepare_video_project_file_preview,
@@ -265,6 +349,7 @@ pub fn run() {
                 commands::list_monitoring_file_events,
                 commands::get_git_status,
                 commands::get_git_diff,
+                commands::get_git_diff_check,
                 commands::get_git_log,
                 commands::request_git_stage,
                 commands::request_git_commit,
@@ -291,6 +376,10 @@ pub fn run() {
                 commands::configure_public_tunnel,
                 commands::restart_public_tunnel,
                 commands::provision_direct_https_certificate,
+                https_setup::get_https_setup_readiness,
+                https_setup::install_https_setup_wireguard_config,
+                https_setup::open_https_setup_resource,
+                https_setup::verify_https_setup_hostname,
                 commands::clear_public_tunnel,
                 commands::revoke_mcp_access,
                 commands::get_chat_connection_status,
@@ -346,13 +435,15 @@ pub fn run() {
         .run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 monitoring::stop_all_activity();
-                terminal::stop_all_activity(app_handle);
+                terminal::stop_transient_activity_for_shutdown();
                 browser::stop_all_activity();
                 video::stop_all_activity();
                 video_production::stop_all_activity();
                 video_preview::clear_all(app_handle);
                 model_hub::stop_owned_local_runtimes();
+                chatgpt_bridge::shutdown();
                 let state = app_handle.state::<AppState>();
+                state.ai_workspace.shutdown(app_handle);
                 let _ = state.stop_gateway();
                 hardening::shutdown(app_handle);
             }

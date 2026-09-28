@@ -58,6 +58,7 @@ const kindLabels: Record<BrowserActionKind, string> = {
   navigate: "Navigate",
   click: "Click",
   type: "Type",
+  sequence: "Semantic sequence",
   scroll: "Scroll",
   reload: "Reload",
 };

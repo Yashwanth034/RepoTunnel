@@ -10,17 +10,23 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::{
-    access::AccessOperation, models::Workspace, video_narration_managed, video_production,
+    access::AccessOperation, models::Workspace, video_director, video_narration_managed,
+    video_production,
 };
 
 const MAX_NARRATION_CHARS: usize = 120_000;
 const MAX_SUBTITLE_CUES: usize = 4_000;
+const MAX_CAPTION_WORDS: usize = 8;
+const MIN_CAPTION_WORDS: usize = 4;
+const MAX_CAPTION_CHARS: usize = 42;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NarrationProviderStatus {
     pub(crate) id: String,
     pub(crate) available: bool,
+    pub(crate) ready: bool,
+    pub(crate) requires_download: bool,
     pub(crate) quality: String,
     pub(crate) languages: String,
     pub(crate) message: String,
@@ -51,6 +57,11 @@ pub(crate) struct NarrationRequest {
     pub(crate) text: String,
     pub(crate) language: String,
     #[serde(default)]
+    pub(crate) scene_id: Option<String>,
+    /// Story-mode character whose persisted voice cast must be used for this dialogue.
+    #[serde(default)]
+    pub(crate) character_id: Option<String>,
+    #[serde(default)]
     pub(crate) provider: Option<String>,
     #[serde(default)]
     pub(crate) voice: Option<String>,
@@ -58,6 +69,8 @@ pub(crate) struct NarrationRequest {
     pub(crate) voice_model_path: Option<String>,
     #[serde(default)]
     pub(crate) rate: Option<f64>,
+    #[serde(default)]
+    pub(crate) allow_managed_download: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,6 +79,8 @@ pub(crate) struct NarrationAsset {
     pub(crate) project_id: String,
     pub(crate) provider: String,
     pub(crate) language: String,
+    #[serde(default)]
+    pub(crate) character_id: Option<String>,
     pub(crate) voice: Option<String>,
     pub(crate) audio_path: String,
     pub(crate) duration_seconds: f64,
@@ -113,13 +128,15 @@ pub(crate) fn provider_status(app: &AppHandle) -> Vec<NarrationProviderStatus> {
         NarrationProviderStatus {
             id: "supertonic-3".to_string(),
             available: managed_supported,
+            ready: managed_ready,
+            requires_download: managed_supported && !managed_ready,
             quality: "neural".to_string(),
             languages: "31 local languages: en, ko, ja, ar, bg, cs, da, de, el, es, et, fi, fr, hi, hr, hu, id, it, lt, lv, nl, pl, pt, ro, ru, sk, sl, sv, tr, uk, vi".to_string(),
             message: if managed_ready {
                 "RepoTunnel-managed Supertonic 3 is ready for private offline narration."
                     .to_string()
             } else if managed_supported {
-                "High-quality RepoTunnel-managed neural narration. The verified runtime/model are downloaded privately on first use; no admin install or PATH change is required."
+                "Managed neural narration is supported but not installed. A first-time runtime/model download now requires explicit allowManagedDownload=true."
                     .to_string()
             } else {
                 "Managed Supertonic 3 is not packaged for this OS/architecture.".to_string()
@@ -128,6 +145,8 @@ pub(crate) fn provider_status(app: &AppHandle) -> Vec<NarrationProviderStatus> {
         NarrationProviderStatus {
             id: "piper".to_string(),
             available: find_on_path("piper").is_some() || python_piper_available(),
+            ready: find_on_path("piper").is_some() || python_piper_available(),
+            requires_download: false,
             quality: "neural".to_string(),
             languages: "project voice-model dependent; multilingual catalog".to_string(),
             message: "Optional project-supplied Piper voice/model fallback.".to_string(),
@@ -135,6 +154,8 @@ pub(crate) fn provider_status(app: &AppHandle) -> Vec<NarrationProviderStatus> {
         NarrationProviderStatus {
             id: "espeak-ng".to_string(),
             available: find_on_path("espeak-ng").is_some(),
+            ready: find_on_path("espeak-ng").is_some(),
+            requires_download: false,
             quality: "fallback".to_string(),
             languages: "broad multilingual fallback".to_string(),
             message: "Broad-language offline fallback when installed. RepoTunnel does not silently choose it over a supported neural voice."
@@ -186,18 +207,80 @@ fn estimated_duration(text: &str) -> f64 {
     (words / 2.45).clamp(0.7, 60.0 * 60.0)
 }
 
+fn caption_chunks(text: &str) -> Vec<String> {
+    let mut output = Vec::new();
+    for sentence in split_sentences(text) {
+        let mut sentence_chunks = Vec::<String>::new();
+        let mut current = Vec::<&str>::new();
+        let mut current_chars = 0usize;
+
+        for word in sentence.split_whitespace() {
+            let word_chars = word.chars().count();
+            let additional = word_chars + usize::from(!current.is_empty());
+            let over_words = current.len() >= MAX_CAPTION_WORDS;
+            let over_chars = !current.is_empty() && current_chars + additional > MAX_CAPTION_CHARS;
+            if over_words || over_chars {
+                sentence_chunks.push(current.join(" "));
+                current.clear();
+                current_chars = 0;
+            }
+
+            current_chars += word_chars + usize::from(!current.is_empty());
+            current.push(word);
+
+            let punctuation_pause = word
+                .chars()
+                .last()
+                .is_some_and(|ch| matches!(ch, ',' | ';' | ':' | '—'));
+            if current.len() >= MIN_CAPTION_WORDS && punctuation_pause {
+                sentence_chunks.push(current.join(" "));
+                current.clear();
+                current_chars = 0;
+            }
+        }
+
+        if !current.is_empty() {
+            sentence_chunks.push(current.join(" "));
+        }
+
+        if sentence_chunks.len() >= 2 {
+            let last_words = sentence_chunks
+                .last()
+                .map(|value| value.split_whitespace().count())
+                .unwrap_or(0);
+            if last_words < MIN_CAPTION_WORDS {
+                let last = sentence_chunks.pop().unwrap_or_default();
+                if let Some(previous) = sentence_chunks.last_mut() {
+                    let combined_words =
+                        previous.split_whitespace().count() + last.split_whitespace().count();
+                    let combined_chars = previous.chars().count() + 1 + last.chars().count();
+                    if combined_words <= MAX_CAPTION_WORDS && combined_chars <= MAX_CAPTION_CHARS {
+                        previous.push(' ');
+                        previous.push_str(&last);
+                    } else {
+                        sentence_chunks.push(last);
+                    }
+                }
+            }
+        }
+
+        output.extend(sentence_chunks);
+    }
+    output
+}
+
 fn cues_from_text(text: &str, duration_seconds: Option<f64>) -> Result<Vec<SubtitleCue>, String> {
-    let sentences = split_sentences(text);
-    if sentences.is_empty() {
+    let chunks = caption_chunks(text);
+    if chunks.is_empty() {
         return Err("Narration text does not contain any spoken content.".to_string());
     }
-    if sentences.len() > MAX_SUBTITLE_CUES {
+    if chunks.len() > MAX_SUBTITLE_CUES {
         return Err("Narration creates too many subtitle cues.".to_string());
     }
 
-    let weights = sentences
+    let weights = chunks
         .iter()
-        .map(|sentence| sentence.split_whitespace().count().max(1) as f64)
+        .map(|chunk| chunk.split_whitespace().count().max(1) as f64)
         .collect::<Vec<_>>();
     let total_weight = weights.iter().sum::<f64>().max(1.0);
     let duration = duration_seconds
@@ -205,8 +288,8 @@ fn cues_from_text(text: &str, duration_seconds: Option<f64>) -> Result<Vec<Subti
         .unwrap_or_else(|| estimated_duration(text));
 
     let mut cursor = 0.0;
-    let mut cues = Vec::with_capacity(sentences.len());
-    for (index, sentence) in sentences.into_iter().enumerate() {
+    let mut cues = Vec::with_capacity(chunks.len());
+    for (index, chunk) in chunks.into_iter().enumerate() {
         let mut span = duration * (weights[index] / total_weight);
         span = span.max(0.55);
         let end = if index + 1 == weights.len() {
@@ -217,7 +300,7 @@ fn cues_from_text(text: &str, duration_seconds: Option<f64>) -> Result<Vec<Subti
         cues.push(SubtitleCue {
             start_seconds: cursor,
             end_seconds: end.max(cursor + 0.25),
-            text: sentence,
+            text: chunk,
         });
         cursor = end;
     }
@@ -466,11 +549,172 @@ fn espeak_command(request: &NarrationRequest, output: &Path) -> Result<Command, 
     Ok(command)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn select_provider(
+    requested: &str,
+    language: &str,
+    managed_language_supported: bool,
+    managed_platform_supported: bool,
+    managed_ready: bool,
+    allow_managed_download: bool,
+    piper_ready: bool,
+    has_piper_model: bool,
+) -> Result<String, String> {
+    match requested {
+        "auto" if managed_language_supported && managed_platform_supported && managed_ready => {
+            Ok("supertonic-3".to_string())
+        }
+        "auto" if has_piper_model && piper_ready => Ok("piper".to_string()),
+        "auto"
+            if managed_language_supported
+                && managed_platform_supported
+                && allow_managed_download =>
+        {
+            Ok("supertonic-3".to_string())
+        }
+        "auto" if managed_language_supported && managed_platform_supported => Err(
+            "Managed neural narration is available but not installed. RepoTunnel will not download a narration runtime/model without explicit opt-in. Set allowManagedDownload=true for this request, choose an already configured provider, or import narration audio."
+                .to_string(),
+        ),
+        "auto" => Err(format!(
+            "No high-quality local neural narrator is configured for {language}. Supply a compatible project Piper model, opt in to a supported managed narrator when available, or import narration audio."
+        )),
+        "supertonic-3" => {
+            if !managed_language_supported {
+                return Err(format!(
+                    "Supertonic 3 does not support {language}. Use another configured provider for this language."
+                ));
+            }
+            if !managed_platform_supported {
+                return Err(
+                    "RepoTunnel-managed Supertonic 3 is not packaged for this OS/architecture."
+                        .to_string(),
+                );
+            }
+            if !managed_ready && !allow_managed_download {
+                return Err(
+                    "Supertonic 3 is not installed. RepoTunnel will not download its runtime/model without explicit opt-in. Retry with allowManagedDownload=true if the user wants the managed download."
+                        .to_string(),
+                );
+            }
+            Ok("supertonic-3".to_string())
+        }
+        "piper" | "espeak-ng" => Ok(requested.to_string()),
+        _ => Err(
+            "Narration provider must be auto, supertonic-3, piper, or espeak-ng.".to_string(),
+        ),
+    }
+}
+
+fn apply_story_voice_cast(
+    workspace: &Workspace,
+    project_id: &str,
+    request: &mut NarrationRequest,
+) -> Result<Option<String>, String> {
+    let Some(character_id) = request
+        .character_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let cast = video_director::resolve_voice_cast(workspace, project_id, character_id)?
+        .ok_or_else(|| {
+            format!(
+                "Story character '{character_id}' has no persisted voice-cast assignment. Compile/update the story plan before synthesizing dialogue."
+            )
+        })?;
+
+    if !request
+        .language
+        .trim()
+        .eq_ignore_ascii_case(cast.language.trim())
+    {
+        return Err(format!(
+            "Story character '{}' is cast with language '{}' but this narration requested '{}'. Keep one persistent character voice/language assignment.",
+            cast.character_id, cast.language, request.language
+        ));
+    }
+
+    if let Some(provider) = request
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))
+    {
+        if !provider.eq_ignore_ascii_case(&cast.provider) {
+            return Err(format!(
+                "Story character '{}' is cast with provider '{}' but narration requested '{}'. Character voice casting cannot change per line.",
+                cast.character_id, cast.provider, provider
+            ));
+        }
+    }
+
+    if let Some(voice) = request
+        .voice
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if voice != cast.voice {
+            return Err(format!(
+                "Story character '{}' is cast with voice '{}' but narration requested '{}'. Character voice casting cannot change per line.",
+                cast.character_id, cast.voice, voice
+            ));
+        }
+    }
+
+    match (
+        request
+            .voice_model_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        cast.voice_model_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (Some(requested), Some(cast_path)) if requested != cast_path => {
+            return Err(format!(
+                "Story character '{}' uses a different persisted voice model. Character voice models cannot change per line.",
+                cast.character_id
+            ));
+        }
+        (Some(_), None) => {
+            return Err(format!(
+                "Story character '{}' has no voice model in its persisted cast, so a one-off voice model cannot be supplied.",
+                cast.character_id
+            ));
+        }
+        _ => {}
+    }
+
+    let cast_rate = cast.rate.unwrap_or(1.0);
+    if let Some(requested_rate) = request.rate {
+        if (requested_rate - cast_rate).abs() > 0.000_001 {
+            return Err(format!(
+                "Story character '{}' is cast at rate {:.3} but narration requested {:.3}. Character delivery rate cannot change per line.",
+                cast.character_id, cast_rate, requested_rate
+            ));
+        }
+    }
+
+    request.provider = Some(cast.provider.clone());
+    request.voice = Some(cast.voice.clone());
+    request.voice_model_path = cast.voice_model_path.clone();
+    request.rate = Some(cast_rate);
+    request.character_id = Some(cast.character_id.clone());
+    Ok(Some(cast.character_id))
+}
+
 pub(crate) fn synthesize(
     app: &AppHandle,
     workspace: &Workspace,
     project_id: &str,
-    request: NarrationRequest,
+    mut request: NarrationRequest,
 ) -> Result<NarrationAsset, String> {
     if request.text.trim().is_empty() {
         return Err("Narration text cannot be empty.".to_string());
@@ -480,6 +724,7 @@ pub(crate) fn synthesize(
     }
     let language = validate_language(&request.language)?;
     let project = video_production::get_project(workspace, project_id)?;
+    let character_id = apply_story_voice_cast(workspace, project_id, &mut request)?;
     let provider = request
         .provider
         .as_deref()
@@ -488,42 +733,25 @@ pub(crate) fn synthesize(
         .to_ascii_lowercase();
 
     let managed_language_supported = video_narration_managed::language_code(&language).is_some();
-    let selected = match provider.as_str() {
-        "auto" if managed_language_supported && video_narration_managed::platform_supported() => {
-            "supertonic-3"
-        }
-        "auto"
-            if request.voice_model_path.is_some()
-                && (find_on_path("piper").is_some() || python_piper_available()) =>
-        {
-            "piper"
-        }
-        "auto" => {
-            return Err(format!(
-                "No high-quality local neural narrator is configured for {language}. RepoTunnel-managed Supertonic 3 currently covers 31 language families but not this one. Supply a compatible project Piper model, explicitly request espeak-ng when installed, or import narration audio."
-            ));
-        }
-        "supertonic-3" => {
-            if !managed_language_supported {
-                return Err(format!(
-                    "Supertonic 3 does not support {language}. Use another configured provider for this language."
-                ));
-            }
-            if !video_narration_managed::platform_supported() {
-                return Err(
-                    "RepoTunnel-managed Supertonic 3 is not packaged for this OS/architecture."
-                        .to_string(),
-                );
-            }
-            "supertonic-3"
-        }
-        "piper" | "espeak-ng" => provider.as_str(),
-        _ => {
-            return Err(
-                "Narration provider must be auto, supertonic-3, piper, or espeak-ng.".to_string(),
-            )
-        }
-    };
+    let managed_platform_supported = video_narration_managed::platform_supported();
+    let managed_ready = managed_platform_supported && video_narration_managed::is_ready(app);
+    let piper_ready = find_on_path("piper").is_some() || python_piper_available();
+    if request.allow_managed_download && !project.resource_policy.allow_local_model_downloads {
+        return Err(
+            "This Video Project blocks local model/runtime downloads. Enable allowLocalModelDownloads in the project resource policy before explicitly opting in to a managed narrator download."
+                .to_string(),
+        );
+    }
+    let selected = select_provider(
+        &provider,
+        &language,
+        managed_language_supported,
+        managed_platform_supported,
+        managed_ready,
+        request.allow_managed_download && project.resource_policy.allow_local_model_downloads,
+        piper_ready,
+        request.voice_model_path.is_some(),
+    )?;
 
     if selected == "piper" && request.voice_model_path.is_none() {
         return Err(
@@ -545,7 +773,7 @@ pub(crate) fn synthesize(
         false,
     )?;
 
-    let mut command = match selected {
+    let mut command = match selected.as_str() {
         "supertonic-3" => {
             let managed = video_narration_managed::ensure(app)?;
             video_narration_managed::command(
@@ -618,6 +846,17 @@ pub(crate) fn synthesize(
         narration_asset,
         Some(&format!("{language} narration")),
     )?;
+    if let Some(scene_id) = request.scene_id.as_deref() {
+        let _ = video_production::record_scene_narration(
+            workspace,
+            project_id,
+            scene_id,
+            &request.text,
+            duration,
+            &audio_relative,
+            &subtitles.srt_path,
+        );
+    }
     video_production::update_project_status(
         workspace,
         project_id,
@@ -629,6 +868,7 @@ pub(crate) fn synthesize(
         project_id: project.id,
         provider: selected.to_string(),
         language,
+        character_id,
         voice: request.voice,
         audio_path: audio_relative,
         duration_seconds: duration,
@@ -639,7 +879,8 @@ pub(crate) fn synthesize(
 #[cfg(test)]
 mod tests {
     use super::{
-        cues_from_text, srt_time, subtitle_text_srt, subtitle_text_vtt, validate_language,
+        caption_chunks, cues_from_text, select_provider, srt_time, subtitle_text_srt,
+        subtitle_text_vtt, validate_language, MAX_CAPTION_CHARS, MAX_CAPTION_WORDS,
     };
 
     #[test]
@@ -658,6 +899,34 @@ mod tests {
         assert_eq!(cues.len(), 2);
         assert_eq!(cues.first().unwrap().start_seconds, 0.0);
         assert!((cues.last().unwrap().end_seconds - 8.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn subtitle_chunks_are_short_and_readable() {
+        let chunks = caption_chunks(
+            "Masked diffusion predicts several candidate tokens at once, then commits only the most confident subset before repeating the refinement cycle.",
+        );
+        assert!(chunks.len() >= 3);
+        for chunk in chunks {
+            assert!(chunk.split_whitespace().count() <= MAX_CAPTION_WORDS);
+            assert!(chunk.chars().count() <= MAX_CAPTION_CHARS);
+        }
+    }
+
+    #[test]
+    fn managed_narration_download_requires_explicit_opt_in() {
+        let blocked =
+            select_provider("auto", "en-US", true, true, false, false, false, false).unwrap_err();
+        assert!(blocked.contains("explicit opt-in"));
+
+        assert_eq!(
+            select_provider("auto", "en-US", true, true, false, true, false, false,).unwrap(),
+            "supertonic-3"
+        );
+        assert_eq!(
+            select_provider("auto", "en-US", true, true, false, false, true, true,).unwrap(),
+            "piper"
+        );
     }
 
     #[test]

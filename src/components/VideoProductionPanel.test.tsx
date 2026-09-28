@@ -14,6 +14,14 @@ const backend = vi.hoisted(() => ({
   prepareVideoProjectFilePreview: vi.fn(),
   prepareVideoProjectPreview: vi.fn(),
   readVideoProjectTextFile: vi.fn(),
+  renderVideoStoryAnimatic: vi.fn(),
+  startVideoProjectRender: vi.fn(),
+  getVideoProjectRender: vi.fn(),
+  cancelVideoProjectRender: vi.fn(),
+  getVideoProjectPipelineStatus: vi.fn(),
+  cleanVideoProject: vi.fn(),
+  qaVideoProject: vi.fn(),
+  setVideoProjectResourcePolicy: vi.fn(),
   renderVideoProjectTimeline: vi.fn(),
   setVideoProjectPinned: vi.fn(),
 }));
@@ -143,6 +151,44 @@ beforeEach(() => {
   });
   backend.setVideoProjectPinned.mockResolvedValue({ ...project, pinned: true });
   backend.deleteVideoProject.mockResolvedValue(undefined);
+  backend.renderVideoStoryAnimatic.mockResolvedValue({
+    projectId: project.id,
+    outputPath: "video-projects/demo-project/story/animatic/preview-test.mp4",
+    shotCount: 3,
+    durationSeconds: 12,
+    width: 854,
+    height: 480,
+    fps: 12,
+  });
+  backend.getVideoProjectPipelineStatus.mockResolvedValue({
+    projectId: project.id,
+    overallProgress: 0,
+    currentStage: "script",
+    stages: [],
+  });
+  backend.startVideoProjectRender.mockResolvedValue({
+    id: "render-job-1",
+    projectId: project.id,
+    requestHash: "hash",
+    status: "completed",
+    phase: "ready",
+    progress: 100,
+    message: "Draft render completed.",
+    result: {
+      projectId: project.id,
+      outputPath: "video-projects/demo-project/renders/drafts/draft.mp4",
+      subtitlePath: null,
+      captionDelivery: "none",
+      clipCount: 2,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      finalRender: false,
+    },
+    error: null,
+    createdAt: 1,
+    updatedAt: 2,
+  });
   backend.renderVideoProjectTimeline.mockResolvedValue({});
   Object.defineProperty(HTMLMediaElement.prototype, "play", { configurable: true, value: vi.fn().mockResolvedValue(undefined) });
   Object.defineProperty(HTMLMediaElement.prototype, "pause", { configurable: true, value: vi.fn() });
@@ -204,6 +250,12 @@ describe("VideoProductionPanel polish", () => {
     expect(container.querySelector(".video-production-main .video-project-sidebar-tree")).toBeNull();
     expect(container.querySelector(".video-production-document-tabs")).toBeNull();
     expect(container.querySelector(".video-production-summary")).toBeNull();
+    expect(container.querySelector(".video-production-pipeline")).toBeNull();
+    expect(container.querySelector(".video-resource-policy")).toBeNull();
+    expect(container.querySelector(".video-qa-button")).toBeNull();
+    expect(text).not.toContain("Production policy");
+    expect(text).not.toContain("Project cleanup");
+    expect(text).not.toContain("Re-run final QA");
     expect(text).not.toContain("Checkpoints");
     expect(text).not.toContain("Final export");
     expect(container.querySelector(".video-production-list")).not.toBeNull();
@@ -224,12 +276,50 @@ describe("VideoProductionPanel polish", () => {
     expect(container.querySelector(".video-project-sidebar-tree")).not.toBeNull();
   });
 
-  it("uses neutral creation ratios with no platform-specific wording", async () => {
+  it("keeps tutorial as the safe default while exposing separate story-animation projects", async () => {
     const container = await renderPanel();
+    const mode = container.querySelector('select[aria-label="Video production mode"]') as HTMLSelectElement;
     const ratio = container.querySelector('select[aria-label="Video aspect ratio"]') as HTMLSelectElement;
+
+    expect(mode.value).toBe("tutorial");
+    expect(Array.from(mode.options).map((option) => option.textContent)).toEqual([
+      "Tutorial",
+      "Story animation",
+    ]);
     expect(Array.from(ratio.options).map((option) => option.textContent)).toEqual(["16:9", "9:16", "1:1", "4:5"]);
     expect(container.textContent).not.toContain("YouTube");
     expect(container.textContent).not.toContain("Shorts");
+  });
+
+  it("shows and runs the real animatic control only for story projects", async () => {
+    const tutorialContainer = await renderPanel();
+    expect(
+      Array.from(tutorialContainer.querySelectorAll("button")).some(
+        (button) => button.textContent?.trim() === "Render animatic",
+      ),
+    ).toBe(false);
+
+    await act(async () => root?.unmount());
+    root = null;
+    host?.remove();
+    host = null;
+
+    backend.listVideoProjects.mockResolvedValue([{ ...project, productionMode: "story" }]);
+    const storyContainer = await renderPanel();
+    const animatic = Array.from(storyContainer.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === "Render animatic") as HTMLButtonElement;
+    expect(animatic).not.toBeNull();
+
+    await act(async () => animatic.click());
+    await settle();
+
+    expect(backend.renderVideoStoryAnimatic).toHaveBeenCalledWith(workspace.id, project.id);
+    expect(backend.prepareVideoProjectFilePreview).toHaveBeenCalledWith(
+      workspace.id,
+      project.id,
+      "video-projects/demo-project/story/animatic/preview-test.mp4",
+    );
+    expect(storyContainer.textContent).toContain("preview-test.mp4");
   });
 
   it("uses the RepoTunnel in-app delete confirmation and cancels without touching the project", async () => {
@@ -305,16 +395,18 @@ describe("VideoProductionPanel polish", () => {
     const render = Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent?.trim() === "Render draft") as HTMLButtonElement;
     await act(async () => render.click());
-    expect(backend.renderVideoProjectTimeline).toHaveBeenCalledWith(
+    expect(backend.startVideoProjectRender).toHaveBeenCalledWith(
       workspace.id,
       project.id,
       expect.objectContaining({
         preserveSourceAudio: false,
         narrationPath: null,
+        captionDelivery: "none",
+        audioMixPreset: "simple",
         finalRender: false,
       }),
     );
-    const request = backend.renderVideoProjectTimeline.mock.calls[0][2];
+    const request = backend.startVideoProjectRender.mock.calls[0][2];
     expect(request.clips).toHaveLength(2);
     expect(request.clips[0].endSeconds).toBe(5);
     expect(request.clips[1].startSeconds).toBe(5);

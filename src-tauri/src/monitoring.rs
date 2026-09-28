@@ -740,7 +740,7 @@ fn tail_text(value: &str, max_bytes: usize) -> String {
 }
 
 fn browser_snapshot(app: &AppHandle, workspace: &Workspace) -> MonitoringBrowserSnapshot {
-    let status = browser::status(app, workspace);
+    let status = browser::workspace_status(app, workspace);
     if !status.running {
         return MonitoringBrowserSnapshot {
             status,
@@ -749,16 +749,11 @@ fn browser_snapshot(app: &AppHandle, workspace: &Workspace) -> MonitoringBrowser
             network_failures: Vec::new(),
         };
     }
-    let tabs = browser::list_tabs(app, workspace).unwrap_or_default();
+    let tabs = browser::workspace_tabs(app, workspace);
     let BrowserDiagnostics {
         console_entries,
         network_failures,
-    } = browser::diagnostics(app, workspace, None, MAX_BROWSER_DIAGNOSTICS).unwrap_or(
-        BrowserDiagnostics {
-            console_entries: Vec::new(),
-            network_failures: Vec::new(),
-        },
-    );
+    } = browser::workspace_diagnostics(app, workspace, MAX_BROWSER_DIAGNOSTICS);
     MonitoringBrowserSnapshot {
         status,
         tabs,

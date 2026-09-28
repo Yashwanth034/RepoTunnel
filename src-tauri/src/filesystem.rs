@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     access::{resolve_workspace_path, AccessOperation},
-    models::{DirectoryEntry, FileContent, FileInfo, SearchMatch, Workspace},
+    models::{DirectoryEntry, FileContent, FileInfo, SearchFilesResult, SearchMatch, Workspace},
     project_index,
 };
 
@@ -313,11 +313,11 @@ fn search_file(
     Ok(())
 }
 
-pub(crate) fn search_files(
+pub(crate) fn search_files_detailed(
     workspace: &Workspace,
     relative_path: &str,
     query: &str,
-) -> Result<Vec<SearchMatch>, String> {
+) -> Result<SearchFilesResult, String> {
     let query = query.trim();
     if query.is_empty() {
         return Err("Search query cannot be empty.".to_string());
@@ -331,23 +331,46 @@ pub(crate) fn search_files(
         .map_err(|error| format!("Could not resolve the approved workspace: {error}"))?;
     let query_lower = query.to_lowercase();
     let mut matches = Vec::new();
-    let files = project_index::smart_text_files(workspace, relative_path, MAX_SEARCH_FILES + 1)?;
+    let mut scan =
+        project_index::smart_text_files_detailed(workspace, relative_path, MAX_SEARCH_FILES + 1)?;
+    let mut truncated = scan.truncated || scan.files.len() > MAX_SEARCH_FILES;
+    scan.files.truncate(MAX_SEARCH_FILES);
+    let mut searched_file_count = 0usize;
+    let mut skipped_io_count = scan.skipped_io_count;
 
-    if files.len() > MAX_SEARCH_FILES {
-        return Err(format!(
-            "Search found more than {MAX_SEARCH_FILES} relevant text files. Narrow the search folder."
-        ));
-    }
-
-    for path in files {
+    for path in scan.files {
         let relative = workspace_relative_path(&root, &path);
-        search_file(&path, &relative, &query_lower, &mut matches)?;
+        match search_file(&path, &relative, &query_lower, &mut matches) {
+            Ok(()) => searched_file_count = searched_file_count.saturating_add(1),
+            Err(_) => {
+                skipped_io_count = skipped_io_count.saturating_add(1);
+                continue;
+            }
+        }
         if matches.len() >= MAX_SEARCH_RESULTS {
+            truncated = true;
             break;
         }
     }
 
-    Ok(matches)
+    let skipped_policy_count = scan.skipped_policy_count;
+    let skipped_entry_count = skipped_io_count.saturating_add(skipped_policy_count);
+    Ok(SearchFilesResult {
+        matches,
+        searched_file_count,
+        skipped_entry_count,
+        skipped_io_count,
+        skipped_policy_count,
+        truncated,
+    })
+}
+
+pub(crate) fn search_files(
+    workspace: &Workspace,
+    relative_path: &str,
+    query: &str,
+) -> Result<Vec<SearchMatch>, String> {
+    Ok(search_files_detailed(workspace, relative_path, query)?.matches)
 }
 
 pub(crate) fn create_file(
@@ -395,6 +418,33 @@ pub(crate) fn write_file(
     file_info(workspace, relative_path)
 }
 
+fn patch_mismatch_hint(content: &str, expected: &str) -> Option<String> {
+    let mut candidates = expected
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.len() >= 8)
+        .take(32)
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|line| std::cmp::Reverse(line.len()));
+    candidates.dedup();
+
+    for expected_line in candidates.into_iter().take(8) {
+        if let Some((index, current_line)) = content
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.trim() == expected_line)
+        {
+            let preview = current_line.trim().chars().take(160).collect::<String>();
+            return Some(format!(
+                " A line from the requested context still exists near line {}: {}. Re-read around that line and retry with exact current context.",
+                index + 1,
+                preview
+            ));
+        }
+    }
+    None
+}
+
 pub(crate) fn patch_file(
     workspace: &Workspace,
     relative_path: &str,
@@ -409,7 +459,12 @@ pub(crate) fn patch_file(
     let occurrences = current.content.matches(expected).count();
 
     match occurrences {
-        0 => return Err("The expected text was not found, so no patch was applied.".to_string()),
+        0 => {
+            let hint = patch_mismatch_hint(&current.content, expected).unwrap_or_default();
+            return Err(format!(
+                "The expected text was not found, so no patch was applied.{hint}"
+            ));
+        }
         1 => {}
         count => {
             return Err(format!(
@@ -572,7 +627,7 @@ mod tests {
 
     use super::{
         create_directory, create_file, delete_entry, list_directory, patch_file, read_file,
-        search_files, write_file,
+        search_files, search_files_detailed, write_file,
     };
     use crate::models::{CommandPolicy, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy};
 
@@ -635,6 +690,51 @@ mod tests {
 
         let matches = search_files(&workspace, "", "TOKEN=secret").unwrap();
         assert!(matches.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn detailed_search_returns_partial_results_and_skip_counts() {
+        let (root, workspace) = temp_workspace();
+        fs::write(root.join(".env"), "TOKEN=hidden\n").unwrap();
+        fs::write(
+            root.join("src/second.ts"),
+            "const greeting = 'hello again';\n",
+        )
+        .unwrap();
+
+        let result = search_files_detailed(&workspace, "", "hello").unwrap();
+        assert_eq!(result.matches.len(), 2);
+        assert!(result.searched_file_count >= 2);
+        assert!(result.skipped_policy_count >= 1);
+        assert_eq!(
+            result.skipped_entry_count,
+            result.skipped_io_count + result.skipped_policy_count
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_mismatch_reports_nearby_current_context() {
+        let (root, workspace) = temp_workspace();
+        fs::write(
+            root.join("src/app.ts"),
+            "fn main() {\n    let value = 2;\n    println!(\"{value}\");\n}\n",
+        )
+        .unwrap();
+
+        let error = patch_file(
+            &workspace,
+            "src/app.ts",
+            "let value = 2;\nprintln!(\"changed\");",
+            "unused",
+        )
+        .unwrap_err();
+        assert!(error.contains("near line 2"));
+        assert!(error.contains("let value = 2;"));
+        assert!(error.contains("retry with exact current context"));
+
         let _ = fs::remove_dir_all(root);
     }
 

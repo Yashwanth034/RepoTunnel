@@ -333,6 +333,20 @@ fn reconcile_process_event(event: &mut ActivityEvent, process: &ManagedProcessRe
     changed
 }
 
+pub(crate) fn latest_workspace_activity_at(
+    app: &AppHandle,
+    workspace_id: &str,
+) -> Result<u64, String> {
+    let _guard = activity_lock()
+        .lock()
+        .map_err(|_| "RepoTunnel activity history is temporarily unavailable.".to_string())?;
+    let groups = load(app)?
+        .into_iter()
+        .filter(|group| group.workspace_id == workspace_id)
+        .collect::<Vec<_>>();
+    Ok(continuity::latest_meaningful_activity_at(&groups))
+}
+
 pub(crate) fn timeline(
     app: &AppHandle,
     workspace_id: Option<&str>,
@@ -787,12 +801,72 @@ pub(crate) fn sync_terminal(app: &AppHandle, record: &TerminalCommandRecord) {
     );
 }
 
+pub(crate) fn sync_processes(app: &AppHandle, records: &[ManagedProcessRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    let Ok(_guard) = activity_lock().lock() else {
+        return;
+    };
+    let Ok(mut groups) = load(app) else {
+        return;
+    };
+
+    let by_id = records
+        .iter()
+        .map(|record| (record.id.as_str(), record))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut changed = false;
+    let mut affected_workspaces = std::collections::BTreeSet::new();
+
+    for group in &mut groups {
+        let mut group_changed = false;
+        for event in &mut group.events {
+            let Some(source_id) = event.source_id.as_deref() else {
+                continue;
+            };
+            let Some(record) = by_id.get(source_id) else {
+                continue;
+            };
+            if reconcile_process_event(event, record) {
+                group.updated_at = group.updated_at.max(record.updated_at);
+                group_changed = true;
+                changed = true;
+            }
+        }
+        if group_changed {
+            affected_workspaces.insert(group.workspace_id.clone());
+            refresh_version_links(app, group);
+        }
+    }
+
+    if !changed {
+        return;
+    }
+
+    if let Ok(settings) = storage::load_history_settings(app) {
+        if let Some(limit) = settings.version_history_limit {
+            for workspace_id in &affected_workspaces {
+                prune_workspace_groups(&mut groups, workspace_id, limit);
+            }
+        }
+    }
+    trim_global_groups(&mut groups);
+    let continuity_groups = groups
+        .iter()
+        .filter(|group| affected_workspaces.contains(&group.workspace_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if save(app, &groups).is_err() {
+        return;
+    }
+    drop(_guard);
+    continuity::capture_activity_groups(app, &continuity_groups);
+    let _ = app.emit("repotunnel://activity-updated", ());
+}
+
 pub(crate) fn sync_process(app: &AppHandle, record: &ManagedProcessRecord) {
-    let detail = record
-        .error
-        .clone()
-        .or_else(|| record.pid.map(|pid| format!("PID: {pid}")));
-    let _ = update_source(app, &record.id, process_status(record.status), detail);
+    sync_processes(app, std::slice::from_ref(record));
 }
 
 pub(crate) fn sync_launch(app: &AppHandle, record: &LaunchActionRecord) {

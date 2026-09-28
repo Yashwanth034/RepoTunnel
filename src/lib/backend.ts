@@ -65,6 +65,10 @@ import type {
   ProjectSnapshot,
   PublicTunnelProvider,
   PublicTunnelStatus,
+  HttpsSetupReadiness,
+  HttpsSetupInstallResult,
+  HttpsSetupHostnameVerification,
+  HttpsSetupResource,
   Workspace,
   WorkspaceHealth,
   WorkspaceAccessMode,
@@ -82,20 +86,39 @@ import type {
   VideoAnalysisJob,
   VideoAnalysisMode,
   VideoAnalysisResult,
+  VideoCleanupReport,
+  VideoCleanupRequest,
   VideoAssetLicenseInput,
   VideoAssetLicenseRecord,
   VideoAssetSource,
   VideoProductionDocument,
   VideoProductionProject,
+  VideoProductionResourcePolicy,
+  VideoProductionScene,
+  VideoProductionSceneInput,
+  StoryDirectorInput,
+  StoryDirectorPlan,
+  StoryAnimaticPlan,
+  StoryAnimaticRender,
+  StoryProductionCapabilities,
+  StoryRenderQueue,
+  StoryShotRenderInput,
+  StoryShotRenderJob,
+  NarrativeQaReport,
   VideoProjectFile,
+  VideoPipelineStatus,
+  VideoQaReport,
   NarrationAsset,
   NarrationProviderStatus,
   NarrationRequest,
   SubtitleAsset,
   VideoRecordingStatus,
   VideoPreviewSource,
+  VideoRenderJob,
   VideoRenderRequest,
   VideoRenderResult,
+  VideoDiagramSpec,
+  VideoSceneLayoutReport,
   VideoSceneRender,
   VideoSceneSpec,
   VideoToolsStatus,
@@ -455,6 +478,17 @@ export async function setDesktopControlEnabled(
   return invoke<boolean>("set_desktop_control_enabled", { workspaceId, enabled });
 }
 
+export async function getGmailAccessEnabled(workspaceId: string): Promise<boolean> {
+  return invoke<boolean>("get_gmail_access_enabled", { workspaceId });
+}
+
+export async function setGmailAccessEnabled(
+  workspaceId: string,
+  enabled: boolean,
+): Promise<boolean> {
+  return invoke<boolean>("set_gmail_access_enabled", { workspaceId, enabled });
+}
+
 export async function getAiWorkspaceStatus(workspaceId: string): Promise<AiWorkspaceStatus> {
   return invoke<AiWorkspaceStatus>("get_ai_workspace_status", { workspaceId });
 }
@@ -471,19 +505,28 @@ export async function startAiWorkspace(
   });
 }
 
-export async function stopAiWorkspace(workspaceId: string): Promise<AiWorkspaceStatus> {
-  return invoke<AiWorkspaceStatus>("stop_ai_workspace", { workspaceId });
+export async function stopAiWorkspace(
+  workspaceId: string,
+  appSessionId: string,
+): Promise<AiWorkspaceStatus> {
+  return invoke<AiWorkspaceStatus>("stop_ai_workspace", { workspaceId, appSessionId });
 }
 
 export async function getAiWorkspaceFrame(
   workspaceId: string,
+  appSessionId: string,
   maxWidth = 1440,
 ): Promise<AiWorkspaceFrame> {
-  return invoke<AiWorkspaceFrame>("get_ai_workspace_frame", { workspaceId, maxWidth });
+  return invoke<AiWorkspaceFrame>("get_ai_workspace_frame", {
+    workspaceId,
+    appSessionId,
+    maxWidth,
+  });
 }
 
 export async function aiWorkspaceAction(
   workspaceId: string,
+  appSessionId: string,
   action: "activate" | "click" | "key" | "type" | "scroll",
   options: {
     windowId?: string;
@@ -498,6 +541,7 @@ export async function aiWorkspaceAction(
 ): Promise<Record<string, unknown>> {
   return invoke<Record<string, unknown>>("ai_workspace_action", {
     workspaceId,
+    appSessionId,
     action,
     windowId: options.windowId ?? null,
     xRatio: options.xRatio ?? null,
@@ -861,6 +905,24 @@ export async function getPublicTunnelStatus(): Promise<PublicTunnelStatus> {
   return invoke<PublicTunnelStatus>("get_public_tunnel_status");
 }
 
+export async function getHttpsSetupReadiness(): Promise<HttpsSetupReadiness> {
+  return invoke<HttpsSetupReadiness>("get_https_setup_readiness");
+}
+
+export async function installHttpsSetupWireguardConfig(): Promise<HttpsSetupInstallResult> {
+  return invoke<HttpsSetupInstallResult>("install_https_setup_wireguard_config");
+}
+
+export async function openHttpsSetupResource(resource: HttpsSetupResource): Promise<void> {
+  return invoke<void>("open_https_setup_resource", { resource });
+}
+
+export async function verifyHttpsSetupHostname(
+  hostname: string,
+): Promise<HttpsSetupHostnameVerification> {
+  return invoke<HttpsSetupHostnameVerification>("verify_https_setup_hostname", { hostname });
+}
+
 export async function configurePublicTunnel(
   provider: PublicTunnelProvider,
   credential: string,
@@ -957,6 +1019,7 @@ export async function clearVideoCache(): Promise<VideoToolsStatus> {
 export async function createVideoProject(
   workspaceId: string,
   name: string,
+  productionMode: "tutorial" | "story" = "tutorial",
   aspectRatio: "16:9" | "9:16" | "1:1" | "4:5" = "16:9",
   width?: number,
   height?: number,
@@ -965,6 +1028,7 @@ export async function createVideoProject(
   return invoke<VideoProductionProject>("create_video_project", {
     workspaceId,
     name,
+    productionMode,
     aspectRatio,
     width: width ?? null,
     height: height ?? null,
@@ -994,6 +1058,52 @@ export async function setVideoProjectPinned(
   return invoke<VideoProductionProject>("set_video_project_pinned", { workspaceId, projectId, pinned });
 }
 
+export async function setVideoProjectResourcePolicy(
+  workspaceId: string,
+  projectId: string,
+  policy: VideoProductionResourcePolicy,
+): Promise<VideoProductionProject> {
+  return invoke<VideoProductionProject>("set_video_project_resource_policy", {
+    workspaceId,
+    projectId,
+    policy,
+  });
+}
+
+export async function upsertVideoProjectScene(
+  workspaceId: string,
+  projectId: string,
+  scene: VideoProductionSceneInput,
+): Promise<VideoProductionScene> {
+  return invoke<VideoProductionScene>("upsert_video_project_scene", {
+    workspaceId,
+    projectId,
+    scene,
+  });
+}
+
+export async function getVideoProjectScene(
+  workspaceId: string,
+  projectId: string,
+  sceneId: string,
+): Promise<VideoProductionScene> {
+  return invoke<VideoProductionScene>("get_video_project_scene", {
+    workspaceId,
+    projectId,
+    sceneId,
+  });
+}
+
+export async function listVideoProjectScenes(
+  workspaceId: string,
+  projectId: string,
+): Promise<VideoProductionScene[]> {
+  return invoke<VideoProductionScene[]>("list_video_project_scenes", {
+    workspaceId,
+    projectId,
+  });
+}
+
 export async function listVideoProjectFiles(
   workspaceId: string,
   projectId: string,
@@ -1021,6 +1131,110 @@ export async function getVideoProject(
   projectId: string,
 ): Promise<VideoProductionProject> {
   return invoke<VideoProductionProject>("get_video_project", { workspaceId, projectId });
+}
+
+export async function getVideoStoryCapabilities(): Promise<StoryProductionCapabilities> {
+  return invoke<StoryProductionCapabilities>("get_video_story_capabilities");
+}
+
+export async function compileVideoStoryPlan(
+  workspaceId: string,
+  projectId: string,
+  input: StoryDirectorInput,
+): Promise<StoryDirectorPlan> {
+  return invoke<StoryDirectorPlan>("compile_video_story_plan", {
+    workspaceId,
+    projectId,
+    input,
+  });
+}
+
+export async function getVideoStoryPlan(
+  workspaceId: string,
+  projectId: string,
+): Promise<StoryDirectorPlan> {
+  return invoke<StoryDirectorPlan>("get_video_story_plan", { workspaceId, projectId });
+}
+
+export async function getVideoStoryAnimaticPlan(
+  workspaceId: string,
+  projectId: string,
+): Promise<StoryAnimaticPlan> {
+  return invoke<StoryAnimaticPlan>("get_video_story_animatic_plan", { workspaceId, projectId });
+}
+
+export async function renderVideoStoryAnimatic(
+  workspaceId: string,
+  projectId: string,
+): Promise<StoryAnimaticRender> {
+  return invoke<StoryAnimaticRender>("render_video_story_animatic", {
+    workspaceId,
+    projectId,
+  });
+}
+
+export async function getVideoStoryQa(
+  workspaceId: string,
+  projectId: string,
+): Promise<NarrativeQaReport> {
+  return invoke<NarrativeQaReport>("get_video_story_qa", { workspaceId, projectId });
+}
+
+export async function getVideoStoryRenderQueue(
+  workspaceId: string,
+  projectId: string,
+): Promise<StoryRenderQueue> {
+  return invoke<StoryRenderQueue>("get_video_story_render_queue", { workspaceId, projectId });
+}
+
+export async function recordVideoStoryShotRender(
+  workspaceId: string,
+  projectId: string,
+  input: StoryShotRenderInput,
+): Promise<StoryRenderQueue> {
+  return invoke<StoryRenderQueue>("record_video_story_shot_render", {
+    workspaceId,
+    projectId,
+    input,
+  });
+}
+
+export async function startVideoStoryShotRender(
+  workspaceId: string,
+  projectId: string,
+  shotId: string,
+  force = false,
+): Promise<StoryShotRenderJob> {
+  return invoke<StoryShotRenderJob>("start_video_story_shot_render", {
+    workspaceId,
+    projectId,
+    shotId,
+    force,
+  });
+}
+
+export async function getVideoStoryShotRender(
+  workspaceId: string,
+  projectId: string,
+  jobId: string,
+): Promise<StoryShotRenderJob> {
+  return invoke<StoryShotRenderJob>("get_video_story_shot_render", {
+    workspaceId,
+    projectId,
+    jobId,
+  });
+}
+
+export async function cancelVideoStoryShotRender(
+  workspaceId: string,
+  projectId: string,
+  jobId: string,
+): Promise<StoryShotRenderJob> {
+  return invoke<StoryShotRenderJob>("cancel_video_story_shot_render", {
+    workspaceId,
+    projectId,
+    jobId,
+  });
 }
 
 export async function updateVideoProjectStatus(
@@ -1066,12 +1280,14 @@ export async function readVideoProjectDocument(
 export async function startVideoProjectRecording(
   workspaceId: string,
   projectId: string,
+  appSessionId: string,
   fps = 30,
   maxSeconds = 900,
 ): Promise<VideoRecordingStatus> {
   return invoke<VideoRecordingStatus>("start_video_project_recording", {
     workspaceId,
     projectId,
+    appSessionId,
     fps,
     maxSeconds,
   });
@@ -1097,6 +1313,18 @@ export async function stopVideoProjectRecording(
   });
 }
 
+export async function validateVideoProjectScene(
+  workspaceId: string,
+  projectId: string,
+  scene: VideoSceneSpec,
+): Promise<VideoSceneLayoutReport> {
+  return invoke<VideoSceneLayoutReport>("validate_video_project_scene", {
+    workspaceId,
+    projectId,
+    scene,
+  });
+}
+
 export async function renderVideoProjectScene(
   workspaceId: string,
   projectId: string,
@@ -1106,6 +1334,98 @@ export async function renderVideoProjectScene(
     workspaceId,
     projectId,
     scene,
+  });
+}
+
+export async function renderVideoProjectDiagram(
+  workspaceId: string,
+  projectId: string,
+  diagram: VideoDiagramSpec,
+): Promise<VideoSceneRender> {
+  return invoke<VideoSceneRender>("render_video_project_diagram", {
+    workspaceId,
+    projectId,
+    diagram,
+  });
+}
+
+export async function startVideoProjectRender(
+  workspaceId: string,
+  projectId: string,
+  request: VideoRenderRequest,
+): Promise<VideoRenderJob> {
+  return invoke<VideoRenderJob>("start_video_project_render", {
+    workspaceId,
+    projectId,
+    request,
+  });
+}
+
+export async function getVideoProjectRender(
+  workspaceId: string,
+  projectId: string,
+  jobId: string,
+): Promise<VideoRenderJob> {
+  return invoke<VideoRenderJob>("get_video_project_render", {
+    workspaceId,
+    projectId,
+    jobId,
+  });
+}
+
+export async function listVideoProjectRenders(
+  workspaceId: string,
+  projectId: string,
+): Promise<VideoRenderJob[]> {
+  return invoke<VideoRenderJob[]>("list_video_project_renders", {
+    workspaceId,
+    projectId,
+  });
+}
+
+export async function cancelVideoProjectRender(
+  workspaceId: string,
+  projectId: string,
+  jobId: string,
+): Promise<VideoRenderJob> {
+  return invoke<VideoRenderJob>("cancel_video_project_render", {
+    workspaceId,
+    projectId,
+    jobId,
+  });
+}
+
+export async function getVideoProjectPipelineStatus(
+  workspaceId: string,
+  projectId: string,
+): Promise<VideoPipelineStatus> {
+  return invoke<VideoPipelineStatus>("get_video_project_pipeline_status", {
+    workspaceId,
+    projectId,
+  });
+}
+
+export async function cleanVideoProject(
+  workspaceId: string,
+  projectId: string,
+  request: VideoCleanupRequest = {},
+): Promise<VideoCleanupReport> {
+  return invoke<VideoCleanupReport>("clean_video_project", {
+    workspaceId,
+    projectId,
+    request,
+  });
+}
+
+export async function qaVideoProject(
+  workspaceId: string,
+  projectId: string,
+  assetPath?: string | null,
+): Promise<VideoQaReport> {
+  return invoke<VideoQaReport>("qa_video_project", {
+    workspaceId,
+    projectId,
+    assetPath: assetPath ?? null,
   });
 }
 

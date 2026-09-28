@@ -498,7 +498,7 @@ fn active_work_reason(app: &AppHandle, app_state: &AppState) -> Option<String> {
 
     if let Ok(workspaces) = storage::load_workspaces(app) {
         for workspace in workspaces {
-            if browser::status(app, &workspace).running {
+            if browser::workspace_status(app, &workspace).running {
                 return Some(format!(
                     "Browser Automation is running for {}. Stop it before updating.",
                     workspace.name

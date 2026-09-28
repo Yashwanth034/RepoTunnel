@@ -5,6 +5,7 @@ import {
   connectGithub,
   disconnectGithub,
   getDesktopControlEnabled,
+  getGmailAccessEnabled,
   getGithubConnectionStatus,
   launchApplication,
   listDeepIntegrations,
@@ -15,6 +16,7 @@ import {
   rejectLaunchAction,
   setDeepIntegrationEnabled,
   setDesktopControlEnabled,
+  setGmailAccessEnabled,
 } from "../lib/backend";
 import { detectedProductivityFamilies, isProductivityApplication } from "../lib/applicationFamilies";
 import type { DeepIntegration, GithubConnectionStatus, LaunchActionRecord, LaunchActionStatus, LaunchApplication, Workspace } from "../types";
@@ -34,6 +36,50 @@ const launchStatusLabels: Record<LaunchActionStatus, string> = {
   rejected: "Rejected",
 };
 
+// GitHub authentication is global to RepoTunnel, not scoped to the Commands
+// component. Persist only non-secret display state so navigation and app restarts
+// never flash a fake disconnected state while the backend refreshes the real
+// GitHub CLI authentication in the background.
+const GITHUB_STATUS_CACHE_KEY = "repotunnel.github.status.v1";
+
+function loadCachedGithubStatus(): GithubConnectionStatus | null {
+  try {
+    const raw = window.localStorage.getItem(GITHUB_STATUS_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<GithubConnectionStatus>;
+    if (typeof parsed.available !== "boolean" || typeof parsed.connected !== "boolean") return null;
+    return {
+      available: parsed.available,
+      connected: parsed.connected,
+      connecting: false,
+      username: typeof parsed.username === "string" ? parsed.username : null,
+      deviceCode: null,
+      verificationUrl: null,
+      message: null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistGithubStatus(next: GithubConnectionStatus) {
+  if (next.connecting) return;
+  try {
+    window.localStorage.setItem(
+      GITHUB_STATUS_CACHE_KEY,
+      JSON.stringify({
+        available: next.available,
+        connected: next.connected,
+        username: next.username,
+      }),
+    );
+  } catch {
+    // A storage failure must never block real GitHub authentication.
+  }
+}
+
+let cachedGithubStatus: GithubConnectionStatus | null = loadCachedGithubStatus();
+
 function actionLabel(action: LaunchActionRecord): string {
   if (action.kind === "url") return "Open URL";
   if (action.kind === "workspacePath") return "Open path";
@@ -49,7 +95,8 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
   const [applications, setApplications] = useState<LaunchApplication[]>([]);
   const [integrations, setIntegrations] = useState<DeepIntegration[]>([]);
   const [desktopEnabled, setDesktopEnabled] = useState(false);
-  const [github, setGithub] = useState<GithubConnectionStatus | null>(null);
+  const [gmailEnabled, setGmailEnabled] = useState(false);
+  const [github, setGithub] = useState<GithubConnectionStatus | null>(() => cachedGithubStatus);
   const [githubBusy, setGithubBusy] = useState(false);
   const [confirmGithubDisconnect, setConfirmGithubDisconnect] = useState(false);
   const [history, setHistory] = useState<LaunchActionRecord[]>([]);
@@ -60,7 +107,14 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
   const [busyId, setBusyId] = useState<string | null>(null);
   const [integrationBusyId, setIntegrationBusyId] = useState<string | null>(null);
   const [desktopBusyId, setDesktopBusyId] = useState<string | null>(null);
+  const [gmailBusy, setGmailBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  const rememberGithub = useCallback((next: GithubConnectionStatus) => {
+    cachedGithubStatus = next;
+    persistGithubStatus(next);
+    setGithub(next);
+  }, []);
 
   const browsers = useMemo(
     () => applications.filter((application) => application.supportsUrls),
@@ -88,7 +142,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
       setApplications([]);
       setIntegrations([]);
       setDesktopEnabled(false);
-      setGithub(null);
+      setGmailEnabled(false);
       setHistory([]);
       return;
     }
@@ -108,8 +162,11 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     void getDesktopControlEnabled(workspace.id)
       .then(setDesktopEnabled)
       .catch(reportError);
+    void getGmailAccessEnabled(workspace.id)
+      .then(setGmailEnabled)
+      .catch(reportError);
     void getGithubConnectionStatus()
-      .then(setGithub)
+      .then(rememberGithub)
       .catch(reportError);
     void listLaunchHistory(workspace.id, 60)
       .then(setHistory)
@@ -120,7 +177,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     } finally {
       setLoading(false);
     }
-  }, [onError, workspace]);
+  }, [onError, rememberGithub, workspace]);
 
   useEffect(() => {
     refresh().catch(() => undefined);
@@ -141,14 +198,14 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     const timer = window.setInterval(() => {
       getGithubConnectionStatus()
         .then((next) => {
-          setGithub(next);
+          rememberGithub(next);
           if (!next.connecting && !next.connected && next.message) onError(next.message);
           if (next.connected && next.message) onError(next.message);
         })
         .catch((error) => onError(error instanceof Error ? error.message : String(error)));
     }, 900);
     return () => window.clearInterval(timer);
-  }, [github?.connecting, onError]);
+  }, [github?.connecting, onError, rememberGithub]);
 
   async function submitUrl() {
     if (!workspace || !url.trim()) return;
@@ -200,11 +257,12 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     setGithubBusy(true);
     try {
       const next = await connectGithub();
-      setGithub(next);
+      rememberGithub(next);
       if (!next.connecting && !next.connected && next.message) onError(next.message);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
-      setGithub(await getGithubConnectionStatus().catch(() => github));
+      const refreshed = await getGithubConnectionStatus().catch(() => github);
+      if (refreshed) rememberGithub(refreshed);
     } finally {
       setGithubBusy(false);
     }
@@ -214,7 +272,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     if (githubBusy) return;
     setGithubBusy(true);
     try {
-      setGithub(await cancelGithubConnection());
+      rememberGithub(await cancelGithubConnection());
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -245,7 +303,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     if (githubBusy) return;
     setGithubBusy(true);
     try {
-      setGithub(await disconnectGithub());
+      rememberGithub(await disconnectGithub());
       setConfirmGithubDisconnect(false);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -275,6 +333,18 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
       onError(error instanceof Error ? error.message : String(error));
     } finally {
       setDesktopBusyId(null);
+    }
+  }
+
+  async function toggleGmailAccess() {
+    if (!workspace || gmailBusy) return;
+    setGmailBusy(true);
+    try {
+      setGmailEnabled(await setGmailAccessEnabled(workspace.id, !gmailEnabled));
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setGmailBusy(false);
     }
   }
 
@@ -382,6 +452,19 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
             ))}
             <button
               type="button"
+              className={`launcher-integration-name ${gmailEnabled ? "enabled" : ""}`}
+              disabled={gmailBusy}
+              onClick={() => void toggleGmailAccess()}
+              title={gmailEnabled
+                ? "Gmail and Google Sign-In access enabled for all approved projects"
+                : "Allow AI browser workflows to reuse the managed Google session and read Gmail for sign-in and verification flows"}
+              aria-pressed={gmailEnabled}
+            >
+              <i aria-hidden="true" />
+              <span>Gmail</span>
+            </button>
+            <button
+              type="button"
               className={`launcher-integration-name ${desktopEnabled ? "enabled" : ""}`}
               disabled={desktopBusyId !== null}
               onClick={() => void toggleDesktopControl()}
@@ -448,18 +531,26 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
                 <button
                   className={`launcher-app-button github-connection-button ${github?.connected ? "connected" : ""}`}
                   type="button"
-                  disabled={githubBusy || github?.connecting}
+                  disabled={github === null || githubBusy || github?.connecting}
                   onClick={() => void handleGithubClick()}
-                  title={github?.connected ? "Disconnect GitHub" : (github?.message ?? "Connect GitHub")}
+                  title={
+                    github === null
+                      ? "Checking GitHub connection"
+                      : github.connected
+                        ? "Disconnect GitHub"
+                        : (github.message ?? "Connect GitHub")
+                  }
                   aria-pressed={github?.connected ?? false}
                 >
                   <span>GitHub</span>
                   <small>
-                    {githubBusy || github?.connecting
-                      ? "Connecting…"
-                      : github?.connected
-                        ? github.username ? `@${github.username} · Connected` : "Connected"
-                        : github?.available === false ? "GitHub CLI required" : "Connect"}
+                    {github === null
+                      ? "Checking…"
+                      : githubBusy || github.connecting
+                        ? "Connecting…"
+                        : github.connected
+                          ? github.username ? `@${github.username} · Connected` : "Connected"
+                          : github.available === false ? "GitHub CLI required" : "Connect"}
                   </small>
                 </button>
               </div>

@@ -10,13 +10,17 @@ import {
   prepareVideoProjectFilePreview,
   prepareVideoProjectPreview,
   readVideoProjectTextFile,
-  renderVideoProjectTimeline,
+  renderVideoStoryAnimatic,
+  startVideoProjectRender,
+  getVideoProjectRender,
+  cancelVideoProjectRender,
   setVideoProjectPinned,
 } from "../lib/backend";
 import type {
   VideoPreviewSource,
   VideoProductionProject,
   VideoProjectFile,
+  VideoRenderJob,
   Workspace,
 } from "../types";
 
@@ -27,6 +31,7 @@ type VideoProductionPanelProps = {
 };
 
 type AspectRatio = "16:9" | "9:16" | "1:1" | "4:5";
+type ProductionMode = "tutorial" | "story";
 type AudioMode = "keep" | "mute" | "replace";
 
 type FileTreeNode = {
@@ -47,6 +52,7 @@ type EditSegment = {
 type EditState = {
   segments: EditSegment[];
   audioMode: AudioMode;
+  audioMixPreset: "simple" | "voice-priority";
   replacementAudioPath: string;
 };
 
@@ -128,6 +134,7 @@ function buildFileTree(project: VideoProductionProject, files: VideoProjectFile[
 function cloneEditState(state: EditState): EditState {
   return {
     audioMode: state.audioMode,
+    audioMixPreset: state.audioMixPreset,
     replacementAudioPath: state.replacementAudioPath,
     segments: state.segments.map((segment) => ({ ...segment })),
   };
@@ -148,6 +155,7 @@ function VideoProductionPanel({
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
+  const [productionMode, setProductionMode] = useState<ProductionMode>("tutorial");
   const [aspectRatio, setAspectRatio] = useState<AspectRatio>("16:9");
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -169,6 +177,8 @@ function VideoProductionPanel({
   const [undoStack, setUndoStack] = useState<EditState[]>([]);
   const [redoStack, setRedoStack] = useState<EditState[]>([]);
   const [rendering, setRendering] = useState(false);
+  const [animaticRendering, setAnimaticRendering] = useState(false);
+  const [renderJob, setRenderJob] = useState<VideoRenderJob | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const selectedWorkspace = useMemo(
@@ -334,6 +344,7 @@ function VideoProductionPanel({
         endSeconds: null,
       }],
       audioMode: "keep",
+      audioMixPreset: "simple",
       replacementAudioPath: "",
     };
     setEditState(next);
@@ -372,6 +383,7 @@ function VideoProductionPanel({
       const created = await createVideoProject(
         selectedWorkspace.id,
         newProjectName.trim(),
+        productionMode,
         aspectRatio,
       );
       setNewProjectName("");
@@ -432,6 +444,36 @@ function VideoProductionPanel({
       onNotice(`Delete Video Project: ${errorMessage(error)}`);
     } finally {
       setDeletingProjectId(null);
+    }
+  }
+
+  async function renderStoryAnimatic(project: VideoProductionProject) {
+    if ((project.productionMode ?? "tutorial") !== "story" || animaticRendering) return;
+    setAnimaticRendering(true);
+    setPreviewLoading(true);
+    try {
+      const animatic = await renderVideoStoryAnimatic(project.workspaceId, project.id);
+      const projectFiles = await refreshFiles(project);
+      const source = await prepareVideoProjectFilePreview(
+        project.workspaceId,
+        project.id,
+        animatic.outputPath,
+      );
+      setTextPreview(null);
+      setPreviewSource(source);
+      setSelectedFilePath(animatic.outputPath);
+      setEditState(null);
+      onNotice(
+        `Story animatic ready: ${animatic.shotCount} shots · ${animatic.durationSeconds.toFixed(1)}s · ${animatic.width}×${animatic.height} @ ${animatic.fps} FPS.`,
+      );
+      if (!projectFiles.some((file) => file.relativePath === animatic.outputPath)) {
+        await refreshFiles(project);
+      }
+    } catch (error) {
+      onNotice(`Render story animatic: ${errorMessage(error)}`);
+    } finally {
+      setPreviewLoading(false);
+      setAnimaticRendering(false);
     }
   }
 
@@ -586,9 +628,9 @@ function VideoProductionPanel({
     }
 
     setRendering(true);
+    setRenderJob(null);
     try {
-      await renderVideoProjectTimeline(selectedProject.workspaceId, selectedProject.id, {
-        version: 1,
+      let job = await startVideoProjectRender(selectedProject.workspaceId, selectedProject.id, {
         clips: editState.segments.map((segment) => ({
           sourcePath: segment.sourcePath,
           startSeconds: segment.startSeconds,
@@ -597,9 +639,27 @@ function VideoProductionPanel({
         narrationPath: editState.audioMode === "replace"
           ? editState.replacementAudioPath
           : null,
+        captionDelivery: "none",
+        audioMixPreset: editState.audioMixPreset,
         preserveSourceAudio: editState.audioMode === "keep",
         finalRender: false,
       });
+      setRenderJob(job);
+
+      while (job.status === "queued" || job.status === "running") {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        job = await getVideoProjectRender(
+          selectedProject.workspaceId,
+          selectedProject.id,
+          job.id,
+        );
+        setRenderJob(job);
+      }
+
+      if (job.status !== "completed") {
+        throw new Error(job.error ?? job.message);
+      }
+
       await refreshProjects(selectedProject.id);
       const refreshed = await listVideoProjects(selectedProject.workspaceId);
       const project = refreshed.find((item) => item.id === selectedProject.id);
@@ -612,6 +672,25 @@ function VideoProductionPanel({
       onNotice(`Manual edit: ${errorMessage(error)}`);
     } finally {
       setRendering(false);
+    }
+  }
+
+  async function cancelManualRender() {
+    if (
+      !selectedProject
+      || !renderJob
+      || !["queued", "running"].includes(renderJob.status)
+    ) return;
+
+    try {
+      const job = await cancelVideoProjectRender(
+        selectedProject.workspaceId,
+        selectedProject.id,
+        renderJob.id,
+      );
+      setRenderJob(job);
+    } catch (error) {
+      onNotice(`Cancel render: ${errorMessage(error)}`);
     }
   }
 
@@ -655,6 +734,15 @@ function VideoProductionPanel({
             }}
           />
           <div>
+            <select
+              aria-label="Video production mode"
+              value={productionMode}
+              disabled={creating || importing}
+              onChange={(event) => setProductionMode(event.target.value as ProductionMode)}
+            >
+              <option value="tutorial">Tutorial</option>
+              <option value="story">Story animation</option>
+            </select>
             <select
               aria-label="Video aspect ratio"
               value={aspectRatio}
@@ -716,7 +804,7 @@ function VideoProductionPanel({
                       <span className="video-production-project-icon" aria-hidden="true">▶</span>
                       <span>
                         <strong>{project.name}</strong>
-                        <small>{project.aspectRatio}</small>
+                        <small>{(project.productionMode ?? "tutorial") === "story" ? "Story" : "Tutorial"} · {project.aspectRatio}</small>
                       </span>
                     </button>
                     <div className="video-project-row-actions">
@@ -783,11 +871,28 @@ function VideoProductionPanel({
             <header className="video-production-project-head">
               <div>
                 <h2>{selectedProject.name}</h2>
-                <p>{selectedProject.relativePath}</p>
+                <p>
+                  {selectedProject.storageMode === "standalone"
+                    ? `~/Projects/${selectedProject.slug}`
+                    : selectedProject.relativePath}
+                </p>
               </div>
-              <div className="video-production-format">
-                <strong>{selectedProject.width} × {selectedProject.height}</strong>
-                <small>{selectedProject.aspectRatio} · {selectedProject.fps} FPS</small>
+              <div className="video-production-project-actions">
+                {(selectedProject.productionMode ?? "tutorial") === "story" ? (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={animaticRendering}
+                    onClick={() => void renderStoryAnimatic(selectedProject)}
+                    title="Render the current Scene Director plan as an 854×480 / 12 FPS approval movie."
+                  >
+                    {animaticRendering ? "Rendering animatic…" : "Render animatic"}
+                  </button>
+                ) : null}
+                <div className="video-production-format">
+                  <strong>{selectedProject.width} × {selectedProject.height}</strong>
+                  <small>{selectedProject.aspectRatio} · {selectedProject.fps} FPS</small>
+                </div>
               </div>
             </header>
 
@@ -884,11 +989,27 @@ function VideoProductionPanel({
                 <div className="video-manual-editor-actions">
                   <button className="secondary-button" type="button" disabled={undoStack.length === 0} onClick={undoEdit}>Undo</button>
                   <button className="secondary-button" type="button" disabled={redoStack.length === 0} onClick={redoEdit}>Redo</button>
+                  {rendering && renderJob && ["queued", "running"].includes(renderJob.status) ? (
+                    <button className="secondary-button" type="button" onClick={() => void cancelManualRender()}>
+                      Cancel
+                    </button>
+                  ) : null}
                   <button className="primary-button" type="button" disabled={!editState || editState.segments.length === 0 || rendering} onClick={() => void renderManualEdit()}>
-                    {rendering ? "Rendering…" : "Render draft"}
+                    {rendering && renderJob
+                      ? `${renderJob.phase} ${renderJob.progress}%`
+                      : rendering
+                        ? "Starting…"
+                        : "Render draft"}
                   </button>
                 </div>
               </div>
+
+              {rendering && renderJob ? (
+                <div className="video-render-progress" aria-live="polite">
+                  <progress max={100} value={renderJob.progress} />
+                  <small>{renderJob.message}</small>
+                </div>
+              ) : null}
 
               <div className="video-manual-source-row">
                 <label>
@@ -963,16 +1084,32 @@ function VideoProductionPanel({
                       </select>
                     </label>
                     {editState.audioMode === "replace" ? (
-                      <label>
-                        <span>Replacement</span>
-                        <select
-                          value={editState.replacementAudioPath}
-                          onChange={(event) => commitEdit({ ...cloneEditState(editState), replacementAudioPath: event.target.value })}
-                        >
-                          <option value="">Choose audio…</option>
-                          {audioFiles.map((file) => <option key={file.relativePath} value={file.relativePath}>{file.name}</option>)}
-                        </select>
-                      </label>
+                      <>
+                        <label>
+                          <span>Replacement</span>
+                          <select
+                            value={editState.replacementAudioPath}
+                            onChange={(event) => commitEdit({ ...cloneEditState(editState), replacementAudioPath: event.target.value })}
+                          >
+                            <option value="">Choose audio…</option>
+                            {audioFiles.map((file) => <option key={file.relativePath} value={file.relativePath}>{file.name}</option>)}
+                          </select>
+                        </label>
+                        <label>
+                          <span>Mix</span>
+                          <select
+                            aria-label="Audio mix preset"
+                            value={editState.audioMixPreset}
+                            onChange={(event) => commitEdit({
+                              ...cloneEditState(editState),
+                              audioMixPreset: event.target.value as EditState["audioMixPreset"],
+                            })}
+                          >
+                            <option value="simple">Simple</option>
+                            <option value="voice-priority">Voice priority</option>
+                          </select>
+                        </label>
+                      </>
                     ) : null}
                   </div>
                 </>

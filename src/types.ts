@@ -439,6 +439,52 @@ export type PublicTunnelStatus = {
   message: string | null;
 };
 
+export type HttpsSetupResource =
+  | "wireguard"
+  | "route64"
+  | "duckdns"
+  | "ipv4-compatibility";
+
+export type HttpsSetupReadiness = {
+  supportedPlatform: boolean;
+  wireguardInstalled: boolean;
+  wgQuickInstalled: boolean;
+  nftablesInstalled: boolean;
+  opensslInstalled: boolean;
+  certbotReady: boolean;
+  pipxInstalled: boolean;
+  systemdAvailable: boolean;
+  nativeGlobalIpv6Available: boolean;
+  wireguardInterfaceActive: boolean;
+  standardWireguardConfigPresent: boolean;
+  standardWireguardServiceActive: boolean;
+  nftablesRulesReadable: boolean;
+  nftablesRulesPresent: boolean;
+  pkexecAvailable: boolean;
+  directHttpsConfigured: boolean;
+  directHttpsLocalReady: boolean;
+  directHttpsTlsTrusted: boolean;
+  directHttpsPublicReachable: boolean;
+};
+
+export type HttpsSetupInstallResult = {
+  cancelled: boolean;
+  installed: boolean;
+  serviceActive: boolean;
+  networkRulesPresent: boolean;
+};
+
+export type HttpsSetupHostnameVerification = {
+  validHostname: boolean;
+  dnsResolves: boolean;
+  ipv4Available: boolean;
+  ipv6Available: boolean;
+  healthReachable: boolean;
+  tlsTrusted: boolean;
+  oauthResourceMetadataReachable: boolean;
+  oauthServerMetadataReachable: boolean;
+};
+
 export type ChatConnectionStatus = {
   clientAvailable: boolean;
   clientVersion: string | null;
@@ -809,6 +855,16 @@ export type DesktopControlApplication = {
   message: string;
 };
 
+export type AiWorkspaceApplicationStatus = {
+  appSessionId: string;
+  applicationId: string;
+  applicationName: string;
+  pid: number;
+  startedAt: number;
+  primary: boolean;
+  running: boolean;
+};
+
 export type AiWorkspaceStatus = {
   sessionId: string | null;
   workspaceId: string;
@@ -820,6 +876,11 @@ export type AiWorkspaceStatus = {
   width: number;
   height: number;
   startedAt: number | null;
+  applications: AiWorkspaceApplicationStatus[];
+  applicationCount: number;
+  maxConcurrentApplications: number;
+  lastStartedAppSessionId: string | null;
+  resourceAdmission: string | null;
   message: string | null;
 };
 
@@ -873,6 +934,7 @@ export type BrowserActionKind =
   | "navigate"
   | "click"
   | "type"
+  | "sequence"
   | "scroll"
   | "reload";
 
@@ -907,6 +969,13 @@ export type BrowserTab = {
   active: boolean;
 };
 
+export type BrowserContextConfig = {
+  name: string;
+  defaultHeaders: Record<string, string>;
+  userAgent: string | null;
+  updatedAt: number;
+};
+
 export type BrowserActionRecord = {
   id: string;
   workspaceId: string;
@@ -920,15 +989,52 @@ export type BrowserActionRecord = {
   error: string | null;
 };
 
+export type BrowserNavigationRedirect = {
+  fromUrl: string;
+  toUrl: string;
+  status: number | null;
+};
+
+export type BrowserNavigationNetworkError = {
+  url: string | null;
+  method: string | null;
+  errorText: string;
+  resourceType: string | null;
+};
+
+export type BrowserNavigationReceipt = {
+  requestedUrl: string;
+  finalUrl: string;
+  title: string;
+  readyState: string;
+  httpStatus: number | null;
+  timedOut: boolean;
+  loadState: string;
+  navigationGeneration: string | null;
+  documentGeneration: string | null;
+  documentMatchesNavigation: boolean;
+  documentText: string;
+  documentHtml: string;
+  redirects: BrowserNavigationRedirect[];
+  networkErrors: BrowserNavigationNetworkError[];
+  requestCount: number;
+  cookiesChanged: string[];
+  durationMs: number;
+  errorCode: string | null;
+  errorText: string | null;
+};
+
 export type BrowserActionOutcome = {
   queued: boolean;
   action: BrowserActionRecord;
+  navigationReceipt?: BrowserNavigationReceipt | null;
 };
 
 export type BrowserPageInspection = {
   tabId: string;
   title: string;
   url: string;
+  documentGeneration: string | null;
   selector: string | null;
   found: boolean;
   tag: string | null;
@@ -972,6 +1078,20 @@ export type BrowserNetworkFailure = {
   status: number | null;
   errorText: string;
   resourceType: string | null;
+  timestamp: number;
+};
+
+export type BrowserNetworkEntry = {
+  tabId: string;
+  requestId: string;
+  url: string;
+  method: string | null;
+  status: number | null;
+  statusText: string | null;
+  resourceType: string | null;
+  mimeType: string | null;
+  failed: boolean;
+  errorText: string | null;
   timestamp: number;
 };
 
@@ -1154,6 +1274,49 @@ export type VideoProductionCheckpoint = {
   detail: string | null;
 };
 
+export type VideoProductionResourcePolicy = {
+  allowLocalModelDownloads: boolean;
+  allowAutomaticPackageInstall: boolean;
+  allowCloudServices: boolean;
+  allowPaidServices: boolean;
+  maxTemporaryDiskMb: number;
+};
+
+export type VideoSceneSource = {
+  claim: string;
+  sourceUrl: string;
+  verificationState: string;
+  checkedAt: number | null;
+};
+
+export type VideoProductionSceneInput = {
+  id: string;
+  order: number;
+  purpose: string;
+  teachingPoint: string;
+  narration: string;
+  captionsEnabled?: boolean;
+  durationSeconds?: number | null;
+  sources?: VideoSceneSource[];
+};
+
+export type VideoProductionScene = {
+  id: string;
+  order: number;
+  purpose: string;
+  teachingPoint: string;
+  narration: string;
+  captionsEnabled: boolean;
+  durationSeconds: number | null;
+  sources: VideoSceneSource[];
+  animationSource: string | null;
+  renderedClip: string | null;
+  narrationAudio: string | null;
+  subtitlePath: string | null;
+  qaStatus: string;
+  updatedAt: number;
+};
+
 export type VideoProductionProject = {
   schemaVersion: number;
   id: string;
@@ -1161,12 +1324,15 @@ export type VideoProductionProject = {
   name: string;
   slug: string;
   relativePath: string;
+  storageMode: "standalone" | "legacy-workspace";
+  productionMode: "tutorial" | "story";
   status: string;
   pinned: boolean;
   aspectRatio: "16:9" | "9:16" | "1:1" | "4:5";
   width: number;
   height: number;
   fps: number;
+  resourcePolicy: VideoProductionResourcePolicy;
   createdAt: number;
   updatedAt: number;
   scriptPath: string | null;
@@ -1180,6 +1346,250 @@ export type VideoProductionProject = {
   checkpoints: VideoProductionCheckpoint[];
   attentionRequired: boolean;
   lastError: string | null;
+};
+
+
+export type StoryCharacter = {
+  id: string;
+  name: string;
+  role?: string;
+  visualDescription?: string;
+  rigProfile?: string;
+  costume?: string;
+  continuityTags?: string[];
+  assetPath?: string | null;
+};
+
+export type StoryLocation = {
+  id: string;
+  name: string;
+  description?: string;
+  variants?: string[];
+  entranceAnchors?: string[];
+  interactionAnchors?: string[];
+  cameraAnchors?: string[];
+  walkableAreas?: string[];
+  assetPath?: string | null;
+};
+
+export type StoryProp = {
+  id: string;
+  name: string;
+  description?: string;
+  ownerCharacterId?: string | null;
+  handling?: string;
+  assetPath?: string | null;
+};
+
+export type StoryVoiceCastEntry = {
+  characterId: string;
+  provider: string;
+  voice: string;
+  language: string;
+  voiceModelPath?: string | null;
+  rate?: number | null;
+};
+
+export type StoryCamera = {
+  shotType?: string;
+  movement?: string;
+  angle?: string;
+  framing?: string;
+};
+
+export type StoryActorBeat = {
+  characterId: string;
+  action: string;
+  targetId?: string | null;
+  startAnchor?: string | null;
+  endAnchor?: string | null;
+  emotion?: string;
+  lookTarget?: string | null;
+  dialogue?: string | null;
+  lipSync?: boolean;
+  handTarget?: string | null;
+};
+
+export type StoryShotInput = {
+  id: string;
+  sceneId: string;
+  order: number;
+  durationSeconds: number;
+  locationId: string;
+  locationVariant?: string | null;
+  camera?: StoryCamera;
+  actors?: StoryActorBeat[];
+  props?: string[];
+  ambience?: string[];
+  foley?: string[];
+  requestedEngine?: string | null;
+  transition?: string | null;
+  notes?: string;
+};
+
+export type StoryDirectorInput = {
+  language?: string;
+  visualStyle?: "2d" | "2.5d" | "3d" | "mixed";
+  characters?: StoryCharacter[];
+  locations?: StoryLocation[];
+  props?: StoryProp[];
+  voiceCast?: StoryVoiceCastEntry[];
+  shots?: StoryShotInput[];
+};
+
+export type StoryCompiledShot = StoryShotInput & {
+  selectedEngine: string;
+  engineReason: string;
+  renderKey: string;
+};
+
+export type StoryDirectorPlan = {
+  version: number;
+  actionLibraryVersion: number;
+  projectId: string;
+  language: string;
+  visualStyle: string;
+  characters: StoryCharacter[];
+  locations: StoryLocation[];
+  props: StoryProp[];
+  voiceCast: StoryVoiceCastEntry[];
+  shots: StoryCompiledShot[];
+  contentHash: string;
+  updatedAt: number;
+};
+
+export type StoryAnimaticShot = {
+  shotId: string;
+  sceneId: string;
+  order: number;
+  startSeconds: number;
+  endSeconds: number;
+  durationSeconds: number;
+  selectedEngine: string;
+  renderKey: string;
+};
+
+export type StoryAnimaticPlan = {
+  version: number;
+  projectId: string;
+  width: number;
+  height: number;
+  fps: number;
+  totalDurationSeconds: number;
+  contentHash: string;
+  shots: StoryAnimaticShot[];
+  updatedAt: number;
+};
+
+export type StoryAnimaticRender = {
+  projectId: string;
+  outputPath: string;
+  shotCount: number;
+  durationSeconds: number;
+  width: number;
+  height: number;
+  fps: number;
+};
+
+export type StoryShotCacheEntry = {
+  shotId: string;
+  renderKey: string;
+  selectedEngine: string;
+  status: string;
+  outputPath: string | null;
+  updatedAt: number;
+};
+
+export type StoryRenderQueue = {
+  version: number;
+  projectId: string;
+  contentHash: string;
+  changedShotIds: string[];
+  reusableShotIds: string[];
+  entries: StoryShotCacheEntry[];
+  updatedAt: number;
+};
+
+export type StoryShotRenderInput = {
+  shotId: string;
+  renderKey: string;
+  outputPath: string;
+};
+
+export type StoryShotRenderResult = {
+  projectId: string;
+  shotId: string;
+  renderKey: string;
+  selectedEngine: string;
+  outputPath: string;
+  reused: boolean;
+};
+
+export type StoryShotRenderJob = {
+  id: string;
+  projectId: string;
+  shotId: string;
+  renderKey: string;
+  selectedEngine: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  phase: string;
+  progress: number;
+  message: string;
+  result: StoryShotRenderResult | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type NarrativeQaIssue = {
+  severity: "error" | "warning" | string;
+  code: string;
+  shotId: string | null;
+  characterId: string | null;
+  message: string;
+};
+
+export type NarrativeQaReport = {
+  version: number;
+  projectId: string;
+  passed: boolean;
+  issues: NarrativeQaIssue[];
+  metrics: {
+    shotCount: number;
+    characterCount: number;
+    locationCount: number;
+    propCount: number;
+    voicedCharacterCount: number;
+    cameraShotTypeCount: number;
+    idleActorRatio: number;
+    complexInteractionCount: number;
+    totalDurationSeconds: number;
+  };
+  updatedAt: number;
+};
+
+export type StoryActionCapability = {
+  action: string;
+  complexity: string;
+  requiresTarget: boolean;
+  requiresMovementAnchors: boolean;
+  requiresHandTarget: boolean;
+};
+
+export type StoryEngineCapability = {
+  id: string;
+  available: boolean;
+  executable: string | null;
+  bestFor: string;
+  notes: string;
+};
+
+export type StoryProductionCapabilities = {
+  actions: StoryActionCapability[];
+  engines: StoryEngineCapability[];
+  animaticWidth: number;
+  animaticHeight: number;
+  animaticFps: number;
 };
 
 export type VideoProductionDocument = {
@@ -1202,8 +1612,9 @@ export type VideoRecordingStatus = {
   id: string;
   workspaceId: string;
   projectId: string;
+  appSessionId: string;
   status: "recording" | "completed" | "failed";
-  captureTarget: "aiWorkspace";
+  captureTarget: "aiWorkspaceApp";
   relativePath: string;
   width: number;
   height: number;
@@ -1244,6 +1655,50 @@ export type VideoSceneSpec = {
   elements: VideoSceneElement[];
 };
 
+export type VideoDiagramNode = {
+  id: string;
+  label: string;
+  detail?: string | null;
+  group?: string | null;
+};
+
+export type VideoDiagramEdge = {
+  from: string;
+  to: string;
+  label?: string | null;
+};
+
+export type VideoDiagramSpec = {
+  id: string;
+  template:
+    | "flow_diagram"
+    | "architecture_diagram"
+    | "comparison"
+    | "timeline"
+    | "token_flow"
+    | "before_after"
+    | "metric_cards";
+  durationSeconds: number;
+  title?: string | null;
+  nodes: VideoDiagramNode[];
+  edges?: VideoDiagramEdge[];
+};
+
+export type VideoSceneLayoutIssue = {
+  severity: "warning" | "error";
+  code: string;
+  elementIndex: number | null;
+  message: string;
+};
+
+export type VideoSceneLayoutReport = {
+  sceneId: string;
+  width: number;
+  height: number;
+  passed: boolean;
+  issues: VideoSceneLayoutIssue[];
+};
+
 export type VideoSceneRender = {
   projectId: string;
   sceneId: string;
@@ -1254,6 +1709,7 @@ export type VideoSceneRender = {
   width: number;
   height: number;
   fps: number;
+  layout: VideoSceneLayoutReport;
 };
 
 export type VideoAssetSource = {
@@ -1305,6 +1761,8 @@ export type VideoAssetLicenseRecord = {
 export type NarrationProviderStatus = {
   id: string;
   available: boolean;
+  ready: boolean;
+  requiresDownload: boolean;
   quality: string;
   languages: string;
   message: string;
@@ -1322,16 +1780,20 @@ export type SubtitleAsset = {
 export type NarrationRequest = {
   text: string;
   language: string;
+  sceneId?: string | null;
+  characterId?: string | null;
   provider?: "auto" | "supertonic-3" | "piper" | "espeak-ng";
   voice?: string | null;
   voiceModelPath?: string | null;
   rate?: number | null;
+  allowManagedDownload?: boolean;
 };
 
 export type NarrationAsset = {
   projectId: string;
   provider: string;
   language: string;
+  characterId: string | null;
   voice: string | null;
   audioPath: string;
   durationSeconds: number;
@@ -1349,8 +1811,10 @@ export type VideoRenderRequest = {
   clips: VideoTimelineClip[];
   narrationPath?: string | null;
   subtitlePath?: string | null;
+  captionDelivery?: "none" | "sidecar" | "embedded" | "burned" | "burned+sidecar";
   musicPath?: string | null;
   musicVolume?: number | null;
+  audioMixPreset?: "simple" | "voice-priority";
   preserveSourceAudio?: boolean;
   finalRender?: boolean;
 };
@@ -1359,11 +1823,78 @@ export type VideoRenderResult = {
   projectId: string;
   outputPath: string;
   subtitlePath: string | null;
+  captionDelivery: "none" | "sidecar" | "embedded" | "burned" | "burned+sidecar";
   clipCount: number;
   width: number;
   height: number;
   fps: number;
   finalRender: boolean;
+};
+
+export type VideoRenderJob = {
+  id: string;
+  projectId: string;
+  requestHash: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  phase: string;
+  progress: number;
+  message: string;
+  result: VideoRenderResult | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type VideoCleanupRequest = {
+  apply?: boolean;
+  removeTemp?: boolean;
+  removeObsoleteRenders?: boolean;
+  keepPaths?: string[];
+};
+
+export type VideoCleanupCandidate = {
+  relativePath: string;
+  kind: "file" | "directory";
+  sizeBytes: number;
+};
+
+export type VideoCleanupReport = {
+  projectId: string;
+  applied: boolean;
+  candidates: VideoCleanupCandidate[];
+  totalBytes: number;
+  deletedCount: number;
+};
+
+export type VideoPipelineStage = {
+  id: string;
+  label: string;
+  status: "pending" | "inProgress" | "completed" | "attention";
+  progress: number;
+  message: string;
+};
+
+export type VideoPipelineStatus = {
+  projectId: string;
+  overallProgress: number;
+  currentStage: string;
+  stages: VideoPipelineStage[];
+};
+
+export type VideoQaCheck = {
+  id: string;
+  status: "pass" | "warn" | "fail";
+  message: string;
+};
+
+export type VideoQaReport = {
+  projectId: string;
+  assetPath: string;
+  finalAsset: boolean;
+  passed: boolean;
+  checks: VideoQaCheck[];
+  reportPath: string;
+  checkedAt: number;
 };
 
 export type VideoPreviewSource = {

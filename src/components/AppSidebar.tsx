@@ -11,6 +11,7 @@ export type AppView =
   | "git"
   | "connections"
   | "commands"
+  | "httpsSetup"
   | "video"
   | "system"
   | "help";
@@ -59,6 +60,7 @@ const navItems: Array<{ id: AppView; label: string; icon: IconName }> = [
   { id: "git", label: "Git", icon: "git" },
   { id: "connections", label: "Connect", icon: "link" },
   { id: "commands", label: "Commands", icon: "terminal" },
+  { id: "httpsSetup", label: "HTTPS Setup", icon: "shield" },
 ];
 
 export function NavIcon({ name, size = 17 }: { name: IconName; size?: number }) {

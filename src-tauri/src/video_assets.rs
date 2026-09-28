@@ -69,6 +69,15 @@ pub(crate) struct VideoAssetLicenseRecord {
     pub(crate) retrieved_at: u64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoAssetLicenseManifest {
+    schema_version: u32,
+    project_id: String,
+    generated_at: u64,
+    records: Vec<VideoAssetLicenseRecord>,
+}
+
 macro_rules! source {
     (
         $id:expr,
@@ -591,19 +600,140 @@ pub(crate) fn registry() -> Vec<VideoAssetSource> {
             Some(21_700),
         ),
         source!(
+            "godot",
+            "Godot Engine",
+            "open-source-engine",
+            &["2d", "cutout-animation", "skeleton2d", "ik", "story-animation", "movie-maker"],
+            "Free and open source.",
+            "Allowed under the Godot project license.",
+            "None for the engine; imported assets retain their own licenses.",
+            false,
+            "optional-local-adapter",
+            true,
+            "https://github.com/godotengine/godot",
+            "https://godotengine.org/license/",
+            "Preferred fast renderer for story-mode 2D skeletal/cutout dialogue and movement. It is optional and never replaces the native tutorial renderer.",
+            None,
+        ),
+        source!(
+            "opentoonz",
+            "OpenToonz",
+            "open-source-engine",
+            &["2d", "cutout-animation", "traditional-animation", "story-animation"],
+            "Free and open source.",
+            "Allowed under the current OpenToonz project license.",
+            "None for the application; imported assets retain their own licenses.",
+            false,
+            "optional-local-adapter",
+            false,
+            "https://github.com/opentoonz/opentoonz",
+            "https://github.com/opentoonz/opentoonz/blob/master/LICENSE.txt",
+            "Optional story-mode 2D production engine. RepoTunnel must detect an existing installation rather than silently install it.",
+            None,
+        ),
+        source!(
+            "synfig",
+            "Synfig Studio",
+            "open-source-engine",
+            &["2d", "vector-animation", "bones", "tweening", "story-animation"],
+            "Free and open source.",
+            "Use according to the current Synfig project license.",
+            "None for the application; imported assets retain their own licenses.",
+            false,
+            "optional-local-adapter",
+            false,
+            "https://github.com/synfig/synfig",
+            "https://github.com/synfig/synfig/blob/master/LICENSE",
+            "Optional vector-puppet renderer for reusable character rigs and tweened story shots.",
+            None,
+        ),
+        source!(
+            "rhubarb-lip-sync",
+            "Rhubarb Lip Sync",
+            "open-source-engine",
+            &["lip-sync", "mouth-cues", "dialogue", "story-animation"],
+            "Free and open source.",
+            "Allowed under the current Rhubarb project license.",
+            "None.",
+            false,
+            "optional-local-adapter",
+            true,
+            "https://github.com/DanielSWolf/rhubarb-lip-sync",
+            "https://github.com/DanielSWolf/rhubarb-lip-sync/blob/master/LICENSE",
+            "Optional local dialogue helper. RepoTunnel uses it only when already installed or explicitly provisioned under project policy.",
+            None,
+        ),
+        source!(
+            "makehuman-mpfb",
+            "MakeHuman / MPFB",
+            "open-source-assets",
+            &["characters", "human-models", "rigging", "blender", "story-animation"],
+            "Open-source tooling; licensing of generated/imported assets must be checked at retrieval time.",
+            "Depends on the exact asset/tooling license used.",
+            "Depends on the selected asset license.",
+            false,
+            "browser-manual-or-local-adapter",
+            false,
+            "https://www.makehumancommunity.org/",
+            "https://www.makehumancommunity.org/content/licenses.html",
+            "Optional reusable-human source for story mode. Prefer project-owned assets whose redistribution/commercial terms are explicitly verified.",
+            None,
+        ),
+        source!(
+            "ambientcg",
+            "ambientCG",
+            "asset-source",
+            &["textures", "materials", "hdri", "3d-models", "environments"],
+            "Use assets explicitly published as CC0.",
+            "Allowed for CC0 assets.",
+            "Not required for CC0 assets.",
+            false,
+            "documented-download-or-browser",
+            true,
+            "https://ambientcg.com/",
+            "https://docs.ambientcg.com/license/",
+            "Strong free source for reusable story locations, surfaces, roads, walls, soil, wood and environment materials.",
+            None,
+        ),
+        source!(
+            "kenney",
+            "Kenney",
+            "asset-source",
+            &["2d-assets", "3d-assets", "props", "environments", "story-animation"],
+            "Use packs explicitly marked with a free/open license such as CC0.",
+            "Depends on the selected pack license.",
+            "Depends on the selected pack license.",
+            false,
+            "browser-manual-or-documented-download",
+            true,
+            "https://kenney.nl/assets",
+            "https://kenney.nl/support",
+            "Fast reusable source for story props and environment pieces. Record the exact pack license before use.",
+            None,
+        ),
+        source!(
             "blender",
             "Blender",
             "open-source-engine",
-            &["3d", "animation", "compositing", "motion-tracking", "video-editing"],
+            &[
+                "3d",
+                "2.5d",
+                "grease-pencil",
+                "rigify",
+                "eevee",
+                "character-animation",
+                "story-animation",
+                "compositing"
+            ],
             "Free and open source.",
             "Allowed under GPL for the application; produced artwork is not automatically GPL.",
             "None.",
             false,
-            "optional-desktop-adapter",
-            false,
+            "optional-local-adapter",
+            true,
             "https://github.com/blender/blender",
             "GPL-3.0",
-            "Heavy optional adapter for scenes that genuinely need advanced 3D, physics or compositing. Never open it for a simple diagram.",
+            "First-class story-mode renderer for Grease Pencil, 2.5D staging, complex character/prop interaction, Rigify-style rigs and full 3D when a shot benefits from it. It remains optional for tutorial videos and should never be opened for a simple diagram.",
             Some(20_400),
         ),
     ]
@@ -692,6 +822,68 @@ fn ensure_project_owned_file(
     Ok(())
 }
 
+fn rebuild_license_manifest(
+    workspace: &Workspace,
+    project: &video_production::VideoProductionProject,
+    generated_at: u64,
+) -> Result<(), String> {
+    let root = video_production::project_root(workspace, project, AccessOperation::Write)?;
+    let licenses_dir = root.join("licenses");
+    fs::create_dir_all(&licenses_dir)
+        .map_err(|error| format!("Could not create Video Project licenses directory: {error}"))?;
+
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&licenses_dir)
+        .map_err(|error| format!("Could not inspect Video Project licenses: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("Could not inspect Video Project license entry: {error}"))?;
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        if !file_name.starts_with("license-") || !file_name.ends_with(".json") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("Could not inspect Video Project license record: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 1024 * 1024
+        {
+            return Err(
+                "Video Project license record is not a safe bounded regular file.".to_string(),
+            );
+        }
+        let content = fs::read_to_string(&path)
+            .map_err(|error| format!("Could not read Video Project license record: {error}"))?;
+        let record = serde_json::from_str::<VideoAssetLicenseRecord>(&content)
+            .map_err(|error| format!("Could not parse Video Project license record: {error}"))?;
+        records.push(record);
+    }
+    records.sort_by(|left, right| {
+        left.project_relative_path
+            .cmp(&right.project_relative_path)
+            .then_with(|| left.retrieved_at.cmp(&right.retrieved_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let manifest = VideoAssetLicenseManifest {
+        schema_version: 1,
+        project_id: project.id.clone(),
+        generated_at,
+        records,
+    };
+    let manifest_relative = format!("{}/licenses/manifest.json", project.relative_path);
+    let manifest_path = video_production::resolve_project_path(
+        workspace,
+        project,
+        &manifest_relative,
+        AccessOperation::Write,
+        false,
+    )?;
+    let data = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| format!("Could not serialize Video Project license manifest: {error}"))?;
+    fs::write(&manifest_path, data)
+        .map_err(|error| format!("Could not save Video Project license manifest: {error}"))
+}
+
 pub(crate) fn record_license(
     workspace: &Workspace,
     project_id: &str,
@@ -765,12 +957,20 @@ pub(crate) fn record_license(
         .map_err(|error| format!("Could not serialize asset license record: {error}"))?;
     fs::write(&path, data)
         .map_err(|error| format!("Could not save asset license record: {error}"))?;
+    rebuild_license_manifest(workspace, &project, retrieved_at)?;
     video_production::register_asset(
         workspace,
         project_id,
         "license-record",
         &license_relative,
         Some(&format!("{} · {}", record.provider_name, record.license_id)),
+    )?;
+    video_production::register_asset(
+        workspace,
+        project_id,
+        "license-manifest",
+        "licenses/manifest.json",
+        Some("Consolidated asset provenance"),
     )?;
     Ok(record)
 }
@@ -904,6 +1104,25 @@ mod tests {
         let persisted = fs::read_to_string(license_path).unwrap();
         assert!(persisted.contains("CC-BY-4.0"));
         assert!(persisted.contains("Example creator"));
+
+        let project_root =
+            video_production::project_root(&workspace, &project, AccessOperation::Read).unwrap();
+        let manifest_path = project_root.join("licenses/manifest.json");
+        assert!(manifest_path.is_file());
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["schemaVersion"], 1);
+        assert_eq!(manifest["projectId"], project.id);
+        assert_eq!(manifest["records"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            manifest["records"][0]["projectRelativePath"],
+            asset_relative
+        );
+        let refreshed = video_production::get_project(&workspace, &project.id).unwrap();
+        assert!(refreshed.assets.iter().any(|asset| {
+            asset.kind == "license-manifest"
+                && asset.relative_path.ends_with("/licenses/manifest.json")
+        }));
 
         let missing_attribution = VideoAssetLicenseInput {
             provider_id: "storyset-free".to_string(),

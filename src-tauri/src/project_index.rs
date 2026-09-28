@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fs::{self, File},
-    io::Read,
+    io::{ErrorKind, Read},
     path::{Component, Path, PathBuf},
 };
 
@@ -26,6 +26,7 @@ const GENERATED_DIRECTORIES: &[&str] = &[
     ".nuxt",
     ".svelte-kit",
     ".cache",
+    ".repotunnel-tmp",
     ".turbo",
     ".parcel-cache",
     "__pycache__",
@@ -617,26 +618,65 @@ pub(crate) fn project_snapshot(
     })
 }
 
-pub(crate) fn smart_text_files(
+fn skippable_search_io(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::PermissionDenied | ErrorKind::NotFound
+    )
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SmartTextFileScan {
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) skipped_io_count: usize,
+    pub(crate) skipped_policy_count: usize,
+    pub(crate) truncated: bool,
+}
+
+pub(crate) fn smart_text_files_detailed(
     workspace: &Workspace,
     relative_path: &str,
     max_files: usize,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<SmartTextFileScan, String> {
     let start = resolve_workspace_path(workspace, relative_path, AccessOperation::Read, true)?;
     let root = workspace_root(workspace)?;
     if start != root {
         let parent = start.parent().unwrap_or(&root);
         if !should_include_entry(workspace, parent, &start, start.is_dir())? {
-            return Ok(Vec::new());
+            return Ok(SmartTextFileScan::default());
         }
     }
     if start.is_file() {
-        let metadata = fs::metadata(&start)
-            .map_err(|error| format!("Could not inspect the search file: {error}"))?;
-        if metadata.len() > MAX_CLASSIFY_BYTES || is_probably_binary(&start, metadata.len())? {
-            return Ok(Vec::new());
+        let metadata = match fs::metadata(&start) {
+            Ok(metadata) => metadata,
+            Err(error) if skippable_search_io(&error) => {
+                return Ok(SmartTextFileScan {
+                    skipped_io_count: 1,
+                    ..SmartTextFileScan::default()
+                });
+            }
+            Err(error) => {
+                return Err(format!("Could not inspect the search file: {error}"));
+            }
+        };
+        if metadata.len() > MAX_CLASSIFY_BYTES {
+            return Ok(SmartTextFileScan::default());
         }
-        return Ok(vec![start]);
+        match is_probably_binary(&start, metadata.len()) {
+            Ok(false) => {
+                return Ok(SmartTextFileScan {
+                    files: vec![start],
+                    ..SmartTextFileScan::default()
+                });
+            }
+            Ok(true) => return Ok(SmartTextFileScan::default()),
+            Err(_) => {
+                return Ok(SmartTextFileScan {
+                    skipped_io_count: 1,
+                    ..SmartTextFileScan::default()
+                });
+            }
+        }
     }
     if !start.is_dir() {
         return Err("Search can only start from a file or folder.".to_string());
@@ -647,17 +687,41 @@ pub(crate) fn smart_text_files(
         directory: start,
         rules: initial_rules,
     }]);
-    let mut files = Vec::new();
+    let mut scan = SmartTextFileScan::default();
 
     while let Some(item) = queue.pop_front() {
-        for entry in fs::read_dir(&item.directory)
-            .map_err(|error| format!("Could not search a project folder: {error}"))?
-        {
-            let entry =
-                entry.map_err(|error| format!("Could not inspect a project entry: {error}"))?;
+        let read_dir = match fs::read_dir(&item.directory) {
+            Ok(read_dir) => read_dir,
+            Err(error) if skippable_search_io(&error) => {
+                scan.skipped_io_count = scan.skipped_io_count.saturating_add(1);
+                continue;
+            }
+            Err(error) => {
+                return Err(format!("Could not search a project folder: {error}"));
+            }
+        };
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if skippable_search_io(&error) => {
+                    scan.skipped_io_count = scan.skipped_io_count.saturating_add(1);
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!("Could not inspect a project entry: {error}"));
+                }
+            };
             let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| format!("Could not inspect a project entry: {error}"))?;
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if skippable_search_io(&error) => {
+                    scan.skipped_io_count = scan.skipped_io_count.saturating_add(1);
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!("Could not inspect a project entry: {error}"));
+                }
+            };
             if metadata.file_type().is_symlink() {
                 continue;
             }
@@ -672,6 +736,7 @@ pub(crate) fn smart_text_files(
 
             let relative = relative_string(&root, &path);
             if resolve_workspace_path(workspace, &relative, AccessOperation::Read, true).is_err() {
+                scan.skipped_policy_count = scan.skipped_policy_count.saturating_add(1);
                 continue;
             }
 
@@ -683,30 +748,40 @@ pub(crate) fn smart_text_files(
                     directory: path,
                     rules: child_rules,
                 });
-            } else if metadata.is_file()
-                && metadata.len() <= MAX_CLASSIFY_BYTES
-                && !is_probably_binary(&path, metadata.len())?
-            {
-                files.push(path);
-                if files.len() >= max_files {
-                    return Ok(files);
+            } else if metadata.is_file() && metadata.len() <= MAX_CLASSIFY_BYTES {
+                match is_probably_binary(&path, metadata.len()) {
+                    Ok(false) => {
+                        scan.files.push(path);
+                        if scan.files.len() >= max_files {
+                            scan.truncated = true;
+                            return Ok(scan);
+                        }
+                    }
+                    Ok(true) => {}
+                    Err(_) => {
+                        scan.skipped_io_count = scan.skipped_io_count.saturating_add(1);
+                    }
                 }
             }
         }
     }
 
-    Ok(files)
+    Ok(scan)
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
+        io::ErrorKind,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{glob_matches, project_file_metadata, project_snapshot, smart_text_files};
+    use super::{
+        glob_matches, project_file_metadata, project_snapshot, skippable_search_io,
+        smart_text_files_detailed,
+    };
     use crate::models::{CommandPolicy, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy};
 
     fn temp_workspace() -> (PathBuf, Workspace) {
@@ -814,9 +889,27 @@ mod tests {
     }
 
     #[test]
+    fn search_skips_only_expected_partial_io_failures() {
+        assert!(skippable_search_io(&std::io::Error::from(
+            ErrorKind::PermissionDenied
+        )));
+        assert!(skippable_search_io(&std::io::Error::from(
+            ErrorKind::NotFound
+        )));
+        assert!(!skippable_search_io(&std::io::Error::from(
+            ErrorKind::InvalidData
+        )));
+        assert!(!skippable_search_io(&std::io::Error::from(
+            ErrorKind::Other
+        )));
+    }
+
+    #[test]
     fn smart_search_candidates_skip_binary_and_ignored_files() {
         let (root, workspace) = temp_workspace();
-        let files = smart_text_files(&workspace, "", 100).unwrap();
+        let files = smart_text_files_detailed(&workspace, "", 100)
+            .unwrap()
+            .files;
         let names = files
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
@@ -825,6 +918,26 @@ mod tests {
         assert!(names.contains(&"main.ts".to_string()));
         assert!(!names.contains(&"ignored.ts".to_string()));
         assert!(!names.contains(&"image.png".to_string()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn detailed_search_reports_protected_skips_and_candidate_truncation() {
+        let (root, workspace) = temp_workspace();
+        fs::write(root.join(".env"), "TOKEN=hidden\n").unwrap();
+        fs::write(root.join("src/second.ts"), "export const second = true;\n").unwrap();
+
+        let scan = smart_text_files_detailed(&workspace, "", 1).unwrap();
+        assert_eq!(scan.files.len(), 1);
+        assert!(scan.truncated);
+
+        let full_scan = smart_text_files_detailed(&workspace, "", 100).unwrap();
+        assert!(full_scan.skipped_policy_count >= 1);
+        assert!(!full_scan
+            .files
+            .iter()
+            .any(|path| path.file_name().is_some_and(|name| name == ".env")));
+
         let _ = fs::remove_dir_all(root);
     }
 }

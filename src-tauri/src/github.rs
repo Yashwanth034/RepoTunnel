@@ -9,6 +9,7 @@ use std::{
 };
 
 use serde::Serialize;
+use serde_json::{json, Value};
 
 use crate::launcher;
 
@@ -24,6 +25,7 @@ struct AuthRuntime {
 }
 
 static AUTH_RUNTIME: OnceLock<Mutex<Option<AuthRuntime>>> = OnceLock::new();
+static STATUS_CACHE: OnceLock<Mutex<Option<GithubConnectionStatus>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +41,20 @@ pub(crate) struct GithubConnectionStatus {
 
 fn auth_runtime() -> &'static Mutex<Option<AuthRuntime>> {
     AUTH_RUNTIME.get_or_init(|| Mutex::new(None))
+}
+
+fn status_cache() -> &'static Mutex<Option<GithubConnectionStatus>> {
+    STATUS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cache_status(status: &GithubConnectionStatus) {
+    if let Ok(mut cached) = status_cache().lock() {
+        *cached = Some(status.clone());
+    }
+}
+
+pub(crate) fn cached_status() -> Option<GithubConnectionStatus> {
+    status_cache().lock().ok()?.clone()
 }
 
 fn executable_name() -> &'static str {
@@ -92,8 +108,36 @@ fn github_cli_path() -> Option<PathBuf> {
     None
 }
 
+fn github_cli_config_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        return env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|root| root.join("GitHub CLI"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|root| root.join(".config").join("gh"))
+    }
+}
+
+pub(crate) fn configure_cli_command(command: &mut Command) {
+    // RepoTunnel desktop/AI Workspace processes may carry an isolated
+    // XDG_CONFIG_HOME. GH_CONFIG_DIR has higher priority and pins GitHub CLI to
+    // the human's normal persistent GitHub CLI profile without copying a token
+    // into the AI sandbox or AI Workspace environment.
+    if let Some(config_dir) = github_cli_config_dir() {
+        command.env("GH_CONFIG_DIR", config_dir);
+    }
+}
+
 fn run_gh(gh: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(gh)
+    let mut command = Command::new(gh);
+    configure_cli_command(&mut command);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -102,13 +146,200 @@ fn run_gh(gh: &Path, args: &[&str]) -> Result<std::process::Output, String> {
         .map_err(|error| format!("Could not run GitHub CLI: {error}"))
 }
 
-fn username(gh: &Path) -> Option<String> {
-    let output = run_gh(gh, &["api", "user", "--jq", ".login"]).ok()?;
-    if !output.status.success() {
-        return None;
+fn run_gh_in_dir(gh: &Path, cwd: &Path, args: &[String]) -> Result<std::process::Output, String> {
+    let mut command = Command::new(gh);
+    configure_cli_command(&mut command);
+    command
+        .current_dir(cwd)
+        .args(args)
+        .env("GH_PROMPT_DISABLED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("Could not run authenticated GitHub CLI command: {error}"))
+}
+
+fn authenticated_cli() -> Result<PathBuf, String> {
+    let gh = github_cli_path()
+        .ok_or_else(|| "GitHub CLI is not installed on this computer.".to_string())?;
+    let status = raw_status(&gh);
+    if !status.connected {
+        return Err(status.message.unwrap_or_else(|| {
+            "GitHub is not connected in RepoTunnel. Connect GitHub and try again.".to_string()
+        }));
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!value.is_empty()).then_some(value)
+    Ok(gh)
+}
+
+pub(crate) fn create_pull_request(
+    cwd: &Path,
+    title: String,
+    body: Option<String>,
+    base: Option<String>,
+    head: Option<String>,
+    draft: bool,
+) -> Result<Value, String> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("Pull request title cannot be empty.".to_string());
+    }
+    if title.len() > 512 {
+        return Err("Pull request title is too large.".to_string());
+    }
+    let body = body.unwrap_or_default();
+    if body.len() > 64 * 1024 {
+        return Err("Pull request body is too large.".to_string());
+    }
+
+    let gh = authenticated_cli()?;
+    let mut args = vec![
+        "pr".to_string(),
+        "create".to_string(),
+        "--title".to_string(),
+        title.clone(),
+        "--body".to_string(),
+        body,
+    ];
+    if let Some(base) = base
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        args.extend(["--base".to_string(), base]);
+    }
+    if let Some(head) = head
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        args.extend(["--head".to_string(), head]);
+    }
+    if draft {
+        args.push("--draft".to_string());
+    }
+    let output = run_gh_in_dir(&gh, cwd, &args)?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "GitHub pull request creation failed.".to_string()
+        } else {
+            format!("GitHub pull request creation failed: {detail}")
+        });
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(json!({
+        "created": true,
+        "title": title,
+        "url": url,
+        "draft": draft
+    }))
+}
+
+pub(crate) fn merge_pull_request(
+    cwd: &Path,
+    number: u64,
+    method: &str,
+    delete_branch: bool,
+    auto: bool,
+    admin: bool,
+) -> Result<Value, String> {
+    if number == 0 {
+        return Err("Pull request number must be greater than zero.".to_string());
+    }
+    let method_flag = match method {
+        "merge" => "--merge",
+        "squash" => "--squash",
+        "rebase" => "--rebase",
+        _ => return Err("Merge method must be merge, squash, or rebase.".to_string()),
+    };
+    let gh = authenticated_cli()?;
+    let mut args = vec![
+        "pr".to_string(),
+        "merge".to_string(),
+        number.to_string(),
+        method_flag.to_string(),
+    ];
+    if delete_branch {
+        args.push("--delete-branch".to_string());
+    }
+    if auto {
+        args.push("--auto".to_string());
+    }
+    if admin {
+        args.push("--admin".to_string());
+    }
+    let output = run_gh_in_dir(&gh, cwd, &args)?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "GitHub pull request merge failed.".to_string()
+        } else {
+            format!("GitHub pull request merge failed: {detail}")
+        });
+    }
+    Ok(json!({
+        "merged": true,
+        "number": number,
+        "method": method,
+        "deleteBranch": delete_branch,
+        "auto": auto,
+        "admin": admin,
+        "output": String::from_utf8_lossy(&output.stdout).trim()
+    }))
+}
+
+fn auth_status_username(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+
+    for line in text.lines() {
+        let words = line.split_whitespace().collect::<Vec<_>>();
+        for (index, word) in words.iter().enumerate() {
+            if !word.eq_ignore_ascii_case("account") {
+                continue;
+            }
+            let Some(candidate) = words.get(index + 1) else {
+                continue;
+            };
+            let username = candidate
+                .trim_matches(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+                .to_string();
+            if !username.is_empty()
+                && username.len() <= 39
+                && username
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Some(username);
+            }
+        }
+    }
+
+    None
+}
+
+fn auth_output_reports_invalid_credential(stdout: &[u8], stderr: &[u8]) -> bool {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    )
+    .to_ascii_lowercase();
+    text.contains("token") && (text.contains("invalid") || text.contains("expired"))
+}
+
+fn connected_status(username: Option<String>) -> GithubConnectionStatus {
+    GithubConnectionStatus {
+        available: true,
+        connected: true,
+        connecting: false,
+        username,
+        device_code: None,
+        verification_url: None,
+        message: None,
+    }
 }
 
 fn raw_status(gh: &Path) -> GithubConnectionStatus {
@@ -127,7 +358,8 @@ fn raw_status(gh: &Path) -> GithubConnectionStatus {
         }
     };
 
-    if !auth.status.success() {
+    let invalid_credential = auth_output_reports_invalid_credential(&auth.stdout, &auth.stderr);
+    if !auth.status.success() || invalid_credential {
         return GithubConnectionStatus {
             available: true,
             connected: false,
@@ -135,19 +367,17 @@ fn raw_status(gh: &Path) -> GithubConnectionStatus {
             username: None,
             device_code: None,
             verification_url: None,
-            message: None,
+            message: invalid_credential.then(|| {
+                "Saved GitHub credential is invalid or expired. Reconnect GitHub once to refresh it."
+                    .to_string()
+            }),
         };
     }
 
-    GithubConnectionStatus {
-        available: true,
-        connected: true,
-        connecting: false,
-        username: username(gh),
-        device_code: None,
-        verification_url: None,
-        message: None,
-    }
+    // "gh auth status" is the authoritative persisted-auth check. Derive the
+    // display username from the same CLI result instead of making a second
+    // network request on every Commands-page mount.
+    connected_status(auth_status_username(&auth.stdout, &auth.stderr))
 }
 
 fn extract_device_code(line: &str) -> Option<String> {
@@ -198,7 +428,7 @@ fn stop_runtime() {
     }
 }
 
-pub(crate) fn status() -> GithubConnectionStatus {
+fn compute_status() -> GithubConnectionStatus {
     let Some(gh) = github_cli_path() else {
         stop_runtime();
         return GithubConnectionStatus {
@@ -284,6 +514,12 @@ pub(crate) fn status() -> GithubConnectionStatus {
     }
 }
 
+pub(crate) fn status() -> GithubConnectionStatus {
+    let current = compute_status();
+    cache_status(&current);
+    current
+}
+
 pub(crate) fn connect() -> Result<GithubConnectionStatus, String> {
     let Some(gh) = github_cli_path() else {
         return Err(
@@ -297,7 +533,9 @@ pub(crate) fn connect() -> Result<GithubConnectionStatus, String> {
         return Ok(current);
     }
 
-    let mut child = Command::new(&gh)
+    let mut command = Command::new(&gh);
+    configure_cli_command(&mut command);
+    let mut child = command
         .args([
             "auth",
             "login",
@@ -375,6 +613,7 @@ pub(crate) fn disconnect() -> Result<GithubConnectionStatus, String> {
 
     let current = raw_status(&gh);
     if !current.connected {
+        cache_status(&current);
         return Ok(current);
     }
 
@@ -387,12 +626,37 @@ pub(crate) fn disconnect() -> Result<GithubConnectionStatus, String> {
         return Err("Could not disconnect GitHub. Please try again.".to_string());
     }
 
-    Ok(raw_status(&gh))
+    let disconnected = raw_status(&gh);
+    cache_status(&disconnected);
+    Ok(disconnected)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{executable_name, extract_device_code};
+    use super::{
+        auth_output_reports_invalid_credential, auth_status_username, connected_status,
+        executable_name, extract_device_code, github_cli_config_dir,
+    };
+
+    #[test]
+    fn parses_username_from_github_auth_status_without_api_round_trip() {
+        assert_eq!(
+            auth_status_username(
+                b"",
+                b"github.com\n  Logged in to github.com account Yashwanth034 (keyring)\n"
+            ),
+            Some("Yashwanth034".to_string())
+        );
+        assert_eq!(auth_status_username(b"Logged in to github.com", b""), None);
+    }
+
+    #[test]
+    fn authenticated_status_stays_connected_when_username_lookup_is_unavailable() {
+        let status = connected_status(None);
+        assert!(status.connected);
+        assert_eq!(status.username, None);
+        assert!(!status.connecting);
+    }
 
     #[test]
     fn github_cli_name_matches_platform() {
@@ -401,6 +665,37 @@ mod tests {
         } else {
             assert_eq!(executable_name(), "gh");
         }
+    }
+
+    #[test]
+    fn github_cli_config_ignores_isolated_xdg_profiles() {
+        let Some(config_dir) = github_cli_config_dir() else {
+            return;
+        };
+
+        #[cfg(not(windows))]
+        assert!(config_dir.ends_with(".config/gh"));
+
+        #[cfg(windows)]
+        assert!(config_dir.ends_with("GitHub CLI"));
+
+        let mut command = std::process::Command::new(executable_name());
+        super::configure_cli_command(&mut command);
+        let debug = format!("{command:?}");
+        assert!(debug.contains("GH_CONFIG_DIR"));
+        assert!(debug.contains(config_dir.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn detects_invalid_github_credentials_even_when_cli_exit_status_is_unreliable() {
+        assert!(auth_output_reports_invalid_credential(
+            b"",
+            b"The token in /home/example/.config/gh/hosts.yml is invalid."
+        ));
+        assert!(!auth_output_reports_invalid_credential(
+            b"Logged in to github.com",
+            b""
+        ));
     }
 
     #[test]

@@ -20,6 +20,7 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   const [status, setStatus] = useState<AiWorkspaceStatus | null>(null);
   const [frame, setFrame] = useState<AiWorkspaceFrame | null>(null);
   const [applicationId, setApplicationId] = useState("");
+  const [selectedAppSessionId, setSelectedAppSessionId] = useState("");
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
   const [backendAvailable, setBackendAvailable] = useState(true);
@@ -38,6 +39,12 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
     () => selectableApps.filter((application) => !isProductivityApplication(application)),
     [selectableApps],
   );
+  const selectedApplication = useMemo(
+    () => status?.applications.find((application) => application.appSessionId === selectedAppSessionId) ?? null,
+    [selectedAppSessionId, status?.applications],
+  );
+  const canStartAnotherApp =
+    !status?.running || status.applicationCount < status.maxConcurrentApplications;
 
   useEffect(() => {
     if (!applicationId || !selectableApps.some((application) => application.id === applicationId)) {
@@ -51,6 +58,20 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
       const next = await getAiWorkspaceStatus(workspace.id);
       setBackendAvailable(true);
       setStatus(next);
+      setSelectedAppSessionId((current) => {
+        if (current && next.applications.some((application) => application.appSessionId === current)) {
+          return current;
+        }
+        if (
+          next.lastStartedAppSessionId &&
+          next.applications.some(
+            (application) => application.appSessionId === next.lastStartedAppSessionId,
+          )
+        ) {
+          return next.lastStartedAppSessionId;
+        }
+        return next.applications[0]?.appSessionId ?? "";
+      });
       if (!next.running) setFrame(null);
       return next;
     } catch (error) {
@@ -67,17 +88,23 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   }, [onError, workspace.id]);
 
   const refreshFrame = useCallback(async () => {
-    if (frameBusy.current || document.visibilityState !== "visible") return;
+    if (
+      !selectedAppSessionId ||
+      frameBusy.current ||
+      document.visibilityState !== "visible"
+    ) {
+      return;
+    }
     frameBusy.current = true;
     try {
-      const next = await getAiWorkspaceFrame(workspace.id, 1440);
+      const next = await getAiWorkspaceFrame(workspace.id, selectedAppSessionId, 1440);
       setFrame(next);
     } catch {
       // Status polling handles app exits/restarts without spamming the global error surface.
     } finally {
       frameBusy.current = false;
     }
-  }, [workspace.id]);
+  }, [selectedAppSessionId, workspace.id]);
 
   useEffect(() => {
     if (!desktopEnabled) {
@@ -92,11 +119,12 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   }, [backendAvailable, desktopEnabled, refreshStatus]);
 
   useEffect(() => {
-    if (!status?.running || !status.ready) return;
+    if (!status?.running || !status.ready || !selectedAppSessionId) return;
+    setFrame(null);
     void refreshFrame();
     const timer = window.setInterval(() => void refreshFrame(), 700);
     return () => window.clearInterval(timer);
-  }, [refreshFrame, status?.ready, status?.running]);
+  }, [refreshFrame, selectedAppSessionId, status?.ready, status?.running]);
 
   useEffect(() => {
     if (!expanded) return;
@@ -113,8 +141,10 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
     try {
       const next = await startAiWorkspace(workspace.id, applicationId, target);
       setStatus(next);
+      const nextSessionId =
+        next.lastStartedAppSessionId ?? next.applications.at(-1)?.appSessionId ?? "";
+      setSelectedAppSessionId(nextSessionId);
       setFrame(null);
-      window.setTimeout(() => void refreshFrame(), 700);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -123,10 +153,12 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   }
 
   async function stop() {
-    if (busy) return;
+    if (busy || !selectedAppSessionId) return;
     setBusy(true);
     try {
-      setStatus(await stopAiWorkspace(workspace.id));
+      const next = await stopAiWorkspace(workspace.id, selectedAppSessionId);
+      setStatus(next);
+      setSelectedAppSessionId(next.applications[0]?.appSessionId ?? "");
       setFrame(null);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -136,13 +168,17 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   }
 
   async function clickFrame(event: React.MouseEvent<HTMLImageElement>) {
-    if (!status?.running) return;
+    if (!status?.running || !selectedAppSessionId) return;
     const rect = event.currentTarget.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
     const xRatio = (event.clientX - rect.left) / rect.width;
     const yRatio = (event.clientY - rect.top) / rect.height;
     try {
-      await aiWorkspaceAction(workspace.id, "click", { xRatio, yRatio, clickCount: event.detail >= 2 ? 2 : 1 });
+      await aiWorkspaceAction(workspace.id, selectedAppSessionId, "click", {
+        xRatio,
+        yRatio,
+        clickCount: event.detail >= 2 ? 2 : 1,
+      });
       window.setTimeout(() => void refreshFrame(), 100);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -178,16 +214,20 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
       <div className="ai-workspace-heading">
         <div>
           <strong>AI Workspace</strong>
-          <span>{status?.running ? `${status.applicationName ?? "Application"} · isolated display` : "Private virtual desktop for ChatGPT"}</span>
+          <span>
+            {status?.running
+              ? `${status.applicationCount} app${status.applicationCount === 1 ? "" : "s"} · shared isolated display`
+              : "Private virtual desktop for ChatGPT"}
+          </span>
         </div>
-        {status?.running ? (
+        {status?.running && selectedAppSessionId ? (
           <button className="secondary-button" type="button" disabled={busy} onClick={() => void stop()}>
-            {busy ? "Stopping…" : "Stop"}
+            {busy ? "Stopping…" : `Stop ${selectedApplication?.applicationName ?? "selected app"}`}
           </button>
         ) : null}
       </div>
 
-      {!status?.running ? (
+      {canStartAnotherApp ? (
         <div className="ai-workspace-start-row">
           <select aria-label="AI Workspace application" value={applicationId} onChange={(event) => setApplicationId(event.target.value)}>
             {productivityFamilies.map((family) => (
@@ -212,29 +252,67 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
             placeholder="Project file or folder (optional)"
           />
           <button className="primary-button" type="button" disabled={!applicationId || busy} onClick={() => void start()}>
-            {busy ? "Starting…" : "Start AI Workspace"}
+            {busy ? "Starting…" : status?.running ? "Open application" : "Start AI Workspace"}
           </button>
         </div>
-      ) : (
+      ) : status?.running ? (
+        <p>
+          AI Workspace is at its current CPU/RAM-derived application limit
+          ({status.applicationCount}/{status.maxConcurrentApplications}).
+        </p>
+      ) : null}
+
+      {status?.running ? (
         <>
           <div className="ai-workspace-meta">
             <span className="ai-workspace-live-dot" aria-hidden="true" />
             <span>AI control isolated from your desktop</span>
-            <span className="ai-workspace-quality">Live preview · 1440×900</span>
+            <span className="ai-workspace-quality">
+              {status.applicationCount}/{status.maxConcurrentApplications} app slots in use
+            </span>
             {frame?.activeTitle ? <span>{frame.activeTitle}</span> : null}
           </div>
+
+          {status.applications.length > 0 ? (
+            <div className="ai-workspace-start-row">
+              <select
+                aria-label="AI Workspace active application"
+                value={selectedAppSessionId}
+                onChange={(event) => {
+                  setSelectedAppSessionId(event.target.value);
+                  setFrame(null);
+                }}
+              >
+                {status.applications.map((application) => (
+                  <option key={application.appSessionId} value={application.appSessionId}>
+                    {application.applicationName}
+                    {application.primary ? " · primary" : ""}
+                  </option>
+                ))}
+              </select>
+              <span>
+                {selectedApplication
+                  ? `Session ${selectedApplication.appSessionId}`
+                  : "Select an application"}
+              </span>
+            </div>
+          ) : null}
           <div className={`ai-workspace-screen-shell ${expanded ? "expanded" : ""}`}>
             {frame?.dataBase64 ? (
               <img
                 className="ai-workspace-screen"
                 src={`data:${frame.mimeType};base64,${frame.dataBase64}`}
-                alt={`Live ${status.applicationName ?? "AI Workspace"} screen`}
+                alt={`Live ${selectedApplication?.applicationName ?? "AI Workspace"} screen`}
                 draggable={false}
                 onClick={(event) => void clickFrame(event)}
               />
             ) : (
               <div className="ai-workspace-screen-placeholder">
-                <span>Starting isolated display…</span>
+                <span>
+                  {selectedAppSessionId
+                    ? "Loading selected application…"
+                    : "Select an application session"}
+                </span>
               </div>
             )}
             <button
@@ -248,9 +326,12 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
               {expanded ? "Exit full view" : "Expand"}
             </button>
           </div>
-          <p className="ai-workspace-footnote">Your normal mouse, keyboard and active applications are not used by this session.</p>
+          <p className="ai-workspace-footnote">
+            Multiple bounded app sessions share this virtual desktop. Preview and input are scoped
+            to the selected app session.
+          </p>
         </>
-      )}
+      ) : null}
     </section>
   );
 }

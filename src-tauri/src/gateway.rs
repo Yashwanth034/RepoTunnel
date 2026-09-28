@@ -13,7 +13,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tauri::{AppHandle, Manager};
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::{app_state::AppState, mcp_auth, mcp_server::RepoTunnelMcp, public_tunnel};
 
@@ -613,7 +613,7 @@ pub(crate) async fn serve(
     listener: StdTcpListener,
     port: u16,
     app: AppHandle,
-    shutdown: oneshot::Receiver<()>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), String> {
     listener
         .set_nonblocking(true)
@@ -659,7 +659,14 @@ pub(crate) async fn serve(
 
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
-            let _ = shutdown.await;
+            loop {
+                if *shutdown.borrow() {
+                    break;
+                }
+                if shutdown.changed().await.is_err() {
+                    break;
+                }
+            }
         })
         .await
         .map_err(|error| format!("The local MCP gateway stopped unexpectedly: {error}"))

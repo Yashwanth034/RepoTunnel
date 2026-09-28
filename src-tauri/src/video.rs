@@ -910,6 +910,30 @@ fn trim_command_output(mut value: String) -> String {
     value.split_off(start.min(value.len()))
 }
 
+pub(crate) fn available_ffmpeg_program(app: &AppHandle) -> Option<PathBuf> {
+    program_path(app, "ffmpeg").map(|(path, _)| path)
+}
+
+pub(crate) fn available_ffprobe_program(app: &AppHandle) -> Option<PathBuf> {
+    program_path(app, "ffprobe").map(|(path, _)| path)
+}
+
+pub(crate) fn ffmpeg_program(
+    app: &AppHandle,
+    allow_automatic_install: bool,
+) -> Result<PathBuf, String> {
+    if let Some(path) = available_ffmpeg_program(app) {
+        return Ok(path);
+    }
+    if !allow_automatic_install {
+        return Err(
+            "FFmpeg is not currently available and this Video Project blocks automatic package/tool installation. Enable allowAutomaticPackageInstall in the project resource policy or install FFmpeg explicitly."
+                .to_string(),
+        );
+    }
+    ensure_ffmpeg_program(app)
+}
+
 pub(crate) fn ensure_ffmpeg_program(app: &AppHandle) -> Result<PathBuf, String> {
     let cancel = AtomicBool::new(false);
     ensure_tool(app, "ffmpeg", &cancel)

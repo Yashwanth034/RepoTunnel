@@ -518,8 +518,14 @@ fn run_ffmpeg_program(
     protect_file(output)
 }
 
-fn run_ffmpeg(app: &AppHandle, source: &Path, output: &Path, kind: &str) -> Result<(), String> {
-    let ffmpeg = video::ensure_ffmpeg_program(app)?;
+fn run_ffmpeg(
+    app: &AppHandle,
+    allow_automatic_install: bool,
+    source: &Path,
+    output: &Path,
+    kind: &str,
+) -> Result<(), String> {
+    let ffmpeg = video::ffmpeg_program(app, allow_automatic_install)?;
     run_ffmpeg_program(&ffmpeg, source, output, kind)
 }
 
@@ -540,7 +546,12 @@ fn preview_fingerprint(source: &Path) -> Result<u64, String> {
     Ok(hasher.finish())
 }
 
-fn preview_media(app: &AppHandle, source: &Path, root: &Path) -> Result<(PathBuf, String), String> {
+fn preview_media(
+    app: &AppHandle,
+    allow_automatic_install: bool,
+    source: &Path,
+    root: &Path,
+) -> Result<(PathBuf, String), String> {
     let ext = extension(source);
     let (kind, native, destination_ext, mime) = match ext.as_str() {
         "mp4" | "m4v" if webview_safe_mp4(source) => ("video-copy", false, "mp4", "video/mp4"),
@@ -583,7 +594,7 @@ fn preview_media(app: &AppHandle, source: &Path, root: &Path) -> Result<(PathBuf
                 ".preview-{fingerprint:016x}.part.{destination_ext}"
             ));
             let _ = fs::remove_file(&temporary);
-            run_ffmpeg(app, source, &temporary, kind)?;
+            run_ffmpeg(app, allow_automatic_install, source, &temporary, kind)?;
             fs::rename(&temporary, &destination)
                 .map_err(|error| format!("Could not finalize Video Project preview: {error}"))?;
             protect_file(&destination)?;
@@ -617,7 +628,13 @@ fn prepare_subtitle(
     if ext == "vtt" {
         copy_regular_file(&source, &destination)?;
     } else if matches!(ext.as_str(), "srt" | "ass" | "ssa") {
-        run_ffmpeg(app, &source, &destination, "subtitle")?;
+        run_ffmpeg(
+            app,
+            project.resource_policy.allow_automatic_package_install,
+            &source,
+            &destination,
+            "subtitle",
+        )?;
     } else {
         return Ok((None, None));
     }
@@ -635,7 +652,12 @@ fn prepare_relative(
     let root = preview_root(app, &workspace.id, &project.id)?;
     protect_directory(&root)?;
 
-    let (destination, mime_type) = preview_media(app, &source, &root)?;
+    let (destination, mime_type) = preview_media(
+        app,
+        project.resource_policy.allow_automatic_package_install,
+        &source,
+        &root,
+    )?;
     let (subtitle_path, subtitle_language) = if include_subtitle && mime_type.starts_with("video/")
     {
         prepare_subtitle(app, workspace, project, &root)?

@@ -32,6 +32,7 @@ static ACTIVE_RECORDING: OnceLock<Mutex<Option<ActiveRecording>>> = OnceLock::ne
 const PROJECT_DIRECTORIES: &[&str] = &[
     "script",
     "storyboard",
+    "storyboard/scenes",
     "recordings/raw",
     "recordings/selected",
     "animations/generated",
@@ -49,6 +50,17 @@ const PROJECT_DIRECTORIES: &[&str] = &[
     "licenses",
 ];
 
+const STORY_DIRECTORIES: &[&str] = &[
+    "story",
+    "story/characters",
+    "story/locations",
+    "story/props",
+    "story/shots",
+    "story/animatic",
+    "story/cache",
+    "story/engines",
+];
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoProductionAsset {
@@ -57,6 +69,66 @@ pub(crate) struct VideoProductionAsset {
     pub(crate) created_at: u64,
     #[serde(default)]
     pub(crate) label: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VideoSceneSource {
+    pub(crate) claim: String,
+    pub(crate) source_url: String,
+    #[serde(default)]
+    pub(crate) verification_state: String,
+    #[serde(default)]
+    pub(crate) checked_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VideoProductionSceneInput {
+    pub(crate) id: String,
+    pub(crate) order: u32,
+    pub(crate) purpose: String,
+    pub(crate) teaching_point: String,
+    pub(crate) narration: String,
+    #[serde(default = "default_scene_captions")]
+    pub(crate) captions_enabled: bool,
+    #[serde(default)]
+    pub(crate) duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub(crate) sources: Vec<VideoSceneSource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VideoProductionScene {
+    pub(crate) id: String,
+    pub(crate) order: u32,
+    pub(crate) purpose: String,
+    pub(crate) teaching_point: String,
+    pub(crate) narration: String,
+    pub(crate) captions_enabled: bool,
+    pub(crate) duration_seconds: Option<f64>,
+    #[serde(default)]
+    pub(crate) sources: Vec<VideoSceneSource>,
+    #[serde(default)]
+    pub(crate) animation_source: Option<String>,
+    #[serde(default)]
+    pub(crate) rendered_clip: Option<String>,
+    #[serde(default)]
+    pub(crate) narration_audio: Option<String>,
+    #[serde(default)]
+    pub(crate) subtitle_path: Option<String>,
+    #[serde(default = "default_scene_qa_status")]
+    pub(crate) qa_status: String,
+    pub(crate) updated_at: u64,
+}
+
+fn default_scene_captions() -> bool {
+    true
+}
+
+fn default_scene_qa_status() -> String {
+    "pending".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -69,6 +141,49 @@ pub(crate) struct VideoProductionCheckpoint {
     pub(crate) detail: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VideoProductionResourcePolicy {
+    pub(crate) allow_local_model_downloads: bool,
+    pub(crate) allow_automatic_package_install: bool,
+    pub(crate) allow_cloud_services: bool,
+    pub(crate) allow_paid_services: bool,
+    pub(crate) max_temporary_disk_mb: u64,
+}
+
+impl Default for VideoProductionResourcePolicy {
+    fn default() -> Self {
+        Self {
+            allow_local_model_downloads: false,
+            allow_automatic_package_install: false,
+            allow_cloud_services: true,
+            allow_paid_services: false,
+            max_temporary_disk_mb: 2048,
+        }
+    }
+}
+
+fn default_storage_mode() -> String {
+    "legacy-workspace".to_string()
+}
+
+fn default_production_mode() -> String {
+    "tutorial".to_string()
+}
+
+fn validate_production_mode(value: Option<&str>) -> Result<String, String> {
+    match value
+        .unwrap_or("tutorial")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "tutorial" => Ok("tutorial".to_string()),
+        "story" | "narrative" | "animation" => Ok("story".to_string()),
+        _ => Err("Video production mode must be tutorial or story.".to_string()),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoProductionProject {
@@ -78,6 +193,10 @@ pub(crate) struct VideoProductionProject {
     pub(crate) name: String,
     pub(crate) slug: String,
     pub(crate) relative_path: String,
+    #[serde(default = "default_storage_mode")]
+    pub(crate) storage_mode: String,
+    #[serde(default = "default_production_mode")]
+    pub(crate) production_mode: String,
     pub(crate) status: String,
     #[serde(default)]
     pub(crate) pinned: bool,
@@ -85,6 +204,8 @@ pub(crate) struct VideoProductionProject {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) fps: u32,
+    #[serde(default)]
+    pub(crate) resource_policy: VideoProductionResourcePolicy,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
     #[serde(default)]
@@ -137,6 +258,7 @@ pub(crate) struct VideoRecordingStatus {
     pub(crate) id: String,
     pub(crate) workspace_id: String,
     pub(crate) project_id: String,
+    pub(crate) app_session_id: String,
     pub(crate) status: String,
     pub(crate) capture_target: String,
     pub(crate) relative_path: String,
@@ -437,7 +559,20 @@ pub(crate) fn create_project(
     height: Option<u32>,
     fps: Option<u32>,
 ) -> Result<VideoProductionProject, String> {
+    create_project_with_mode(workspace, name, None, aspect_ratio, width, height, fps)
+}
+
+pub(crate) fn create_project_with_mode(
+    workspace: &Workspace,
+    name: &str,
+    production_mode: Option<&str>,
+    aspect_ratio: Option<&str>,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
+) -> Result<VideoProductionProject, String> {
     let name = validate_name(name)?;
+    let production_mode = validate_production_mode(production_mode)?;
     let (aspect_ratio, width, height, fps) = validate_format(aspect_ratio, width, height, fps)?;
     check_workspace_access(workspace, AccessOperation::Write)?;
     let root = projects_root(workspace)?;
@@ -454,6 +589,13 @@ pub(crate) fn create_project(
         for directory in PROJECT_DIRECTORIES {
             fs::create_dir_all(project_root.join(directory))
                 .map_err(|error| format!("Could not initialize video project folders: {error}"))?;
+        }
+        if production_mode == "story" {
+            for directory in STORY_DIRECTORIES {
+                fs::create_dir_all(project_root.join(directory)).map_err(|error| {
+                    format!("Could not initialize story-animation project folders: {error}")
+                })?;
+            }
         }
 
         write_atomic(&project_root.join("script/script.md"), b"")?;
@@ -482,12 +624,15 @@ pub(crate) fn create_project(
             name,
             slug,
             relative_path: relative_path.clone(),
+            storage_mode: "standalone".to_string(),
+            production_mode: production_mode.clone(),
             status: "planning".to_string(),
             pinned: false,
             aspect_ratio,
             width,
             height,
             fps,
+            resource_policy: VideoProductionResourcePolicy::default(),
             created_at: now,
             updated_at: now,
             script_path: Some(format!("{relative_path}/script/script.md")),
@@ -553,10 +698,15 @@ fn collect_projects_from_root(
             continue;
         }
 
-        let project = match load_manifest(&manifest) {
+        let mut project = match load_manifest(&manifest) {
             Ok(project) => project,
             Err(_) if standalone => continue,
             Err(error) => return Err(error),
+        };
+        project.storage_mode = if standalone {
+            "standalone".to_string()
+        } else {
+            "legacy-workspace".to_string()
         };
         if project.workspace_id != workspace.id {
             continue;
@@ -619,6 +769,258 @@ pub(crate) fn set_project_pinned(
     project.updated_at = now_millis()?;
     save_manifest(&root, &project)?;
     Ok(project)
+}
+
+pub(crate) fn set_resource_policy(
+    workspace: &Workspace,
+    project_id: &str,
+    policy: VideoProductionResourcePolicy,
+) -> Result<VideoProductionProject, String> {
+    if !(256..=32_768).contains(&policy.max_temporary_disk_mb) {
+        return Err(
+            "Video Project temporary-disk limit must be between 256 MB and 32768 MB.".to_string(),
+        );
+    }
+    let mut project = get_project(workspace, project_id)?;
+    let root = project_root(workspace, &project, AccessOperation::Write)?;
+    project.resource_policy = policy;
+    project.updated_at = now_millis()?;
+    save_manifest(&root, &project)?;
+    Ok(project)
+}
+
+fn validate_scene_id(id: &str) -> Result<String, String> {
+    let id = id.trim();
+    if id.is_empty() || id.len() > 80 || id == "." || id == ".." {
+        return Err("Video scene ID must be 1..80 characters.".to_string());
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(
+            "Video scene ID may contain only letters, digits, hyphen, underscore, and dot."
+                .to_string(),
+        );
+    }
+    Ok(id.to_string())
+}
+
+fn validate_scene_input(input: &VideoProductionSceneInput) -> Result<(), String> {
+    validate_scene_id(&input.id)?;
+    if input.purpose.trim().len() > 1000
+        || input.teaching_point.trim().len() > 2000
+        || input.narration.len() > 120_000
+    {
+        return Err("Video scene text exceeds RepoTunnel's bounded scene limits.".to_string());
+    }
+    if let Some(duration) = input.duration_seconds {
+        if !duration.is_finite() || !(0.25..=3600.0).contains(&duration) {
+            return Err("Video scene duration must be between 0.25 and 3600 seconds.".to_string());
+        }
+    }
+    if input.sources.len() > 128 {
+        return Err("Video scene source ledger is limited to 128 entries.".to_string());
+    }
+    for source in &input.sources {
+        if source.claim.len() > 4000 || source.source_url.len() > 4096 {
+            return Err("Video scene source metadata exceeds safe limits.".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn scene_directory(
+    workspace: &Workspace,
+    project: &VideoProductionProject,
+    operation: AccessOperation,
+) -> Result<PathBuf, String> {
+    let relative = format!("{}/storyboard/scenes", project.relative_path);
+    resolve_project_path(workspace, project, &relative, operation, false)
+}
+
+fn scene_file(
+    workspace: &Workspace,
+    project: &VideoProductionProject,
+    scene_id: &str,
+    operation: AccessOperation,
+    must_exist: bool,
+) -> Result<PathBuf, String> {
+    let id = validate_scene_id(scene_id)?;
+    let relative = format!("{}/storyboard/scenes/{id}.json", project.relative_path);
+    resolve_project_path(workspace, project, &relative, operation, must_exist)
+}
+
+fn load_scene_file(path: &Path) -> Result<VideoProductionScene, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("Could not inspect Video Project scene: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4 * 1024 * 1024
+    {
+        return Err("Video Project scene is not a safe regular file.".to_string());
+    }
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read Video Project scene: {error}"))?;
+    serde_json::from_str(&content)
+        .map_err(|error| format!("Video Project scene JSON is invalid: {error}"))
+}
+
+pub(crate) fn upsert_scene(
+    workspace: &Workspace,
+    project_id: &str,
+    input: VideoProductionSceneInput,
+) -> Result<VideoProductionScene, String> {
+    validate_scene_input(&input)?;
+    let project = get_project(workspace, project_id)?;
+    let directory = scene_directory(workspace, &project, AccessOperation::Write)?;
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not prepare Video Project scenes: {error}"))?;
+    let path = scene_file(
+        workspace,
+        &project,
+        &input.id,
+        AccessOperation::Write,
+        false,
+    )?;
+    let existing = if path.exists() {
+        Some(load_scene_file(&path)?)
+    } else {
+        None
+    };
+    let now = now_millis()?;
+    let scene = VideoProductionScene {
+        id: input.id,
+        order: input.order,
+        purpose: input.purpose,
+        teaching_point: input.teaching_point,
+        narration: input.narration,
+        captions_enabled: input.captions_enabled,
+        duration_seconds: input.duration_seconds,
+        sources: input.sources,
+        animation_source: existing
+            .as_ref()
+            .and_then(|value| value.animation_source.clone()),
+        rendered_clip: existing
+            .as_ref()
+            .and_then(|value| value.rendered_clip.clone()),
+        narration_audio: existing
+            .as_ref()
+            .and_then(|value| value.narration_audio.clone()),
+        subtitle_path: existing
+            .as_ref()
+            .and_then(|value| value.subtitle_path.clone()),
+        qa_status: existing
+            .as_ref()
+            .map(|value| value.qa_status.clone())
+            .unwrap_or_else(default_scene_qa_status),
+        updated_at: now,
+    };
+    let bytes = serde_json::to_vec_pretty(&scene)
+        .map_err(|error| format!("Could not serialize Video Project scene: {error}"))?;
+    write_atomic(&path, &bytes)?;
+
+    let root = project_root(workspace, &project, AccessOperation::Write)?;
+    let mut refreshed = project;
+    refreshed.updated_at = now;
+    save_manifest(&root, &refreshed)?;
+    Ok(scene)
+}
+
+pub(crate) fn get_scene(
+    workspace: &Workspace,
+    project_id: &str,
+    scene_id: &str,
+) -> Result<VideoProductionScene, String> {
+    let project = get_project(workspace, project_id)?;
+    let path = scene_file(workspace, &project, scene_id, AccessOperation::Read, true)?;
+    load_scene_file(&path)
+}
+
+pub(crate) fn list_scenes(
+    workspace: &Workspace,
+    project_id: &str,
+) -> Result<Vec<VideoProductionScene>, String> {
+    let project = get_project(workspace, project_id)?;
+    let directory = scene_directory(workspace, &project, AccessOperation::Read)?;
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let metadata = fs::symlink_metadata(&directory)
+        .map_err(|error| format!("Could not inspect Video Project scenes: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Video Project scene storage is not a regular directory.".to_string());
+    }
+    let mut scenes = Vec::new();
+    for entry in fs::read_dir(&directory)
+        .map_err(|error| format!("Could not list Video Project scenes: {error}"))?
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(scene) = load_scene_file(&path) {
+            scenes.push(scene);
+        }
+    }
+    scenes.sort_by(|left, right| {
+        left.order
+            .cmp(&right.order)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(scenes)
+}
+
+fn mutate_scene(
+    workspace: &Workspace,
+    project_id: &str,
+    scene_id: &str,
+    mutate: impl FnOnce(&mut VideoProductionScene),
+) -> Result<Option<VideoProductionScene>, String> {
+    let project = get_project(workspace, project_id)?;
+    let path = scene_file(workspace, &project, scene_id, AccessOperation::Write, false)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut scene = load_scene_file(&path)?;
+    mutate(&mut scene);
+    scene.updated_at = now_millis()?;
+    let bytes = serde_json::to_vec_pretty(&scene)
+        .map_err(|error| format!("Could not serialize Video Project scene: {error}"))?;
+    write_atomic(&path, &bytes)?;
+    Ok(Some(scene))
+}
+
+pub(crate) fn record_scene_render(
+    workspace: &Workspace,
+    project_id: &str,
+    scene_id: &str,
+    duration_seconds: f64,
+    animation_source: &str,
+    rendered_clip: &str,
+) -> Result<Option<VideoProductionScene>, String> {
+    mutate_scene(workspace, project_id, scene_id, |scene| {
+        scene.duration_seconds = Some(duration_seconds);
+        scene.animation_source = Some(animation_source.to_string());
+        scene.rendered_clip = Some(rendered_clip.to_string());
+        scene.qa_status = "layout-pass".to_string();
+    })
+}
+
+pub(crate) fn record_scene_narration(
+    workspace: &Workspace,
+    project_id: &str,
+    scene_id: &str,
+    narration: &str,
+    duration_seconds: f64,
+    narration_audio: &str,
+    subtitle_path: &str,
+) -> Result<Option<VideoProductionScene>, String> {
+    mutate_scene(workspace, project_id, scene_id, |scene| {
+        scene.narration = narration.to_string();
+        scene.duration_seconds = Some(duration_seconds);
+        scene.narration_audio = Some(narration_audio.to_string());
+        scene.subtitle_path = Some(subtitle_path.to_string());
+    })
 }
 
 fn project_file_kind(path: &Path) -> &'static str {
@@ -1046,10 +1448,10 @@ pub(crate) fn update_project_status(
     project.updated_at = now;
     project.checkpoints.push(VideoProductionCheckpoint {
         stage: status.to_string(),
-        status: if status == "failed" {
-            "failed".to_string()
-        } else {
-            "in_progress".to_string()
+        status: match status {
+            "failed" => "failed".to_string(),
+            "completed" => "completed".to_string(),
+            _ => "in_progress".to_string(),
         },
         updated_at: now,
         detail: detail.map(str::to_string),
@@ -1188,6 +1590,54 @@ pub(crate) fn register_asset(
     Ok(project)
 }
 
+pub(crate) fn prune_asset_records(
+    workspace: &Workspace,
+    project_id: &str,
+    removed_paths: &[String],
+) -> Result<VideoProductionProject, String> {
+    let mut project = get_project(workspace, project_id)?;
+    let root = project_root(workspace, &project, AccessOperation::Write)?;
+    project.assets.retain(|asset| {
+        !removed_paths
+            .iter()
+            .any(|path| path == &asset.relative_path)
+    });
+    project.updated_at = now_millis()?;
+    save_manifest(&root, &project)?;
+    Ok(project)
+}
+
+pub(crate) fn record_qa_result(
+    workspace: &Workspace,
+    project_id: &str,
+    passed: bool,
+    detail: &str,
+) -> Result<VideoProductionProject, String> {
+    let mut project = get_project(workspace, project_id)?;
+    let root = project_root(workspace, &project, AccessOperation::Write)?;
+    let now = now_millis()?;
+    project.status = if passed {
+        "completed".to_string()
+    } else {
+        "review".to_string()
+    };
+    project.attention_required = !passed;
+    project.last_error = None;
+    project.updated_at = now;
+    project.checkpoints.push(VideoProductionCheckpoint {
+        stage: "qa".to_string(),
+        status: if passed {
+            "completed".to_string()
+        } else {
+            "failed".to_string()
+        },
+        updated_at: now,
+        detail: Some(detail.to_string()),
+    });
+    save_manifest(&root, &project)?;
+    Ok(project)
+}
+
 pub(crate) fn set_render_outputs(
     workspace: &Workspace,
     project_id: &str,
@@ -1223,13 +1673,18 @@ pub(crate) fn set_render_outputs(
     project.current_subtitle =
         current_subtitle.map(|value| format!("{}/{}", project.relative_path, value));
     project.updated_at = now_millis()?;
+    project.attention_required = false;
+    project.last_error = None;
     if project.final_export.is_some() {
-        project.status = "completed".to_string();
+        project.status = "review".to_string();
         project.checkpoints.push(VideoProductionCheckpoint {
-            stage: "render".to_string(),
-            status: "completed".to_string(),
+            stage: "qa".to_string(),
+            status: "pending".to_string(),
             updated_at: project.updated_at,
-            detail: Some("Final video export registered.".to_string()),
+            detail: Some(
+                "Final video export registered. Full Video Project QA must pass before completion."
+                    .to_string(),
+            ),
         });
     }
     save_manifest(&root, &project)?;
@@ -1255,6 +1710,8 @@ fn recording_max_seconds(value: Option<u32>) -> Result<u32, String> {
 struct AiWorkspaceCapture<'a> {
     display: &'a str,
     xauth_path: &'a Path,
+    x: u32,
+    y: u32,
     width: u32,
     height: u32,
     fps: u32,
@@ -1290,7 +1747,7 @@ fn build_ai_workspace_capture_command(
             "-video_size",
             &format!("{}x{}", capture.width, capture.height),
             "-i",
-            capture.display,
+            &format!("{}+{},{}", capture.display, capture.x, capture.y),
             "-t",
             &capture.max_seconds.to_string(),
             "-an",
@@ -1413,8 +1870,11 @@ pub(crate) fn start_ai_workspace_recording(
     app: &AppHandle,
     workspace: &Workspace,
     project_id: &str,
+    app_session_id: &str,
     display: &str,
     xauth_path: &Path,
+    x: u32,
+    y: u32,
     width: u32,
     height: u32,
     fps: Option<u32>,
@@ -1446,7 +1906,8 @@ pub(crate) fn start_ai_workspace_recording(
         }
     }
 
-    let ffmpeg = video::ensure_ffmpeg_program(app)?;
+    let ffmpeg =
+        video::ffmpeg_program(app, project.resource_policy.allow_automatic_package_install)?;
     let started_at = now_millis()?;
     let sequence = RECORDING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let asset_path = format!("recordings/raw/recording-{started_at}-{sequence}.mkv");
@@ -1465,8 +1926,10 @@ pub(crate) fn start_ai_workspace_recording(
     let capture = AiWorkspaceCapture {
         display,
         xauth_path,
-        width,
-        height,
+        x,
+        y,
+        width: width & !1,
+        height: height & !1,
         fps,
         max_seconds,
         output: &output,
@@ -1490,8 +1953,9 @@ pub(crate) fn start_ai_workspace_recording(
         id: format!("recording-{started_at:x}-{sequence:x}"),
         workspace_id: workspace.id.clone(),
         project_id: project.id.clone(),
+        app_session_id: app_session_id.to_string(),
         status: "recording".to_string(),
-        capture_target: "aiWorkspace".to_string(),
+        capture_target: "aiWorkspaceApp".to_string(),
         relative_path,
         width,
         height,
@@ -1612,9 +2076,12 @@ mod tests {
     };
 
     use super::{
-        build_ai_workspace_capture_command, create_project, delete_project, import_folder,
-        list_project_files, list_projects, project_root as resolve_project_root, read_document,
-        set_project_pinned, write_document, AiWorkspaceCapture, PROJECT_DIRECTORIES,
+        build_ai_workspace_capture_command, create_project, create_project_with_mode,
+        delete_project, get_scene, import_folder, list_project_files, list_projects, list_scenes,
+        project_root as resolve_project_root, read_document, record_scene_narration,
+        record_scene_render, set_project_pinned, set_resource_policy, upsert_scene, write_document,
+        AiWorkspaceCapture, VideoProductionResourcePolicy, VideoProductionSceneInput,
+        PROJECT_DIRECTORIES, STORY_DIRECTORIES,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1653,10 +2120,16 @@ mod tests {
 
         assert_eq!(project.name, "MCP Explained");
         assert_eq!(project.slug, "mcp-explained");
+        assert_eq!(project.storage_mode, "standalone");
         assert_eq!(project.aspect_ratio, "16:9");
         assert_eq!(project.width, 1920);
         assert_eq!(project.height, 1080);
         assert_eq!(project.fps, 30);
+        assert!(!project.resource_policy.allow_local_model_downloads);
+        assert!(!project.resource_policy.allow_automatic_package_install);
+        assert!(project.resource_policy.allow_cloud_services);
+        assert!(!project.resource_policy.allow_paid_services);
+        assert_eq!(project.resource_policy.max_temporary_disk_mb, 2048);
 
         let project_root =
             resolve_project_root(&workspace, &project, AccessOperation::Read).unwrap();
@@ -1675,6 +2148,168 @@ mod tests {
         let listed = list_projects(&workspace).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, project.id);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn story_mode_uses_separate_director_folders_without_changing_tutorial_defaults() {
+        let (root, workspace) = temp_workspace(false);
+        let tutorial =
+            create_project(&workspace, "Tutorial Default", None, None, None, None).unwrap();
+        let story = create_project_with_mode(
+            &workspace,
+            "Story Animation",
+            Some("story"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(tutorial.production_mode, "tutorial");
+        assert_eq!(story.production_mode, "story");
+
+        let tutorial_root =
+            resolve_project_root(&workspace, &tutorial, AccessOperation::Read).unwrap();
+        let story_root = resolve_project_root(&workspace, &story, AccessOperation::Read).unwrap();
+
+        for directory in STORY_DIRECTORIES {
+            assert!(
+                !tutorial_root.join(directory).exists(),
+                "tutorial unexpectedly contains story folder {directory}"
+            );
+            assert!(
+                story_root.join(directory).is_dir(),
+                "story folder {directory} missing"
+            );
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn older_manifests_default_to_safe_resource_policy() {
+        let (root, workspace) = temp_workspace(false);
+        let project = create_project(&workspace, "Legacy Policy", None, None, None, None).unwrap();
+        let project_root =
+            resolve_project_root(&workspace, &project, AccessOperation::Write).unwrap();
+        let manifest = project_root.join("video-project.json");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("resourcePolicy");
+        object.remove("storageMode");
+        fs::write(&manifest, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let loaded = list_projects(&workspace).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].storage_mode, "standalone");
+        assert!(!loaded[0].resource_policy.allow_local_model_downloads);
+        assert!(!loaded[0].resource_policy.allow_automatic_package_install);
+        assert!(loaded[0].resource_policy.allow_cloud_services);
+        assert!(!loaded[0].resource_policy.allow_paid_services);
+        assert_eq!(loaded[0].resource_policy.max_temporary_disk_mb, 2048);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resource_policy_is_explicit_and_bounded() {
+        let (root, workspace) = temp_workspace(false);
+        let project = create_project(&workspace, "Policy", None, None, None, None).unwrap();
+        let updated = set_resource_policy(
+            &workspace,
+            &project.id,
+            VideoProductionResourcePolicy {
+                allow_local_model_downloads: true,
+                allow_automatic_package_install: false,
+                allow_cloud_services: false,
+                allow_paid_services: false,
+                max_temporary_disk_mb: 4096,
+            },
+        )
+        .unwrap();
+        assert!(updated.resource_policy.allow_local_model_downloads);
+        assert!(!updated.resource_policy.allow_cloud_services);
+        assert_eq!(updated.resource_policy.max_temporary_disk_mb, 4096);
+
+        let invalid = set_resource_policy(
+            &workspace,
+            &project.id,
+            VideoProductionResourcePolicy {
+                max_temporary_disk_mb: 64,
+                ..VideoProductionResourcePolicy::default()
+            },
+        );
+        assert!(invalid.is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scene_records_keep_semantics_and_generated_assets_together() {
+        let (root, workspace) = temp_workspace(false);
+        let project =
+            create_project(&workspace, "Scenes", None, Some(640), Some(360), Some(30)).unwrap();
+
+        let scene = upsert_scene(
+            &workspace,
+            &project.id,
+            VideoProductionSceneInput {
+                id: "scene-07".to_string(),
+                order: 7,
+                purpose: "Explain one refinement cycle".to_string(),
+                teaching_point: "Confidence controls which tokens commit.".to_string(),
+                narration: "Predict candidates, score confidence, then commit a subset."
+                    .to_string(),
+                captions_enabled: true,
+                duration_seconds: Some(8.0),
+                sources: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(scene.qa_status, "pending");
+        assert_eq!(list_scenes(&workspace, &project.id).unwrap().len(), 1);
+
+        record_scene_render(
+            &workspace,
+            &project.id,
+            "scene-07",
+            8.4,
+            "video-projects/scenes/animations/source/scene-07.json",
+            "video-projects/scenes/animations/generated/scene-07.mp4",
+        )
+        .unwrap();
+        record_scene_narration(
+            &workspace,
+            &project.id,
+            "scene-07",
+            "Updated scene narration.",
+            8.4,
+            "video-projects/scenes/narration/scene-07.wav",
+            "video-projects/scenes/subtitles/scene-07.srt",
+        )
+        .unwrap();
+
+        let loaded = get_scene(&workspace, &project.id, "scene-07").unwrap();
+        assert_eq!(loaded.narration, "Updated scene narration.");
+        assert_eq!(loaded.duration_seconds, Some(8.4));
+        assert!(loaded
+            .rendered_clip
+            .as_deref()
+            .unwrap()
+            .ends_with("scene-07.mp4"));
+        assert!(loaded
+            .narration_audio
+            .as_deref()
+            .unwrap()
+            .ends_with("scene-07.wav"));
+        assert!(loaded
+            .subtitle_path
+            .as_deref()
+            .unwrap()
+            .ends_with("scene-07.srt"));
+        assert_eq!(loaded.qa_status, "layout-pass");
+
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1939,6 +2574,8 @@ mod tests {
         let capture_settings = AiWorkspaceCapture {
             display: &display,
             xauth_path: &xauth,
+            x: 0,
+            y: 0,
             width: 640,
             height: 360,
             fps: 12,

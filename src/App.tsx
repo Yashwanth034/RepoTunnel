@@ -13,6 +13,7 @@ import GatewayPanel from "./components/GatewayPanel";
 import GitPanel from "./components/GitPanel";
 import ProductionPanel from "./components/ProductionPanel";
 import HelpPanel from "./components/HelpPanel";
+import HttpsSetupGuide from "./components/HttpsSetupGuide";
 import HomeWorkspace from "./components/HomeWorkspace";
 import ModelHub from "./components/ModelHub";
 import HomeFeatureDialog from "./components/HomeFeatureDialog";
@@ -1632,6 +1633,14 @@ function App() {
           workspaces={workspaces}
           gatewayRunning={gatewayStatus.running}
           onError={handleExecutionError}
+        />
+      );
+    }
+
+    if (activeView === "httpsSetup") {
+      return (
+        <HttpsSetupGuide
+          onError={(message) => setNotice(`HTTPS Setup: ${message}`)}
         />
       );
     }

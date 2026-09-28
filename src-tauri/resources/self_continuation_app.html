@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html, body {
+      width: 1px;
+      height: 1px;
+      min-width: 0;
+      min-height: 0;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: transparent;
+    }
+    #status {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      border: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <span id="status" role="status" aria-live="polite">RepoTunnel self-continuation active</span>
+  <script>
+    (() => {
+      "use strict";
+
+      const MCP_APPS_PROTOCOL_VERSION = "2026-01-26";
+      const LOCAL_RETRY_MS = 250;
+      const RPC_TIMEOUT_MS = 10000;
+      const MAX_TIMER_MS = 2147483000;
+      const statusEl = document.getElementById("status");
+      const pendingRequests = new Map();
+      const sentRecoveryIds = new Set();
+
+      let rpcId = 0;
+      let timer = null;
+      let busy = false;
+      let stopped = false;
+      let latestStatus = null;
+      let standardBridgeReady = false;
+      let resumedProbeEpoch = null;
+
+      const claimantId =
+        typeof globalThis.crypto?.randomUUID === "function"
+          ? `widget-${globalThis.crypto.randomUUID()}`
+          : `widget-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+
+      function setState(state) {
+        document.documentElement.dataset.state = state;
+        statusEl.textContent = `RepoTunnel self-continuation: ${state}`;
+      }
+
+      function dataOf(value) {
+        return (
+          value?.structuredContent ??
+          value?.structured_content ??
+          value?.result?.structuredContent ??
+          value?.result?.structured_content ??
+          value
+        );
+      }
+
+      function statusOf(value, depth = 0, seen = new Set()) {
+        if (!value || typeof value !== "object" || depth > 6 || seen.has(value)) {
+          return null;
+        }
+        seen.add(value);
+
+        const data = dataOf(value);
+        if (data && typeof data === "object" && (data.watchId || data.watch_id)) {
+          return data;
+        }
+
+        const keys = [
+          "status",
+          "structuredContent",
+          "structured_content",
+          "result",
+          "mcp_tool_result",
+          "call_tool_result",
+          "toolOutput",
+          "tool_output",
+        ];
+        for (const key of keys) {
+          const nested = value?.[key];
+          const state = statusOf(nested, depth + 1, seen);
+          if (state) return state;
+        }
+        return null;
+      }
+
+      function rememberStatus(value) {
+        const state = statusOf(value);
+        if (state) latestStatus = state;
+        return state;
+      }
+
+      function compatibilityStatus() {
+        const openai = window.openai;
+        const state =
+          rememberStatus(openai?.toolOutput) ||
+          rememberStatus(openai?.toolResponseMetadata);
+        return state || latestStatus;
+      }
+
+      function rpcNotify(method, params) {
+        window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+      }
+
+      function rpcRequest(method, params, timeoutMs = RPC_TIMEOUT_MS) {
+        return new Promise((resolve, reject) => {
+          const id = ++rpcId;
+          const timeout = setTimeout(() => {
+            pendingRequests.delete(id);
+            reject(new Error(`${method} timed out`));
+          }, timeoutMs);
+          pendingRequests.set(id, {
+            resolve: (value) => {
+              clearTimeout(timeout);
+              resolve(value);
+            },
+            reject: (error) => {
+              clearTimeout(timeout);
+              reject(error);
+            },
+          });
+          window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+        });
+      }
+
+      window.addEventListener("openai:set_globals", () => {
+        const state = compatibilityStatus();
+        if (state && !busy && !stopped) {
+          scheduleFromStatus(state);
+        }
+      });
+
+      window.addEventListener(
+        "message",
+        (event) => {
+          if (event.source !== window.parent) return;
+          const message = event.data;
+          if (!message || message.jsonrpc !== "2.0") return;
+
+          if (message.id !== undefined && pendingRequests.has(message.id)) {
+            const pending = pendingRequests.get(message.id);
+            pendingRequests.delete(message.id);
+            if (message.error) pending.reject(message.error);
+            else pending.resolve(message.result);
+            return;
+          }
+
+          if (message.method === "ui/notifications/tool-result") {
+            const state = rememberStatus(message.params);
+            if (state && !timer && !busy && !stopped) {
+              scheduleFromStatus(state);
+            }
+            return;
+          }
+
+          if (
+            message.method === "ui/notifications/teardown" ||
+            message.method === "ui/notifications/request-teardown"
+          ) {
+            stop("teardown");
+          }
+        },
+        { passive: true }
+      );
+
+      async function initializeStandardBridge() {
+        try {
+          await rpcRequest("ui/initialize", {
+            appInfo: {
+              name: "repotunnel-self-continuation",
+              version: "0.8.0",
+            },
+            appCapabilities: {},
+            protocolVersion: MCP_APPS_PROTOCOL_VERSION,
+          });
+          standardBridgeReady = true;
+          rpcNotify("ui/notifications/initialized", {});
+          rpcNotify("ui/notifications/size-changed", { height: 1 });
+          setState("mcp-app-ready");
+          return true;
+        } catch (error) {
+          console.warn("[RepoTunnel self-continuation] MCP Apps bridge unavailable; using compatibility bridge.", error);
+          standardBridgeReady = false;
+          return false;
+        }
+      }
+
+      const bridgeReady = initializeStandardBridge();
+
+      async function callServerTool(name, args) {
+        const openai = window.openai;
+        if (openai?.callTool) {
+          try {
+            const result = await openai.callTool(name, args);
+            rememberStatus(result);
+            return dataOf(result);
+          } catch (error) {
+            console.warn(`[RepoTunnel self-continuation] ChatGPT callTool failed for ${name}; trying standard MCP Apps bridge.`, error);
+          }
+        }
+
+        await bridgeReady;
+        if (!standardBridgeReady) {
+          throw new Error("No supported MCP App tool bridge is available.");
+        }
+        const result = await rpcRequest("tools/call", {
+          name,
+          arguments: args,
+        });
+        rememberStatus(result);
+        return dataOf(result);
+      }
+
+      async function sendContinuationMessage(sentence) {
+        // ChatGPT's compatibility helper is preferred when feature-detected
+        // because it is specifically designed to start a follow-up turn.
+        // Current MCP Apps ui/message implementations may accept/post a message
+        // without necessarily starting the model pipeline. Keep ui/message as
+        // the portable fallback for hosts without the ChatGPT helper.
+        const openai = window.openai;
+        if (openai?.sendFollowUpMessage) {
+          try {
+            await openai.sendFollowUpMessage({
+              prompt: sentence,
+              scrollToBottom: true,
+            });
+            return;
+          } catch (error) {
+            console.warn("[RepoTunnel self-continuation] ChatGPT follow-up helper failed; trying standard MCP Apps ui/message.", error);
+          }
+        }
+
+        await bridgeReady;
+        if (!standardBridgeReady) {
+          throw new Error("No supported follow-up message bridge is available.");
+        }
+        const result = await rpcRequest("ui/message", {
+          role: "user",
+          content: [{ type: "text", text: sentence }],
+        });
+        if (result?.isError === true) {
+          throw new Error("Host rejected the MCP Apps follow-up message.");
+        }
+      }
+
+      function clearTimer() {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      }
+
+      function stop(reason) {
+        stopped = true;
+        clearTimer();
+        setState(reason);
+      }
+
+      function modeOf(state) {
+        return String(state?.mode || "working").replaceAll("-", "_");
+      }
+
+      function staleMsOf(state) {
+        const seconds = Number(state?.staleAfterSeconds ?? state?.stale_after_seconds ?? 120);
+        return Math.max(1000, Number.isFinite(seconds) ? seconds * 1000 : 120000);
+      }
+
+      function nextCheckAtOf(state) {
+        const explicit = Number(state?.nextCheckAt ?? state?.next_check_at ?? 0);
+        if (Number.isFinite(explicit) && explicit > 0) return explicit;
+
+        const last = Number(
+          state?.lastActivityAt ??
+          state?.last_activity_at ??
+          state?.updatedAt ??
+          state?.updated_at ??
+          Date.now()
+        );
+        return Math.max(Date.now(), last + staleMsOf(state));
+      }
+
+      function scheduleAt(timestamp, label = "armed") {
+        if (stopped) return;
+        clearTimer();
+        const delay = Math.max(LOCAL_RETRY_MS, Math.min(MAX_TIMER_MS, timestamp - Date.now()));
+        setState(label);
+        timer = setTimeout(() => {
+          timer = null;
+          void attemptRecovery();
+        }, delay);
+      }
+
+      function scheduleFromStatus(state) {
+        if (!state || stopped) return;
+        latestStatus = state;
+        const mode = modeOf(state);
+
+        if (mode === "completed" || mode === "disabled") {
+          stop(mode);
+          return;
+        }
+        if (mode === "waiting_user") {
+          clearTimer();
+          setState("waiting-user");
+          return;
+        }
+
+        const pending = state.pendingRecovery || state.pending_recovery;
+        if (pending) {
+          scheduleAt(Date.now() + LOCAL_RETRY_MS, "recovery-ready");
+          return;
+        }
+
+        scheduleAt(
+          nextCheckAtOf(state),
+          state.activeManagedProcess || state.active_managed_process
+            ? "managed-work-active"
+            : "armed"
+        );
+      }
+
+      async function attemptRecovery() {
+        if (busy || stopped) return;
+        busy = true;
+
+        try {
+          const state = latestStatus || compatibilityStatus();
+          if (!state) {
+            setState("waiting-for-watch");
+            timer = setTimeout(() => {
+              timer = null;
+              void bootstrapSchedule();
+            }, LOCAL_RETRY_MS);
+            return;
+          }
+
+          const watchId = state.watchId || state.watch_id;
+          const workspaceId = state.workspaceId || state.workspace_id;
+          if (!watchId || !workspaceId) {
+            setState("waiting-for-watch");
+            return;
+          }
+
+          const result = await callServerTool("attempt_self_continuation_recovery", {
+            workspace_id: workspaceId,
+            watch_id: watchId,
+            claimant_id: claimantId,
+          });
+
+          const nextState = rememberStatus(result) || latestStatus || state;
+          const claim = result?.claim;
+          const pending = nextState?.pendingRecovery || nextState?.pending_recovery;
+
+          if (resumedProbeEpoch !== null && !pending) {
+            const epoch = Number(nextState?.activityEpoch ?? nextState?.activity_epoch ?? 0);
+            if (epoch <= resumedProbeEpoch) {
+              stop("recovery-delivered");
+              return;
+            }
+            resumedProbeEpoch = null;
+          }
+
+          if (claim?.claimed !== true) {
+            const leaseUntil = Number(claim?.leaseUntil ?? claim?.lease_until ?? 0);
+            if (leaseUntil > Date.now()) {
+              scheduleAt(leaseUntil + LOCAL_RETRY_MS, "recovery-claimed-elsewhere");
+            } else {
+              scheduleFromStatus(nextState);
+            }
+            return;
+          }
+
+          const recoveryId = claim.recoveryId || claim.recovery_id;
+          const sentence = pending?.sentence || nextState?.sentence;
+          if (
+            typeof recoveryId !== "string" ||
+            !recoveryId ||
+            typeof sentence !== "string" ||
+            !sentence.trim()
+          ) {
+            throw new Error("RepoTunnel returned an incomplete self-continuation recovery.");
+          }
+
+          if (sentRecoveryIds.has(recoveryId)) {
+            setState("recovery-already-sent");
+            return;
+          }
+
+          setState("recovering");
+          await sendContinuationMessage(sentence);
+          sentRecoveryIds.add(recoveryId);
+
+          let ackState = nextState;
+          try {
+            const ack = await callServerTool("ack_self_continuation_recovery", {
+              workspace_id: workspaceId,
+              watch_id: watchId,
+              recovery_id: recoveryId,
+              claimant_id: claimantId,
+            });
+            ackState = rememberStatus(ack) || ackState;
+          } catch (error) {
+            // Never send the same recovery twice from this mounted widget after
+            // the host accepted the follow-up, even if acknowledgement briefly fails.
+            console.warn("[RepoTunnel self-continuation] Follow-up sent but acknowledgement failed.", error);
+          }
+
+          resumedProbeEpoch = Number(
+            ackState?.activityEpoch ?? ackState?.activity_epoch ??
+            nextState?.activityEpoch ?? nextState?.activity_epoch ?? 0
+          );
+          setState("recovery-sent");
+
+          // One quiet post-delivery probe confirms that resumed AI/project work
+          // advanced the durable epoch. If nothing resumed, stop instead of
+          // generating repeated app responses forever.
+          scheduleAt(Date.now() + staleMsOf(ackState), "watching-for-resume");
+        } catch (error) {
+          console.warn("[RepoTunnel self-continuation]", error);
+          setState("retrying");
+          const state = latestStatus || compatibilityStatus();
+          if (state) {
+            scheduleAt(Date.now() + staleMsOf(state), "retry-scheduled");
+          } else {
+            timer = setTimeout(() => {
+              timer = null;
+              void bootstrapSchedule();
+            }, 1000);
+          }
+        } finally {
+          busy = false;
+        }
+      }
+
+      async function bootstrapSchedule() {
+        if (stopped || timer || busy) return;
+        const immediateState = latestStatus || compatibilityStatus();
+        if (immediateState) {
+          scheduleFromStatus(immediateState);
+          return;
+        }
+        await bridgeReady;
+        const state = latestStatus || compatibilityStatus();
+        if (!state) {
+          setState("waiting-for-watch");
+          timer = setTimeout(() => {
+            timer = null;
+            void bootstrapSchedule();
+          }, LOCAL_RETRY_MS);
+          return;
+        }
+        scheduleFromStatus(state);
+      }
+
+      setState("starting");
+      void bootstrapSchedule();
+    })();
+  </script>
+</body>
+</html>
