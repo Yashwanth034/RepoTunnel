@@ -133,6 +133,10 @@ fn unauthorized_mcp_response(public_url: &str) -> Result<Response, StatusCode> {
     Ok(response)
 }
 
+fn mcp_request_path(path: &str) -> bool {
+    path == "/mcp" || path.starts_with("/mcp/")
+}
+
 async fn local_request_guard(
     State(policy): State<LocalRequestPolicy>,
     request: Request<Body>,
@@ -168,7 +172,7 @@ async fn local_request_guard(
         }
     }
 
-    if forwarded_https && request.uri().path().starts_with("/mcp") {
+    if mcp_request_path(request.uri().path()) {
         let config = public_tunnel::load_config(&policy.app)
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
@@ -185,7 +189,9 @@ async fn local_request_guard(
             return unauthorized_mcp_response(&public_url);
         }
 
-        policy.app.state::<AppState>().record_remote_request();
+        if forwarded_https {
+            policy.app.state::<AppState>().record_remote_request();
+        }
     }
 
     Ok(next.run(request).await)
@@ -674,7 +680,17 @@ pub(crate) async fn serve(
 
 #[cfg(test)]
 mod tests {
-    use super::{host_is_allowed, origin_is_allowed};
+    use super::{host_is_allowed, mcp_request_path, origin_is_allowed};
+
+    #[test]
+    fn mcp_auth_guard_covers_local_and_forwarded_mcp_paths() {
+        assert!(mcp_request_path("/mcp"));
+        assert!(mcp_request_path("/mcp/"));
+        assert!(mcp_request_path("/mcp/session"));
+        assert!(!mcp_request_path("/health"));
+        assert!(!mcp_request_path("/authorize"));
+        assert!(!mcp_request_path("/mcp-unrelated"));
+    }
 
     #[test]
     fn accepts_loopback_hosts() {

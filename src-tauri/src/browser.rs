@@ -28,9 +28,10 @@ use crate::{
     models::{
         BrowserActionKind, BrowserActionOutcome, BrowserActionRecord, BrowserActionStatus,
         BrowserApplication, BrowserAutomationStatus, BrowserConsoleEntry, BrowserDiagnostics,
-        BrowserDownload, BrowserDownloadSetup, BrowserDownloadStatus, BrowserNavigationReceipt,
-        BrowserNetworkEntry, BrowserNetworkFailure, BrowserPageInspection, BrowserScreenshot,
-        BrowserTab, BrowserUploadResult, BrowserVisualSelection, Workspace, WorkspaceChangePolicy,
+        BrowserDownload, BrowserDownloadSetup, BrowserDownloadStatus, BrowserMutationCompletion,
+        BrowserMutationReceipt, BrowserNavigationReceipt, BrowserNetworkEntry,
+        BrowserNetworkFailure, BrowserPageInspection, BrowserScreenshot, BrowserTab,
+        BrowserUploadResult, BrowserVisualSelection, Workspace, WorkspaceChangePolicy,
     },
     secret_guard,
     semantic::{
@@ -69,6 +70,18 @@ static TAB_WORKSPACES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new(
 static ACTIVE_TABS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 type BrowserHelperReply = Result<Value, String>;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserMutationState {
+    url: String,
+    document_generation: Option<String>,
+}
+
+enum BrowserMutationHelperOutcome {
+    Applied,
+    Ambiguous { transport_error: String },
+}
 
 struct BrowserHelperClient {
     stdin: Mutex<ChildStdin>,
@@ -1615,6 +1628,7 @@ fn helper_operation_safe_to_retry(operation: &str) -> bool {
             | "semantic-snapshot"
             | "pick-element"
             | "screenshot"
+            | "mutation-state"
             | "semantic-sequence-cancel"
             | "apply-context"
             | "configure-downloads"
@@ -1832,6 +1846,104 @@ fn run_runtime_helper_json(
         }
         Err(error) => Err(error),
     }
+}
+
+fn run_runtime_helper_mutation_json(
+    app: &AppHandle,
+    workspace_id: &str,
+    operation: &str,
+    args: &[String],
+) -> Result<BrowserMutationHelperOutcome, String> {
+    let client = ensure_runtime_helper(app, workspace_id)?;
+    match client.request(operation, args) {
+        Ok(_) => Ok(BrowserMutationHelperOutcome::Applied),
+        Err(error) if helper_transport_error(&error) => {
+            let transport_error = match restart_runtime_helper(app, workspace_id, &client) {
+                Ok(_) => error,
+                Err(reconnect_error) => {
+                    format!("{error} Browser helper reconnect also failed: {reconnect_error}")
+                }
+            };
+            Ok(BrowserMutationHelperOutcome::Ambiguous { transport_error })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn observe_browser_mutation_state(
+    app: &AppHandle,
+    workspace_id: &str,
+    tab_id: &str,
+) -> Result<BrowserMutationState, String> {
+    let value = run_runtime_helper_json(
+        app,
+        workspace_id,
+        "mutation-state",
+        std::slice::from_ref(&tab_id.to_string()),
+    )?;
+    serde_json::from_value(value)
+        .map_err(|error| format!("Could not decode browser mutation state: {error}"))
+}
+
+fn execute_receipted_browser_mutation(
+    app: &AppHandle,
+    workspace_id: &str,
+    tab_id: &str,
+    operation: &str,
+    args: &[String],
+) -> Result<BrowserMutationReceipt, String> {
+    let mutation_id = new_id("browser-mutation");
+    let before = observe_browser_mutation_state(app, workspace_id, tab_id)?;
+    let outcome = run_runtime_helper_mutation_json(app, workspace_id, operation, args)?;
+    let after = observe_browser_mutation_state(app, workspace_id, tab_id).ok();
+
+    let (completion, transport_error) = match outcome {
+        BrowserMutationHelperOutcome::Applied => (BrowserMutationCompletion::Applied, None),
+        BrowserMutationHelperOutcome::Ambiguous { transport_error } => {
+            (BrowserMutationCompletion::Ambiguous, Some(transport_error))
+        }
+    };
+    let helper_acknowledged = completion == BrowserMutationCompletion::Applied;
+    let document_changed = after.as_ref().is_some_and(|after| {
+        before.url != after.url
+            || match (
+                before.document_generation.as_deref(),
+                after.document_generation.as_deref(),
+            ) {
+                (Some(left), Some(right)) => left != right,
+                _ => false,
+            }
+    });
+
+    Ok(BrowserMutationReceipt {
+        id: mutation_id,
+        operation: operation.to_string(),
+        tab_id: tab_id.to_string(),
+        completion,
+        helper_acknowledged,
+        before_url: redact_browser_url(&before.url),
+        after_url: after.as_ref().map(|state| redact_browser_url(&state.url)),
+        before_document_generation: before.document_generation,
+        after_document_generation: after.and_then(|state| state.document_generation),
+        document_changed,
+        transport_error,
+    })
+}
+
+fn apply_mutation_receipt(
+    record: &mut BrowserActionRecord,
+    receipt: Option<BrowserMutationReceipt>,
+) {
+    let Some(receipt) = receipt else {
+        return;
+    };
+    if receipt.completion == BrowserMutationCompletion::Ambiguous {
+        record.status = BrowserActionStatus::Ambiguous;
+        record.error = Some(receipt.transport_error.clone().unwrap_or_else(|| {
+            "Browser mutation completion is ambiguous; RepoTunnel did not replay it.".to_string()
+        }));
+    }
+    record.mutation_receipt = Some(receipt);
 }
 
 fn signal_process_group(pid: u32, signal: &str) {
@@ -2503,6 +2615,7 @@ fn execute_request(
     app: &AppHandle,
     workspace: &BrowserScope,
     request: &StoredBrowserRequest,
+    mutation_receipt: &mut Option<BrowserMutationReceipt>,
 ) -> Result<(), String> {
     let runtime_key = workspace.runtime_key();
     match request {
@@ -2601,12 +2714,13 @@ fn execute_request(
         StoredBrowserRequest::Click { tab_id, selector } => {
             clear_visual_selection(runtime_key);
             ensure_tab_owned(runtime_key, tab_id)?;
-            run_runtime_helper_json(
+            *mutation_receipt = Some(execute_receipted_browser_mutation(
                 app,
                 runtime_key,
+                tab_id,
                 "click",
                 &[tab_id.clone(), selector.clone()],
-            )?;
+            )?);
             set_active_tab(runtime_key, Some(tab_id.clone()));
             Ok(())
         }
@@ -2618,9 +2732,10 @@ fn execute_request(
         } => {
             clear_visual_selection(runtime_key);
             ensure_tab_owned(runtime_key, tab_id)?;
-            run_runtime_helper_json(
+            *mutation_receipt = Some(execute_receipted_browser_mutation(
                 app,
                 runtime_key,
+                tab_id,
                 "type",
                 &[
                     tab_id.clone(),
@@ -2628,7 +2743,7 @@ fn execute_request(
                     text.clone(),
                     clear_first.to_string(),
                 ],
-            )?;
+            )?);
             set_active_tab(runtime_key, Some(tab_id.clone()));
             Ok(())
         }
@@ -2646,16 +2761,17 @@ fn execute_request(
                     .to_string()
             })?;
             let document_identity = semantic_expected_document_identity(&runtime.6, &target)?;
-            run_runtime_helper_json(
+            *mutation_receipt = Some(execute_receipted_browser_mutation(
                 app,
                 runtime_key,
+                tab_id,
                 "semantic-click",
                 &[
                     tab_id.clone(),
                     backend_dom_id.to_string(),
                     document_identity,
                 ],
-            )?;
+            )?);
             set_active_tab(runtime_key, Some(tab_id.clone()));
             Ok(())
         }
@@ -2675,9 +2791,10 @@ fn execute_request(
                     .to_string()
             })?;
             let document_identity = semantic_expected_document_identity(&runtime.6, &target)?;
-            run_runtime_helper_json(
+            *mutation_receipt = Some(execute_receipted_browser_mutation(
                 app,
                 runtime_key,
+                tab_id,
                 "semantic-type",
                 &[
                     tab_id.clone(),
@@ -2686,7 +2803,7 @@ fn execute_request(
                     clear_first.to_string(),
                     document_identity,
                 ],
-            )?;
+            )?);
             set_active_tab(runtime_key, Some(tab_id.clone()));
             Ok(())
         }
@@ -2702,9 +2819,10 @@ fn execute_request(
                 prepare_semantic_sequence(app, workspace, tab_id, snapshot_id, steps)?;
             let encoded_steps = serde_json::to_string(&plan)
                 .map_err(|error| format!("Could not encode browser semantic sequence: {error}"))?;
-            let result = run_runtime_helper_json(
+            let result = execute_receipted_browser_mutation(
                 app,
                 runtime_key,
+                tab_id,
                 "semantic-sequence",
                 &[
                     tab_id.clone(),
@@ -2712,11 +2830,16 @@ fn execute_request(
                     sequence_id.clone(),
                     encoded_steps,
                 ],
-            )
-            .map(|_| ());
+            );
             semantic::invalidate_target(runtime_key, SemanticSurface::Browser, tab_id);
             set_active_tab(runtime_key, Some(tab_id.clone()));
-            result
+            match result {
+                Ok(receipt) => {
+                    *mutation_receipt = Some(receipt);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
         }
         StoredBrowserRequest::Scroll {
             tab_id,
@@ -2859,12 +2982,14 @@ fn request_action(
             created_at: timestamp,
             updated_at: timestamp,
             error: None,
+            mutation_receipt: None,
         },
         request: Some(request),
         owner_id: workspace.owner_id().map(str::to_string),
     };
 
     let mut navigation_receipt = None;
+    let mut mutation_receipt = None;
     if automatic {
         let request = stored.request.as_ref().expect("browser request exists");
         let result = match request {
@@ -2892,7 +3017,7 @@ fn request_action(
                     navigation_receipt = Some(receipt);
                 })
             }
-            _ => execute_request(app, workspace, request),
+            _ => execute_request(app, workspace, request, &mut mutation_receipt),
         };
 
         if let Err(error) = result {
@@ -2906,6 +3031,7 @@ fn request_action(
             })?;
             return Err(error);
         }
+        apply_mutation_receipt(&mut stored.record, mutation_receipt);
         stored.request = None;
     }
 
@@ -4028,7 +4154,8 @@ pub(crate) fn approve_action(
     };
 
     let scope = BrowserScope::new(workspace, owner_id.as_deref());
-    let result = execute_request(app, &scope, &request);
+    let mut mutation_receipt = None;
+    let result = execute_request(app, &scope, &request, &mut mutation_receipt);
     with_history(app, |records| {
         let entry = records
             .iter_mut()
@@ -4046,6 +4173,7 @@ pub(crate) fn approve_action(
                 entry.record.error = Some(error.clone());
             }
         }
+        apply_mutation_receipt(&mut entry.record, mutation_receipt.clone());
         Ok(entry.record.clone())
     })
 }
@@ -4289,6 +4417,7 @@ mod tests {
             "semantic-snapshot",
             "pick-element",
             "screenshot",
+            "mutation-state",
             "semantic-sequence-cancel",
             "apply-context",
             "configure-downloads",
@@ -4321,6 +4450,107 @@ mod tests {
                 "{operation} must never be replayed automatically"
             );
         }
+    }
+
+    #[test]
+    fn ambiguous_mutation_receipt_requires_verification_without_becoming_applied() {
+        let mut record = BrowserActionRecord {
+            id: "browser-action-test".to_string(),
+            workspace_id: "workspace-test".to_string(),
+            workspace_name: "Test".to_string(),
+            kind: BrowserActionKind::Click,
+            target: "#submit".to_string(),
+            detail: Some("tab-1".to_string()),
+            status: BrowserActionStatus::Applied,
+            created_at: 1,
+            updated_at: 1,
+            error: None,
+            mutation_receipt: None,
+        };
+        let receipt = BrowserMutationReceipt {
+            id: "browser-mutation-test".to_string(),
+            operation: "click".to_string(),
+            tab_id: "tab-1".to_string(),
+            completion: BrowserMutationCompletion::Ambiguous,
+            helper_acknowledged: false,
+            before_url: "https://example.com/form".to_string(),
+            after_url: Some("https://example.com/done".to_string()),
+            before_document_generation: Some("loader-before".to_string()),
+            after_document_generation: Some("loader-after".to_string()),
+            document_changed: true,
+            transport_error: Some(
+                "Persistent browser helper exited before completing the request.".to_string(),
+            ),
+        };
+
+        apply_mutation_receipt(&mut record, Some(receipt));
+
+        assert_eq!(record.status, BrowserActionStatus::Ambiguous);
+        assert!(record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("helper exited")));
+        let stored = record.mutation_receipt.expect("receipt");
+        assert_eq!(stored.completion, BrowserMutationCompletion::Ambiguous);
+        assert!(stored.document_changed);
+        assert!(!stored.helper_acknowledged);
+    }
+
+    #[test]
+    fn applied_mutation_receipt_keeps_action_applied() {
+        let mut record = BrowserActionRecord {
+            id: "browser-action-test".to_string(),
+            workspace_id: "workspace-test".to_string(),
+            workspace_name: "Test".to_string(),
+            kind: BrowserActionKind::Type,
+            target: "#name".to_string(),
+            detail: Some("tab-1".to_string()),
+            status: BrowserActionStatus::Applied,
+            created_at: 1,
+            updated_at: 1,
+            error: None,
+            mutation_receipt: None,
+        };
+        let receipt = BrowserMutationReceipt {
+            id: "browser-mutation-test".to_string(),
+            operation: "type".to_string(),
+            tab_id: "tab-1".to_string(),
+            completion: BrowserMutationCompletion::Applied,
+            helper_acknowledged: true,
+            before_url: "https://example.com/form".to_string(),
+            after_url: Some("https://example.com/form".to_string()),
+            before_document_generation: Some("loader".to_string()),
+            after_document_generation: Some("loader".to_string()),
+            document_changed: false,
+            transport_error: None,
+        };
+
+        apply_mutation_receipt(&mut record, Some(receipt));
+
+        assert_eq!(record.status, BrowserActionStatus::Applied);
+        assert!(record.error.is_none());
+        assert!(record
+            .mutation_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.helper_acknowledged));
+    }
+
+    #[test]
+    fn older_browser_history_without_mutation_receipt_still_deserializes() {
+        let record: BrowserActionRecord = serde_json::from_value(json!({
+            "id": "browser-action-old",
+            "workspaceId": "workspace-test",
+            "workspaceName": "Test",
+            "kind": "click",
+            "target": "#old",
+            "detail": "tab-1",
+            "status": "applied",
+            "createdAt": 1,
+            "updatedAt": 1,
+            "error": null
+        }))
+        .expect("legacy browser record");
+        assert!(record.mutation_receipt.is_none());
     }
 
     #[test]

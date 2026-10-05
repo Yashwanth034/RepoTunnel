@@ -78,11 +78,12 @@ Observed techniques that matter to the product:
 
 The production engine therefore chooses the simplest visual method that explains each scene clearly. It must not open Blender/DaVinci/other heavy tools merely because they exist.
 
-## Workspace storage
+## Video Project storage
 
-Every Video Project lives inside the selected approved workspace:
+New Video Projects use a standalone project root under the user's Projects directory:
 
-video-projects/<project-slug>/
+~/Projects/<project-slug>/
+  .repotunnel-video-project
   video-project.json
   script/
   storyboard/
@@ -106,7 +107,9 @@ video-projects/<project-slug>/
   qa/
   licenses/
 
-All generated or imported production assets must stay inside this project root unless the user explicitly exports/copies them elsewhere.
+RepoTunnel keeps the originating approved workspace association as the permission/context boundary. Legacy workspace-relative Video Projects remain readable through their recorded relative path for backward compatibility.
+
+All generated or imported production assets must stay inside the resolved Video Project root unless the user explicitly exports/copies them elsewhere. RepoTunnel validates the standalone marker/manifest identity and rejects symlink/path escape.
 
 ## Project manifest
 
@@ -150,7 +153,7 @@ Initial generated animation capability should be built in RepoTunnel rather than
 - deterministic rendering to frames/video
 - synchronized to narration/storyboard timing
 
-Advanced engines such as Blender/Manim/DaVinci are optional future adapters after the base workflow is stable.
+The current story-animation layer can route supported shots through the native motion renderer and installed Godot 4, Blender Grease Pencil/2.5D/3D, and Rhubarb lip-sync capabilities. OpenToonz and Synfig remain optional external adapters when installed. Other tools such as Manim, DaVinci Resolve, Kdenlive, or Audacity are optional workflow helpers rather than mandatory production dependencies.
 
 ## External visual/animation source strategy
 
@@ -245,11 +248,71 @@ Final validation evidence:
 
 The release gate discovered RUSTSEC-2026-0285 against rustls 0.23.44. RepoTunnel now locks rustls 0.23.45. No Direct HTTPS source implementation was changed for that dependency-only security update.
 
-Final Debian validation artifact:
+Historical v1 Debian validation artifact:
 - path: src-tauri/target/release/bundle/deb/RepoTunnel_0.3.1_amd64.deb
 - size: 15,988,858 bytes
 - SHA-256: de64e3138f631363c8d59cccb22b45dcaee0af3597614f9bca411e75393949c7
-- package control archive contains only control and md5sums; there are no maintainer install/remove scripts
-- the binary extracted from this exact package resolved all dynamic libraries and survived an isolated Xvfb startup smoke test with HOME/XDG state redirected to a temporary profile
+- the binary extracted from this historical package resolved all dynamic libraries and survived an isolated Xvfb startup smoke test with HOME/XDG state redirected to a temporary profile
 
-The locked scope is complete. Installation, staging, commit, push, publishing, or future scope expansion remain separate explicit user actions.
+Current release artifact, revalidated for v0.4.1 on 2026-10-05:
+- path: src-tauri/target/release/bundle/deb/RepoTunnel_0.4.1_amd64.deb
+- size: 19,828,744 bytes
+- DEB SHA-256: 328353f1cbfb1bd85c0cf0d02eb476ff148a560e3564563296eed2097c7e8fbd
+- packaged binary SHA-256: 4eaf65cf4bd735ee39d2bc24e99a42a117a2592ff119ca9e163ad0295adde381
+- package metadata: repo-tunnel 0.4.1, amd64
+- package control archive contains only control and md5sums; there are no maintainer install/remove scripts
+- final release gate: 43/43 frontend tests passed; 448 Rust tests passed, 0 failed, 8 intentionally ignored
+- source freshness check: PASS after the final Phone live-view/control fix
+
+The locked Video Production scope is complete. Installation, staging, commit, push, publishing, or future scope expansion remain separate explicit user actions.
+
+## Visual-quality pipeline v2
+
+Added after the v1 production workflow proved technically reliable but visually too slideshow-like.
+
+### Renderer policy
+
+For tutorials, explainers, promos and reels, the default generated-scene path is now HTML/CSS + GSAP with deterministic headless-Chrome frame capture. The timeline is explicitly sought per output frame; RepoTunnel does not screen-record the browser. CSS flex/grid owns text/card alignment. The original native SVG/2D renderer remains available as fallback only.
+
+Do not install or download AI, GPU, diffusion or video-generation models unless the user explicitly requests them. Before selecting a production method, inspect CPU, RAM, GPU and disk without installing anything and record why the selected method fits the machine. Lightweight CPU speech tooling such as TTS/Whisper remains allowed behind the existing permission/download policy. Manim may be used for math/graph work only when already installed; it must never be installed automatically. Other already-available free tools such as Remotion, Blender bpy, Godot movie mode, MoviePy, FFmpeg, Kdenlive and Audacity may be selected when they materially improve the result. Paid or watermarked tools/assets are not part of the default workflow.
+
+### Reusable HTML scene library
+
+The parameterized template catalog is:
+
+- intro
+- title_bullets
+- card_grid
+- flow_steps
+- git_graph
+- code_typing
+- terminal
+- comparison
+- stats_chart
+- quote
+- lower_third
+- outro
+
+Planning must pick one of these first and use a custom scene only when none fits.
+
+### Design system
+
+The 1920x1080 reference layout uses a 120px safe area. Titles are at least 72px, body text 40px, labels 36px and captions 44px. Cards use flex/grid centering instead of manual text coordinates. Content must visibly occupy at least 60% of the frame. The built-in themes are Modern dark and Playful bright; accents/layouts vary by scene.
+
+### Motion system
+
+Generated HTML scenes use GSAP easing/stagger, continuous background movement, a slow camera push/pan, progressive diagram construction, animated arrows/pulses and slide/wipe/zoom transitions. The QA threshold treats an effectively static stretch of 1.5 seconds or longer as a failure for tutorial production.
+
+### Caption system
+
+Caption generation prefers clause/phrase boundaries around seven words, prevents dangling articles/prepositions/conjunctions at line breaks, applies a safe bottom position and high-contrast styling, and emits an optional word-highlight WebVTT track with inline word timestamps.
+
+### Required tutorial workflow
+
+spec check -> script -> storyboard -> template/theme -> assets/voice -> build scenes -> 480p/15fps design preview -> design QA -> inspect 4 or 5 representative preview frames -> fix and repeat preview if needed -> final 1080p render -> FFprobe/full QA verification
+
+Final rendering is blocked until the required preview/design/frame-review gates have actually passed. Meaningful script/storyboard/scene/caption changes invalidate stale downstream approvals so an old preview cannot authorize a changed final video.
+
+HTML-scene DOM QA uses getBoundingClientRect to verify safe area, clipping, overlap, text size, container centering and frame coverage before encoding. The preview/final media QA also verifies motion, caption phrasing, stream/resolution/FPS state and existing audio/technical checks.
+
+After a completed video, the AI reports the tools used and why, the observed machine specs, elapsed production-step timings when they can be derived from persisted timestamps, and the final output path. It must not invent missing timing data.

@@ -1,5 +1,6 @@
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
+    io,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -351,6 +352,179 @@ fn ensure_regular_temp_file(path: &Path) -> Result<u64, String> {
     Ok(metadata.len())
 }
 
+fn random_sibling_path(path: &Path, purpose: &str) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Destination has no parent directory.".to_string())?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("output");
+
+    for _ in 0..16 {
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random)
+            .map_err(|error| format!("Could not generate a temporary filename: {error}"))?;
+        let suffix = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let candidate = parent.join(format!(".{name}.repotunnel-{purpose}-{suffix}"));
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Err(error) => {
+                return Err(format!(
+                    "Could not inspect temporary replacement path: {error}"
+                ))
+            }
+        }
+    }
+
+    Err("Could not allocate a unique temporary replacement path.".to_string())
+}
+
+fn stage_file_for_destination(
+    source: &Path,
+    destination: &Path,
+    expected_size: u64,
+) -> Result<PathBuf, String> {
+    let source_metadata = fs::metadata(source)
+        .map_err(|error| format!("Could not inspect source file before staging: {error}"))?;
+
+    for _ in 0..16 {
+        let staged = random_sibling_path(destination, "stage")?;
+        let mut staged_file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not create staged replacement file: {error}")),
+        };
+
+        let result = (|| -> Result<(), String> {
+            let mut source_file = File::open(source)
+                .map_err(|error| format!("Could not open source file for staging: {error}"))?;
+            let copied = io::copy(&mut source_file, &mut staged_file)
+                .map_err(|error| format!("Could not stage replacement file: {error}"))?;
+            if copied != expected_size {
+                return Err(format!(
+                    "Source file changed while staging: expected {expected_size} bytes but copied {copied} bytes."
+                ));
+            }
+            fs::set_permissions(&staged, source_metadata.permissions()).map_err(|error| {
+                format!("Could not preserve staged replacement permissions: {error}")
+            })?;
+            staged_file
+                .sync_all()
+                .map_err(|error| format!("Could not flush staged replacement file: {error}"))?;
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            let _ = fs::remove_file(&staged);
+            return Err(error);
+        }
+        return Ok(staged);
+    }
+
+    Err("Could not allocate a unique staged replacement file.".to_string())
+}
+
+fn checked_destination_metadata(
+    destination: &Path,
+    overwrite: bool,
+) -> Result<Option<fs::Metadata>, String> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            if !overwrite {
+                return Err("Destination already exists and overwrite is disabled.".to_string());
+            }
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("Destination must be a regular non-symlink file.".to_string());
+            }
+            Ok(Some(metadata))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("Could not inspect destination file: {error}")),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn install_staged_file_with<R, D>(
+    staged: &Path,
+    destination: &Path,
+    overwrite: bool,
+    mut rename: R,
+    mut remove_file: D,
+) -> Result<(), String>
+where
+    R: FnMut(&Path, &Path) -> io::Result<()>,
+    D: FnMut(&Path) -> io::Result<()>,
+{
+    let destination_metadata = checked_destination_metadata(destination, overwrite)?;
+    if destination_metadata.is_none() {
+        return rename(staged, destination)
+            .map_err(|error| format!("Could not install staged replacement file: {error}"));
+    }
+
+    let backup = random_sibling_path(destination, "previous")?;
+    rename(destination, &backup)
+        .map_err(|error| format!("Could not protect existing destination file: {error}"))?;
+
+    match rename(staged, destination) {
+        Ok(()) => {
+            let _ = remove_file(&backup);
+            Ok(())
+        }
+        Err(install_error) => match rename(&backup, destination) {
+            Ok(()) => {
+                let _ = remove_file(staged);
+                Err(format!(
+                    "Could not install replacement file; the previous destination was restored: {install_error}"
+                ))
+            }
+            Err(restore_error) => Err(format!(
+                "Could not install replacement file: {install_error}. RepoTunnel also could not restore the previous destination automatically: {restore_error}. The previous file was retained in a recovery backup beside the destination."
+            )),
+        },
+    }
+}
+
+#[cfg(not(windows))]
+fn install_staged_file(staged: &Path, destination: &Path, overwrite: bool) -> Result<(), String> {
+    checked_destination_metadata(destination, overwrite)?;
+    fs::rename(staged, destination)
+        .map_err(|error| format!("Could not atomically install staged replacement file: {error}"))
+}
+
+#[cfg(windows)]
+fn install_staged_file(staged: &Path, destination: &Path, overwrite: bool) -> Result<(), String> {
+    install_staged_file_with(
+        staged,
+        destination,
+        overwrite,
+        |from, to| fs::rename(from, to),
+        |path| fs::remove_file(path),
+    )
+}
+
+fn safely_copy_into_destination(
+    source: &Path,
+    destination: &Path,
+    expected_size: u64,
+    overwrite: bool,
+) -> Result<(), String> {
+    let staged = stage_file_for_destination(source, destination, expected_size)?;
+    if let Err(error) = install_staged_file(&staged, destination, overwrite) {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn project_destination(
     workspace: &Workspace,
     relative_path: &str,
@@ -400,8 +574,8 @@ pub(crate) fn copy_to_workspace(
     let source = temp_file_path(workspace, task_id, source_relative, false, true)?;
     let size_bytes = ensure_regular_temp_file(&source)?;
     let destination = project_destination(workspace, destination_relative, overwrite)?;
-    fs::copy(&source, &destination)
-        .map_err(|error| format!("Could not copy temporary file into project: {error}"))?;
+    safely_copy_into_destination(&source, &destination, size_bytes, overwrite)
+        .map_err(|error| format!("Could not copy temporary file into project safely: {error}"))?;
     Ok(TempWorkspaceFileResult {
         task_id: task_id.to_string(),
         source: format!("{}/{source_relative}", task_relative(task_id)),
@@ -421,20 +595,13 @@ pub(crate) fn move_to_workspace(
     let source = temp_file_path(workspace, task_id, source_relative, true, true)?;
     let size_bytes = ensure_regular_temp_file(&source)?;
     let destination = project_destination(workspace, destination_relative, overwrite)?;
-    if overwrite && destination.exists() {
-        fs::remove_file(&destination)
-            .map_err(|error| format!("Could not replace destination file: {error}"))?;
-    }
-    match fs::rename(&source, &destination) {
-        Ok(()) => {}
-        Err(_) => {
-            fs::copy(&source, &destination)
-                .map_err(|error| format!("Could not move temporary file into project: {error}"))?;
-            fs::remove_file(&source).map_err(|error| {
-                format!("Copied output but could not remove temp source: {error}")
-            })?;
-        }
-    }
+    safely_copy_into_destination(&source, &destination, size_bytes, overwrite)
+        .map_err(|error| format!("Could not move temporary file into project safely: {error}"))?;
+    fs::remove_file(&source).map_err(|error| {
+        format!(
+            "The output was installed safely, but RepoTunnel could not remove the temporary source: {error}"
+        )
+    })?;
     Ok(TempWorkspaceFileResult {
         task_id: task_id.to_string(),
         source: format!("{}/{source_relative}", task_relative(task_id)),
@@ -454,6 +621,9 @@ pub(crate) fn rename_file(
     let source = temp_file_path(workspace, task_id, source_relative, true, true)?;
     let size_bytes = ensure_regular_temp_file(&source)?;
     let destination = temp_file_path(workspace, task_id, destination_relative, true, false)?;
+    if source == destination {
+        return Err("Temporary source and destination must be different files.".to_string());
+    }
     if destination.exists() && !overwrite {
         return Err("Temporary destination already exists.".to_string());
     }
@@ -463,15 +633,18 @@ pub(crate) fn rename_file(
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err("Temporary destination must be a regular non-symlink file.".to_string());
         }
-        fs::remove_file(&destination)
-            .map_err(|error| format!("Could not replace temporary destination: {error}"))?;
     }
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Could not create temporary destination folder: {error}"))?;
     }
-    fs::rename(&source, &destination)
-        .map_err(|error| format!("Could not rename temporary file: {error}"))?;
+    safely_copy_into_destination(&source, &destination, size_bytes, overwrite)
+        .map_err(|error| format!("Could not rename temporary file safely: {error}"))?;
+    fs::remove_file(&source).map_err(|error| {
+        format!(
+            "The renamed output was installed safely, but RepoTunnel could not remove the original temporary source: {error}"
+        )
+    })?;
     Ok(TempWorkspaceFileResult {
         task_id: task_id.to_string(),
         source: format!("{}/{source_relative}", task_relative(task_id)),
@@ -622,6 +795,120 @@ mod tests {
         assert!(root.join("exports/final.mp4").exists());
 
         assert!(project_destination(&workspace, ".repotunnel-tmp/task/nope", false).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_staged_promotion_restores_previous_destination() {
+        use std::cell::Cell;
+
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-temp-promotion-failure-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("final.bin");
+        let staged = root.join("staged.bin");
+        fs::write(&destination, b"previous-bytes").unwrap();
+        fs::write(&staged, b"replacement-bytes").unwrap();
+
+        let rename_call = Cell::new(0usize);
+        let result = install_staged_file_with(
+            &staged,
+            &destination,
+            true,
+            |from, to| {
+                let call = rename_call.get();
+                rename_call.set(call + 1);
+                if call == 1 {
+                    Err(io::Error::other("simulated promotion failure"))
+                } else {
+                    fs::rename(from, to)
+                }
+            },
+            |path| fs::remove_file(path),
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.contains("previous destination was restored"));
+        assert_eq!(fs::read(&destination).unwrap(), b"previous-bytes");
+        assert!(!staged.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn overwrite_copy_move_and_rename_preserve_expected_file_semantics() {
+        let (root, workspace) = workspace("overwrite-ops");
+        create(&workspace, "task", "Overwrite operations").unwrap();
+        let task = root.join(".repotunnel-tmp/task");
+        fs::create_dir_all(task.join("inputs")).unwrap();
+        fs::create_dir_all(task.join("renames")).unwrap();
+        fs::create_dir_all(root.join("exports")).unwrap();
+
+        let copy_source = task.join("inputs/copy.bin");
+        fs::write(&copy_source, b"copy-new").unwrap();
+        fs::write(root.join("exports/copy.bin"), b"copy-old").unwrap();
+        copy_to_workspace(
+            &workspace,
+            "task",
+            "inputs/copy.bin",
+            "exports/copy.bin",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(root.join("exports/copy.bin")).unwrap(),
+            b"copy-new"
+        );
+        assert_eq!(fs::read(&copy_source).unwrap(), b"copy-new");
+
+        let move_source = task.join("inputs/move.bin");
+        fs::write(&move_source, b"move-new").unwrap();
+        fs::write(root.join("exports/move.bin"), b"move-old").unwrap();
+        move_to_workspace(
+            &workspace,
+            "task",
+            "inputs/move.bin",
+            "exports/move.bin",
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(root.join("exports/move.bin")).unwrap(),
+            b"move-new"
+        );
+        assert!(!move_source.exists());
+
+        let rename_source = task.join("renames/source.bin");
+        let rename_destination = task.join("renames/destination.bin");
+        fs::write(&rename_source, b"rename-new").unwrap();
+        fs::write(&rename_destination, b"rename-old").unwrap();
+        rename_file(
+            &workspace,
+            "task",
+            "renames/source.bin",
+            "renames/destination.bin",
+            true,
+        )
+        .unwrap();
+        assert_eq!(fs::read(&rename_destination).unwrap(), b"rename-new");
+        assert!(!rename_source.exists());
+
+        fs::write(task.join("renames/self.bin"), b"keep-self").unwrap();
+        assert!(rename_file(
+            &workspace,
+            "task",
+            "renames/self.bin",
+            "renames/self.bin",
+            true,
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(task.join("renames/self.bin")).unwrap(),
+            b"keep-self"
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 }

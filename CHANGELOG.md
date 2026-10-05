@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.1 - 2026-10-05
+
+RepoTunnel v0.4.1 is the first public 0.4.x release. It combines the capability work completed during the unpublished v0.4.0 validation build with the final Phone reliability fixes verified before release.
+
+### Highlights
+
+- Added full Phone Access workflows with persistent scrcpy 4.1 live video, human control, semantic accessibility actions, bounded transactions, app/files/settings/network/shell tooling, and payment-sensitive privacy blocking for AI/MCP access.
+- Fixed intermittent Phone Helper `Resource temporarily unavailable (os error 11)` failures by treating timed `WouldBlock` reads as transient on the same request/socket, with a bounded response deadline and no semantic-action replay.
+- Fixed local Phone-panel lag by separating human tap/swipe/key/text control from the AI/MCP payment-policy helper path while keeping AI/MCP control on the strict payment-sensitive guard.
+- Fixed stale/lagging Phone-panel video by giving the local human view a dedicated cached scrcpy frame path instead of running semantic-helper policy checks on every refresh; healthy rendering now waits briefly for the next frame instead of busy-polling duplicates.
+- Treats empty semantic-helper socket closures as transient helper unavailability rather than protocol corruption, allowing safe read-only policy checks to recover cleanly.
+- Added bounded large-project inspection/search/range-read tools with resumable cursors and concurrency protection for very large repositories.
+- Strengthened long-running work with durable managed-process supervision and Linux restart reattachment backed by persisted supervisor state and process-identity checks.
+- Added browser mutation receipts for selector/semantic click and type operations so post-dispatch transport loss is surfaced as `ambiguous` and never blindly replayed.
+- Expanded Continuity/Resume, ChatGPT continuation recovery, Team Mode coordination, AI Workspace recovery, and current project documentation for long multi-session AI work.
+- Expanded Video Production with persistent Video Projects, narration/subtitles, generated scenes, rendering/preview/QA, story adapters, and project-owned asset/license tracking.
+- Final v0.4.1 release validation passed 43/43 frontend tests and 448 Rust tests with 0 failures and 8 intentional ignores.
+
+## 0.4.0 - 2026-10-05
+
+Unpublished internal validation build. Its capability work was superseded by v0.4.1 before any public GitHub release; the v0.4.1 notes above are the canonical public 0.4.x release notes.
+
 ## 0.3.1 - 2026-09-06
 
 RepoTunnel v0.3.1 is a focused reliability and editor-quality update for v0.3.0.

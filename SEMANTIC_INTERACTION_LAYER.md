@@ -1,8 +1,10 @@
 # RepoTunnel Semantic Interaction Layer — Architecture & Continuity
 
+> **Historical-stage note (2026-10-05):** This document preserves the stage-by-stage implementation record. Old “Next: Stage …”, architecture-freeze counts, and validation counts describe those dated stages and must not be interpreted as the current project backlog. Before changing semantic/browser/desktop/AI-Workspace behavior, use the live source/runtime capability report and current product/architecture/security docs to determine what still exists or is actually missing.
+
 ## Purpose
 
-This file is the canonical source of truth for the Semantic Interaction Layer implementation. Future chats must read this file together with `AI_CONTINUITY.md` and `STABLE_CHECKPOINT.md` before changing semantic/browser/desktop/AI-Workspace code.
+This file remains the implementation history and design record for the Semantic Interaction Layer. Future chats should read it together with `AI_CONTINUITY.md` and `STABLE_CHECKPOINT.md`, then reconcile it with the current source before changing semantic/browser/desktop/AI-Workspace code.
 
 Short resume instruction:
 

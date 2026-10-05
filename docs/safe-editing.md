@@ -36,6 +36,12 @@ Safe automatic undo is supported for:
 
 Recursive directory deletion and deletion of files that cannot be safely backed up as bounded UTF-8 text remain auditable but may not expose Undo.
 
+## Finalization failure handling
+
+An applied mutation is not reported as a clean success if RepoTunnel cannot persist the corresponding history/version state. RepoTunnel attempts a conservative automatic rollback when the operation has a safe recovery payload.
+
+If rollback cannot be confirmed, RepoTunnel retains the pre-edit recovery data and reports the operation as failed/ambiguous rather than discarding recovery evidence or pretending the project is known-good. Version pointer/history updates use the same fail-safe principle.
+
 ## Storage
 
-Change-history metadata, pending requests, and undo data live in the RepoTunnel application-data directory. Pending and backup data are separate from history, and sensitive request/backup files are written atomically with owner-only permissions on Unix.
+Change-history metadata, pending requests, version state, and undo/recovery data live in the RepoTunnel application-data directory. Pending and backup data are separate from history, and sensitive request/backup files are written atomically with owner-only permissions on Unix.

@@ -129,10 +129,10 @@ pub(crate) fn registry() -> Vec<VideoAssetSource> {
             "None.",
             false,
             "native",
-            true,
+            false,
             "local://repotunnel/video",
             "RepoTunnel project code",
-            "Preferred first for technical explainers because it is deterministic, fast, project-owned, and avoids external licensing.",
+            "Compatibility fallback for generated tutorial scenes when the default HTML/CSS + GSAP path is unavailable or unsuitable. Keep it deterministic and project-owned, but do not prefer hand-positioned native scenes for normal explainers.",
             None,
         ),
         source!(
@@ -532,7 +532,7 @@ pub(crate) fn registry() -> Vec<VideoAssetSource> {
             true,
             "https://github.com/ManimCommunity/manim",
             "MIT",
-            "High-value optional adapter for algorithmic and mathematical explanations. Do not make it a mandatory dependency.",
+            "High-value optional adapter for mathematical/graph explanations only when it is already installed. Never install Manim automatically and never make it a mandatory dependency.",
             Some(40_900),
         ),
         source!(
@@ -564,7 +564,7 @@ pub(crate) fn registry() -> Vec<VideoAssetSource> {
             true,
             "https://github.com/greensock/GSAP",
             "https://gsap.com/standard-license/",
-            "Useful for advanced timing/morphing when RepoTunnel's native scene renderer is insufficient.",
+            "Default motion engine for HTML/CSS tutorial, explainer, promo and reel templates; drive a paused timeline deterministically per captured Chrome frame rather than screen-recording.",
             Some(28_500),
         ),
         source!(
@@ -612,7 +612,7 @@ pub(crate) fn registry() -> Vec<VideoAssetSource> {
             true,
             "https://github.com/godotengine/godot",
             "https://godotengine.org/license/",
-            "Preferred fast renderer for story-mode 2D skeletal/cutout dialogue and movement. It is optional and never replaces the native tutorial renderer.",
+            "Preferred fast renderer for story-mode 2D skeletal/cutout dialogue and movement when already installed. It is optional and does not replace the HTML/CSS + GSAP default for tutorial/explainer scenes.",
             None,
         ),
         source!(

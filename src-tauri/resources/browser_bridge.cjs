@@ -322,6 +322,22 @@ async function cookieSnapshot(client) {
   }
 }
 
+async function mutationState(tabId) {
+  const tab = await findTab(tabId).catch(() => null);
+  let generation = null;
+  let frameUrl = "";
+  try {
+    const tree = await cdpCommand(tabId, "Page.getFrameTree");
+    const frame = tree?.frameTree?.frame || {};
+    generation = frame?.loaderId ? String(frame.loaderId) : null;
+    frameUrl = String(frame?.url || "");
+  } catch {}
+  return {
+    url: String(tab?.url || frameUrl || ""),
+    documentGeneration: generation,
+  };
+}
+
 async function navigateObserve(tabId, url, timeoutMs = 12000) {
   const startedAt = Date.now();
   const client = await getPersistentCdpClient(tabId);
@@ -1458,6 +1474,11 @@ async function executeOperation(currentOperation, currentArgs, emit = out) {
       const [tabId, url] = args;
       const timeoutMs = Number(args[2] || 12000);
       out(await navigateObserve(tabId, url, timeoutMs));
+      return;
+    }
+    case "mutation-state": {
+      const [tabId] = args;
+      out(await mutationState(tabId));
       return;
     }
     case "reload": {

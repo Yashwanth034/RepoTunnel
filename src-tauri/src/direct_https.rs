@@ -239,6 +239,12 @@ fn hop_by_hop_header(name: &HeaderName) -> bool {
     )
 }
 
+fn proxy_owned_forwarded_header(name: &HeaderName) -> bool {
+    name.as_str()
+        .to_ascii_lowercase()
+        .starts_with("x-forwarded-")
+}
+
 async fn proxy_request(State(state): State<ProxyState>, request: Request<Body>) -> Response<Body> {
     let (parts, body) = request.into_parts();
     let path_and_query = parts
@@ -253,8 +259,12 @@ async fn proxy_request(State(state): State<ProxyState>, request: Request<Body>) 
     for (name, value) in &parts.headers {
         // Do not forward the public Host header to the loopback-only MCP gateway.
         // Reqwest creates the correct 127.0.0.1:<port> Host from upstream_url.
-        // Preserve the original public hostname only through X-Forwarded-Host.
-        if !hop_by_hop_header(name) && !name.as_str().eq_ignore_ascii_case("host") {
+        // X-Forwarded-* is proxy-owned: never let a public client shadow the
+        // trusted forwarding context that RepoTunnel adds below.
+        if !hop_by_hop_header(name)
+            && !name.as_str().eq_ignore_ascii_case("host")
+            && !proxy_owned_forwarded_header(name)
+        {
             upstream = upstream.header(name, value);
         }
     }
@@ -838,8 +848,24 @@ pub(crate) fn spawn(
 mod tests {
     #[cfg(target_os = "linux")]
     use super::bind_direct_listener;
-    use super::{is_non_public_ip, safe_host_component, valid_challenge_token};
+    use super::{
+        is_non_public_ip, proxy_owned_forwarded_header, safe_host_component, valid_challenge_token,
+    };
+    use axum::http::HeaderName;
     use std::net::IpAddr;
+
+    #[test]
+    fn direct_proxy_never_trusts_client_forwarded_headers() {
+        for name in ["x-forwarded-proto", "x-forwarded-host", "x-forwarded-for"] {
+            let name = HeaderName::from_bytes(name.as_bytes()).expect("valid forwarded header");
+            assert!(proxy_owned_forwarded_header(&name));
+        }
+
+        for name in ["authorization", "content-type", "user-agent"] {
+            let name = HeaderName::from_bytes(name.as_bytes()).expect("valid normal header");
+            assert!(!proxy_owned_forwarded_header(&name));
+        }
+    }
 
     #[test]
     fn process_crypto_provider_makes_rustls_server_builder_unambiguous() {

@@ -1,93 +1,152 @@
 # MCP contract
 
-RepoTunnel exposes one stable MCP tool surface over the managed public connection. The tool contract is a compatibility boundary: internal implementation, storage, UI, and activity-history changes should not rename tools or change required parameter meaning unless a deliberate connector migration is planned.
+RepoTunnel exposes a capability-oriented MCP surface over its authenticated connection paths. The tool contract is a compatibility boundary: internal storage/UI refactors should not casually rename tools or change required parameter meaning.
 
-## Workspace and files
+Do not rely on a hard-coded total tool count. RepoTunnel has expanded well beyond its early file-only surface, and clients that cache tool discovery should refresh actions when the schema changes.
 
-Existing workspace inspection, safe file editing, change history, sandbox verification, and Git tools remain compatible with earlier RepoTunnel builds.
+## Workspace and project inspection
 
-## Live terminal and processes
+Core project discovery and readiness tools include:
 
-The live execution contract remains:
+- `list_workspaces`
+- `get_workflow_readiness`
+- project setup/memory/continuity inspection
+
+For large repositories, prefer the bounded paging/cursor tools:
+
+- `inspect_project_page`
+- `list_directory_page`
+- `read_file_range`
+- `fast_search_files`
+
+Legacy bounded inspection/search tools remain available for compatibility where appropriate.
+
+Absolute workspace paths are not part of the normal AI workspace-discovery contract.
+
+## File mutation and history
+
+RepoTunnel exposes focused workspace-relative file/folder mutations rather than arbitrary host filesystem access.
+
+Mutations pass through the same access and safe-editing layers used by the desktop app. Results distinguish an applied operation from a queued AI Review request.
+
+MCP cannot approve/reject/undo its own pending local Review actions.
+
+## Terminal and managed processes
+
+The live execution surface includes one-shot terminal commands and durable managed processes.
+
+Important operations include:
 
 - `run_terminal_command`
-- `list_terminal_history`
+- terminal history
 - `start_process`
-- `list_processes`
+- process listing/status
 - `read_process_output`
-- `stop_process`
-- `restart_process`
+- `wait_process`
+- stop/restart operations
 
-One-shot commands use the real approved workspace and host environment. Persistent processes are used for development servers, watchers, workers, and other commands that must survive later MCP calls.
+Long-running builds, tests, dev servers, and workers should use managed processes rather than holding one MCP request open.
 
-## Application launching
+A managed process survives ordinary MCP/UI reconnects through RepoTunnel's durable supervisor model. On Linux, the runtime capability also advertises complete RepoTunnel-process restart reattachment: persisted supervisor state is revalidated and the same managed-process record/logs are recovered. Windows/macOS still report this capability as false until equivalent native identity/control and acceptance coverage exists.
 
-The launcher contract is intentionally compact:
+## Sandboxed verification
 
-- `list_launchable_applications`
-- `launch_target`
-- `list_launch_history`
+RepoTunnel separately exposes discovered build/test/check presets that run in disposable, network-disabled project copies.
 
-`launch_target` accepts one of three stable kinds: `url`, `workspace_path`, or `application`. URL and workspace-path targets may optionally select an application returned by `list_launchable_applications`.
+This verification path is intentionally different from the real-workspace live terminal path.
 
-## Browser automation
+## Git and GitHub
 
-The browser contract uses one mutation tool and separate observation tools:
+The MCP surface supports bounded Git inspection plus RepoTunnel-validated staging, commit, and safe restore flows.
 
-- `list_automation_browsers`
-- `get_browser_status`
-- `list_browser_tabs`
-- `browser_action`
-- `browser_inspect_page`
-- `browser_take_screenshot`
-- `get_browser_diagnostics`
-- `list_browser_history`
+Git push remains separate: it requires a current explicit human instruction to publish the work.
 
-`browser_action` supports the stable actions `start`, `stop`, `open_tab`, `activate_tab`, `close_tab`, `navigate`, `click`, `type`, `scroll`, and `reload`.
+When GitHub is connected in RepoTunnel, supported GitHub/Git workflows can use the trusted RepoTunnel connection without exposing the credential to the AI.
 
-Browser screenshots are returned as MCP image content. The managed browser uses RepoTunnel's isolated automation profile rather than the user's ordinary browser profile.
+## Browser runtime
 
-## Monitoring
+RepoTunnel's managed browser surface includes:
 
-The monitoring contract is:
+- browser/session status and tabs
+- navigation/action control
+- DOM/text inspection and screenshots
+- console/network diagnostics
+- browser context/profile handling
+- downloads and file upload
+- semantic snapshots/find/actions/sequences with short-lived refs
+- atomic navigation receipts and document-generation consistency
+- mutation receipts for selector/semantic click and type actions and semantic sequences
+- successful network-history metadata
 
-- `get_monitoring_status`
-- `set_workspace_monitoring`
-- `get_monitoring_snapshot`
-- `list_monitoring_file_events`
+A mutation receipt contains a unique mutation ID, helper acknowledgement, redacted before/after URL, before/after document generation, and a document-changed signal. If the browser-helper transport is lost after dispatch, RepoTunnel returns the browser action with `status=ambiguous` and never automatically replays that state-changing action. Clients should inspect the receipt and current page before deciding whether another mutation is necessary. Typed text is not copied into the receipt.
 
-`get_monitoring_snapshot` is the preferred compact observation tool after starting a development workflow because it combines managed process state/output tails, listening ports and dev-server correlation, recent terminal results, browser state and diagnostics, and recent project-file changes.
+RepoTunnel intentionally does not currently expose raw secret-header persistence, arbitrary response-body capture, WebSocket-frame capture, or a navigation scope allowlist.
 
+## Desktop and AI Workspace
 
-## Team Mode compatibility expansion
+Desktop/AI Workspace tools operate through RepoTunnel's explicit Desktop permission and platform adapters.
 
-Team Mode was RepoTunnel's first deliberate MCP contract expansion after the 48-tool workspace/runtime surface was frozen. The original 48 tool names and parameter meanings remain unchanged. Team Mode adds two coordination tools, and the repository/external-file workflow adds two narrowly scoped workspace-bootstrap/security tools, bringing the public surface to **52 tools**:
+AI Workspace is an isolated virtual desktop that can host multiple bounded app sessions. Semantic tools reuse short-lived refs and sensitive-field protections.
 
-- `team_status` — read the persistent shared two-agent session, including goal, success criteria, roles, task ownership, review handoffs, discussion, file/folder claims, phase, per-criterion verification evidence, and progress. It also supports a bounded long-poll (`after_revision` + `wait_seconds`, maximum 30 seconds) so an active agent can wait for the other AI to update shared state without immediately ending its coordination turn.
-- `team_action` — the single agent mutation surface for creating/joining a persistent A/B team, heartbeat, shared messages, distinct task creation/claim/update, explicit task handoff, success-criterion verification evidence, task-scoped path claims, phase changes, and completion of the **current work request**. Completing a request keeps the same Team active. New human work received in either AI chat is registered in the same Team by posting a decision message beginning `USER REQUEST:`. Team pause/end remain user-controlled desktop actions.
-- `clone_repository` — clone a human-supplied GitHub repository into `~/Projects` and register/reuse that checkout as an approved workspace without exposing GitHub credentials to the AI.
-- `request_external_file` — require the user to choose one external file through RepoTunnel's native picker, then either read bounded UTF-8 content once or import the selected file into an explicit workspace-relative destination. The AI cannot nominate or browse an arbitrary host path.
+RepoTunnel blocks AI control of RepoTunnel itself.
 
-Team Mode coordination state is stored by RepoTunnel outside the project folder; it does not create `PLAN.md`, `STATUS.md`, or other coordination files inside the user's repository. While Team Mode is active/paused, RepoTunnel's normal MCP file mutation tools require the caller to be bound to a joined team role. During active work, file mutations additionally require the caller to own an in-progress task and hold matching task-scoped path claims; this prevents a reviewer/supporting AI from silently duplicating the owner's implementation. Explicit `handoff_task` transfers ownership when needed. Shell commands and browser side effects cannot be path-analyzed reliably, so the agents must still respect claims when using those tools. Normal workspace security, AI Auto/AI Review behavior, history and global Pause AI protections remain in force.
+## Team Mode
 
-Because adding tools changes MCP discovery, clients that cache an older RepoTunnel tool snapshot may need their RepoTunnel app/connector refreshed or recreated once to discover the 52-tool surface.
+Team Mode deliberately uses a compact coordination surface:
 
-## AI mode behavior
+- `team_status`
+- `team_action`
 
-AI Auto is intentionally non-interruptive. File changes, real terminal commands, managed process starts, application launches, and browser mutations execute without local confirmation when the project is configured for AI Auto.
+The persistent A/B team model, task ownership, path claims, cross-review, and success-criterion evidence are enforced behind those tools. Do not hard-code a total RepoTunnel MCP tool count; the broader capability surface evolves independently.
 
-AI Review may queue mutating actions for local Accept/Reject. MCP cannot approve its own queued Review actions.
+## Phone Access
 
-Monitoring and other observation tools do not require approval.
+Phone tools are capability-gated and target an opaque selected device identity.
 
-Pause AI is the emergency master stop. MCP tools must stop when AI access is paused, and RepoTunnel stops managed active execution/browser work through its existing emergency-stop path.
+The surface includes status, live screen/control, rapid sequences, semantic transactions, app/file/package operations, settings availability, shell/log/network diagnostics, and helper status/install actions.
+
+MCP cannot pair/select a phone, enable Full/Limited access, alter capability grants, or unpause Phone Access.
+
+Payment-sensitive foreground apps block AI Phone observation/control even while the accessibility service remains enabled.
+
+## Video
+
+RepoTunnel exposes both Video Intelligence and Video Production capabilities.
+
+Video Intelligence uses background jobs for transcript/visual/tutorial/full analysis.
+
+Video Production exposes durable Video Projects, assets/licenses, recording, narration/subtitles, generated scenes/diagrams, rendering jobs, pipeline status, QA, cleanup, and story-animation capabilities.
+
+## Temporary and media middleware
+
+RepoTunnel-owned temporary workspaces provide a scoped place for downloads, extracted/generated media, frames, and intermediate artifacts. Cleanup is marker-owned and cannot target arbitrary project files.
+
+Media inspection, frame extraction, and decode validation are available as bounded helpers.
+
+## Continuity and Project Memory
+
+RepoTunnel exposes read-only continuity/resume information and bounded Project Memory updates. Factual activity, Git/process state, and saved semantic intent are kept distinct.
+
+MCP App self-continuation support exists, but RepoTunnel does not claim a general automatic detector for every ChatGPT session ending/interruption.
+
+## AI modes
+
+### AI Auto
+
+Compatible mutations and actions can execute without repeated RepoTunnel approval prompts while all workspace, secret, sandbox, Phone, browser, and publish boundaries remain active.
+
+### AI Review
+
+Mutating actions may be queued for local Accept/Reject according to the applicable policy.
+
+MCP cannot self-approve those queued actions.
+
+### Pause AI
+
+Pause AI is the emergency stop/boundary for RepoTunnel-managed AI activity.
 
 ## Compatibility rule
 
-New internal capabilities should first be composed behind the existing tools when practical. Adding or changing MCP tools should be treated as an explicit compatibility event, not as a routine implementation detail.
+Prefer extending behavior behind existing coherent tools when practical. Adding/removing/renaming MCP tools or changing required parameter semantics is an explicit compatibility event.
 
-## Unified AI activity history
-
-RepoTunnel groups MCP activity internally by the existing `traceparent` request trace. File inspection/changes, terminal and verification commands, managed processes, launcher/browser work, Git actions, monitoring observations, and monitored project-file changes can therefore appear as one request-level activity in the desktop History UI.
-
-This journal is an internal implementation detail and does not add an MCP tool or change any public MCP parameter schema. File-changing request groups link to the existing version record so Previous/Next/Restore remain version-driven; observation-only or execution-only requests are visible without creating fake restore points.
+Clients may cache MCP schemas. After a schema change, refresh/re-scan the RepoTunnel app/connector before concluding that a new tool is missing.

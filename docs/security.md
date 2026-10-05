@@ -112,29 +112,73 @@ Git status/diff output is filtered so protected credential paths are not surface
 
 In AI Auto, RepoTunnel's dedicated stage/commit operations apply immediately without a local approval interruption. In AI Review they remain pending for local Accept/Reject, and MCP cannot approve or reject its own pending Review actions. Raw AI `git add`/`git commit` through the live terminal are refused so those checks cannot be bypassed accidentally. Restore-to-HEAD requests remain forced-review safe-editing changes instead of exposing destructive `git reset`, `git clean`, or unrestricted restore commands.
 
-## Filesystem operation limits
+## Filesystem and large-project limits
 
-The local file engine applies limits before operations reach MCP clients:
+The local file engine applies bounded limits before operations reach MCP clients. Legacy single-response tools keep conservative read/list/search caps, while the dedicated large-project path returns resumable pages/ranges instead of requiring an unbounded response.
 
-- text reads are limited to 1 MiB per file
-- file writes are limited to 2 MiB of UTF-8 content
-- directory listings are limited to 1,000 accessible entries
-- searches scan at most 10,000 files and return at most 200 matches
-- search skips common generated/dependency directories and never follows symlinks
-- protected files are omitted from recursive search and directory results
-- exact-context patches fail if their expected text is missing or appears more than once
-- rename and move never overwrite an existing destination
-- workspace-root deletion or modification is rejected
-- write, rename, move, and delete operations reject symlink leaf targets
+Security properties are shared across both paths:
 
-These are defense-in-depth limits. User-facing review/approval controls and remote connection authentication remain separate layers.
+- file writes are bounded UTF-8 operations
+- large directory/project traversal is paged and cursor-based
+- large text reads are range-based and cursors are invalidated when the source changes
+- incremental search is bounded and uses a shared heavy-read gate
+- common generated/dependency directories are skipped for broad project intelligence
+- recursive traversal never follows symlinks
+- protected credential paths are omitted/rejected
+- exact-context patches fail when expected text is missing or ambiguous
+- rename/move never overwrite an existing destination
+- workspace-root deletion/modification is rejected
+- write, rename, move, and delete reject symlink leaf targets
+
+Paging/performance controls never replace the workspace access guard. User-facing review/approval controls and remote authentication remain separate layers.
 
 ## MCP action classification
 
-Inspection tools advertise the MCP `readOnlyHint` annotation. Mutation tools intentionally do not, so clients can apply their normal write-confirmation policy. The `list_change_history`, `get_execution_status`, `list_command_presets`, `list_command_history`, `git_status`, `git_diff`, `git_log`, and `list_git_history` tools are read-only. Filesystem mutation, `run_command`, `request_git_stage`, `request_git_commit`, and `request_git_restore_file` are actions. Local change approval/rejection/undo, command approval/rejection, and Git approval/rejection are intentionally not exposed through MCP. RepoTunnel still enforces read-only/read-write workspace permissions and the review/automatic change policy independently in Rust.
+Observation tools advertise read-only/idempotent annotations where their behavior supports those guarantees. Mutation tools remain actions, so client UI classification is an additional safety signal rather than a replacement for RepoTunnel's Rust-side authorization.
 
+Local review controls are intentionally not exposed as remote self-approval tools: an MCP caller cannot approve/reject/undo its own pending file, command, or Git Review action. Phone access escalation, device selection/pairing, and unpausing are likewise kept outside the AI MCP surface.
 
-## Secure MCP Tunnel credentials
+## Public MCP authentication and providers
+
+The raw MCP origin remains local. Remote providers—ngrok, Cloudflare Tunnel, Direct HTTPS, or the optional OpenAI Secure MCP Tunnel—must not weaken workspace authorization.
+
+RepoTunnel's public MCP path uses OAuth state stored outside the repository, including dynamic-client/PKCE checks. Direct HTTPS exposes only the intended public routes and strips client-controlled forwarding context before proxying to the trusted local origin. Revoking MCP access invalidates remote authorization without deleting approved projects.
+
+Provider credentials are not arbitrary AI inputs and are protected from normal terminal/tool output.
+
+## Browser security
+
+Managed browser automation uses RepoTunnel-owned/selected browser profiles and separates observation from mutation.
+
+- semantic refs are short-lived and document/session-bound
+- sensitive semantic fields cannot be typed through the semantic path
+- secret-like query values are redacted from persisted/AI-facing URL diagnostics
+- persistent custom context headers reject secret-bearing header names
+- ambiguous state-changing mutations are not blindly replayed after helper transport failure
+- file upload resolves only an existing approved workspace file
+- managed downloads are routed into RepoTunnel-owned temporary workspaces when configured
+
+RepoTunnel currently does not expose arbitrary response-body capture, WebSocket-frame capture, persistent raw secret headers, or a browser destination scope allowlist.
+
+## Desktop and AI Workspace security
+
+Desktop control requires explicit RepoTunnel Desktop permission and blocks RepoTunnel self-control.
+
+AI Workspace uses an isolated virtual desktop with per-application ownership/session identity. On Linux, its accessibility path uses a private D-Bus/AT-SPI environment rather than the human desktop accessibility bus. Sensitive-field rules and short-lived semantic refs remain active.
+
+Windows UIA and macOS AX adapters share the semantic policy model, but native-platform behavior must be validated on those operating systems before making platform-specific runtime claims.
+
+## Phone security
+
+Phone Access is controlled locally by the user through Off/Limited/Full plus Pause AI. MCP cannot pair/select a phone, enable access, change capability grants, or unpause it.
+
+The AI targets an opaque selected device identity rather than a raw ADB serial/address. Generic Phone shell is bounded and rejects direct UI/screen-capture primitives that would bypass dedicated guarded Phone tools.
+
+When a payment-sensitive application is foreground, RepoTunnel keeps its Accessibility service enabled by default but blocks AI Phone screen observation, semantic access, raw input, generic shell, and logs until the user leaves the app. Sensitive credential/payment fields remain protected independently.
+
+Android permissions/device policy remain authoritative even under Full Access. RepoTunnel reports learned capability unavailability instead of pretending a denied settings/write operation succeeded.
+
+## Optional Secure MCP Tunnel credentials
 
 RepoTunnel uses the official OpenAI `tunnel-client` as a separate transport process for ChatGPT connectivity. The local MCP endpoint remains bound to loopback.
 
@@ -158,6 +202,6 @@ The packaged Tauri webview uses an explicit Content Security Policy rather than 
 
 RepoTunnel writes a bounded rotating runtime log under its application-data directory. New log files use owner-only permissions on Unix, common secret markers are redacted, individual log details are truncated, and source-file contents/API keys are never intentionally logged. Rust panic information is captured to that log for diagnosis before the normal panic hook runs.
 
-Startup removes only RepoTunnel-owned temporary tunnel files that are old and not associated with a live Linux process. This avoids deleting files belonging to another active RepoTunnel instance. Normal application exit explicitly stops the managed Secure MCP Tunnel process and loopback gateway before shutdown.
+Startup removes only RepoTunnel-owned stale temporary connection/runtime files under the applicable ownership rules. This avoids deleting files belonging to another active RepoTunnel instance. Normal application exit stops RepoTunnel-owned connection workers/gateway state according to the active provider; the optional Secure MCP Tunnel child is explicitly terminated when that transport is in use.
 
 Linux launch-at-login uses the user's XDG autostart directory and never stores tunnel credentials. For AppImage builds RepoTunnel records the original AppImage path rather than the temporary mounted executable path. RepoTunnel also refuses to write its autostart entry through a symbolic link.

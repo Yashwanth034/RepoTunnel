@@ -45,6 +45,7 @@ type BrowserAutomationProps = {
 const statusLabels: Record<BrowserActionStatus, string> = {
   pending: "Pending approval",
   applied: "Applied",
+  ambiguous: "Needs verification",
   failed: "Failed",
   rejected: "Rejected",
 };
@@ -558,6 +559,12 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
                     <strong>{kindLabels[action.kind]}</strong>
                     <code>{action.target}</code>
                     <small>{formatTime(action.updatedAt)}</small>
+                    {action.mutationReceipt ? (
+                      <small>
+                        Receipt {action.mutationReceipt.id} · {action.mutationReceipt.helperAcknowledged ? "helper acknowledged" : "completion unconfirmed"}
+                        {action.mutationReceipt.documentChanged ? " · document changed" : ""}
+                      </small>
+                    ) : null}
                     {action.error ? <p className="change-error">{action.error}</p> : null}
                   </div>
                 ))}

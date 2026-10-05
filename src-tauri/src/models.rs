@@ -837,8 +837,32 @@ pub(crate) enum BrowserActionKind {
 pub(crate) enum BrowserActionStatus {
     Pending,
     Applied,
+    Ambiguous,
     Failed,
     Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum BrowserMutationCompletion {
+    Applied,
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserMutationReceipt {
+    pub(crate) id: String,
+    pub(crate) operation: String,
+    pub(crate) tab_id: String,
+    pub(crate) completion: BrowserMutationCompletion,
+    pub(crate) helper_acknowledged: bool,
+    pub(crate) before_url: String,
+    pub(crate) after_url: Option<String>,
+    pub(crate) before_document_generation: Option<String>,
+    pub(crate) after_document_generation: Option<String>,
+    pub(crate) document_changed: bool,
+    pub(crate) transport_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -889,6 +913,8 @@ pub(crate) struct BrowserActionRecord {
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
     pub(crate) error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mutation_receipt: Option<BrowserMutationReceipt>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

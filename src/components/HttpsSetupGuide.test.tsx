@@ -85,13 +85,17 @@ async function renderGuide() {
 
 describe("HTTPS Setup privacy and guided resources", () => {
   it("shows only abstract setup status with a generic hostname example", async () => {
+    backend.getHttpsSetupReadiness.mockResolvedValue({
+      ...readiness,
+      nativeGlobalIpv6Available: true,
+    });
     await renderGuide();
 
     const text = host?.textContent ?? "";
     const input = host?.querySelector('input[aria-label="Direct HTTPS hostname"]') as HTMLInputElement;
 
     expect(text).toContain("HTTPS Setup");
-    expect(text).toContain("Public IPv6 path");
+    expect(text).toContain("Internet connection");
     expect(input.placeholder).toBe("your-name.duckdns.org");
 
     expect(text).not.toContain("https://");
@@ -101,6 +105,18 @@ describe("HTTPS Setup privacy and guided resources", () => {
     expect(text).not.toContain("43184");
     expect(text).not.toContain("203.0.113.42");
     expect(text).not.toContain("private-user-host.example");
+  });
+
+  it("collapses completed technical checks and highlights only the current setup step", async () => {
+    await renderGuide();
+
+    const completedDetails = host?.querySelector(".https-setup-step.complete details") as HTMLDetailsElement;
+    const currentStep = host?.querySelector(".https-setup-step.active");
+
+    expect(completedDetails).toBeTruthy();
+    expect(completedDetails.open).toBe(false);
+    expect(currentStep?.textContent).toContain("Internet connection");
+    expect(currentStep?.textContent).toContain("Current step");
   });
 
   it("opens allowlisted setup resources without passing a raw URL from the UI", async () => {

@@ -21,7 +21,6 @@ use crate::{
     desktop_control, launcher,
     models::{LaunchApplication, Workspace},
     semantic::{self, SemanticRefTarget, SemanticSnapshot, SemanticSnapshotInput, SemanticSurface},
-    system_resources,
 };
 
 const HELPER_RELATIVE: &str = "ai-workspace/ai_workspace.py";
@@ -40,7 +39,6 @@ const SESSION_STATE_FILE: &str = "ai-workspace/runtime/session.json";
 // New sessions still retain crash/reconnect recovery, while clean exits shut down.
 const SESSION_STATE_SCHEMA_VERSION: u32 = 2;
 const ABSOLUTE_MAX_APPLICATIONS: usize = 6;
-const MIN_FREE_RAM_RESERVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_SEMANTIC_SEQUENCE_STEPS: usize = 64;
 const MAX_SEMANTIC_WAIT_MS: u64 = 2_000;
 const MAX_SEMANTIC_TOTAL_WAIT_MS: u64 = 10_000;
@@ -86,6 +84,8 @@ pub(crate) struct AiWorkspaceApplicationStatus {
 pub(crate) struct AiWorkspaceStatus {
     pub(crate) session_id: Option<String>,
     pub(crate) workspace_id: String,
+    pub(crate) supported: bool,
+    pub(crate) unsupported_reason: Option<String>,
     pub(crate) running: bool,
     pub(crate) ready: bool,
     pub(crate) application_id: Option<String>,
@@ -100,6 +100,20 @@ pub(crate) struct AiWorkspaceStatus {
     pub(crate) last_started_app_session_id: Option<String>,
     pub(crate) resource_admission: Option<String>,
     pub(crate) message: Option<String>,
+}
+
+fn platform_capability() -> (bool, Option<&'static str>) {
+    #[cfg(target_os = "linux")]
+    {
+        (true, None)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (
+            false,
+            Some("AI Workspace is currently supported on Linux only."),
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -258,39 +272,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn application_memory_budget(application_id: &str) -> u64 {
-    let id = application_id.to_ascii_lowercase();
-    if [
-        "davinci",
-        "blender",
-        "kdenlive",
-        "android-studio",
-        "unity",
-        "opentoonz",
-    ]
-    .iter()
-    .any(|needle| id.contains(needle))
-    {
-        2 * 1024 * 1024 * 1024
-    } else if [
-        "vscode",
-        "cursor",
-        "godot",
-        "krita",
-        "inkscape",
-        "libreoffice",
-        "audacity",
-        "synfig",
-    ]
-    .iter()
-    .any(|needle| id.contains(needle))
-    {
-        1280 * 1024 * 1024
-    } else {
-        768 * 1024 * 1024
-    }
-}
-
 fn normalized_requested_app_session_id(value: Option<&str>) -> Result<Option<String>, String> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -308,64 +289,18 @@ fn normalized_requested_app_session_id(value: Option<&str>) -> Result<Option<Str
     Ok(Some(value.to_string()))
 }
 
-fn resource_application_cap(workspace: &Workspace) -> usize {
-    let resources = system_resources::snapshot(workspace);
-    let cpu_cap = resources
-        .logical_cpu_count
-        .div_ceil(2)
-        .clamp(1, ABSOLUTE_MAX_APPLICATIONS);
-    let memory_cap = resources
-        .memory_total_bytes
-        .map(|total| {
-            let usable = total.saturating_sub(1536 * 1024 * 1024);
-            usize::try_from(usable / (1280 * 1024 * 1024))
-                .unwrap_or(ABSOLUTE_MAX_APPLICATIONS)
-                .clamp(1, ABSOLUTE_MAX_APPLICATIONS)
-        })
-        .unwrap_or(2);
-    cpu_cap.min(memory_cap).clamp(1, ABSOLUTE_MAX_APPLICATIONS)
-}
-
-fn resource_admission(
-    workspace: &Workspace,
-    application_id: &str,
-    current_count: usize,
-) -> Result<(usize, String), String> {
-    let resources = system_resources::snapshot(workspace);
-    let cap = resource_application_cap(workspace);
+fn resource_admission(current_count: usize) -> Result<(usize, String), String> {
+    let cap = ABSOLUTE_MAX_APPLICATIONS;
     if current_count >= cap {
         return Err(format!(
-            "AI Workspace resource admission refused another application: {current_count} app sessions are already running and the current CPU/RAM-derived limit is {cap}."
+            "AI Workspace application limit reached: {current_count} app sessions are already running and the fixed session limit is {cap}."
         ));
-    }
-
-    let budget = application_memory_budget(application_id);
-    if let Some(available) = resources.memory_available_bytes {
-        let required = budget.saturating_add(MIN_FREE_RAM_RESERVE_BYTES);
-        if available < required {
-            return Err(format!(
-                "AI Workspace resource admission refused another application because only {:.1} GiB RAM is currently available; this application class needs about {:.1} GiB plus a {:.1} GiB safety reserve.",
-                available as f64 / 1024.0 / 1024.0 / 1024.0,
-                budget as f64 / 1024.0 / 1024.0 / 1024.0,
-                MIN_FREE_RAM_RESERVE_BYTES as f64 / 1024.0 / 1024.0 / 1024.0,
-            ));
-        }
-    }
-
-    if let Some(load) = resources.load_average_1m {
-        let logical = resources.logical_cpu_count.max(1) as f64;
-        if load > logical * 2.0 {
-            return Err(format!(
-                "AI Workspace resource admission refused another application because the 1-minute system load ({load:.2}) is already above the safe launch threshold for {} logical CPUs.",
-                resources.logical_cpu_count
-            ));
-        }
     }
 
     Ok((
         cap,
         format!(
-            "Resource admission passed: {} of {cap} allowed app sessions are currently active.",
+            "Application launch allowed: {} of {cap} app sessions are currently active. CPU and RAM usage do not block launches.",
             current_count + 1
         ),
     ))
@@ -2025,6 +1960,9 @@ impl AiWorkspaceState {
     }
 
     pub(crate) fn initialize(&self, app: &AppHandle) -> Result<bool, String> {
+        if !platform_capability().0 {
+            return Ok(false);
+        }
         let _lifecycle = self
             .lifecycle
             .lock()
@@ -2041,6 +1979,29 @@ impl AiWorkspaceState {
         app: &AppHandle,
         workspace_id: &str,
     ) -> Result<AiWorkspaceStatus, String> {
+        let (supported, unsupported_reason) = platform_capability();
+        if !supported {
+            return Ok(AiWorkspaceStatus {
+                session_id: None,
+                workspace_id: workspace_id.to_string(),
+                supported: false,
+                unsupported_reason: unsupported_reason.map(str::to_string),
+                running: false,
+                ready: false,
+                application_id: None,
+                application_name: None,
+                display: None,
+                width: WIDTH,
+                height: HEIGHT,
+                started_at: None,
+                applications: Vec::new(),
+                application_count: 0,
+                max_concurrent_applications: ABSOLUTE_MAX_APPLICATIONS,
+                last_started_app_session_id: None,
+                resource_admission: None,
+                message: unsupported_reason.map(str::to_string),
+            });
+        }
         self.recover_if_needed(app)?;
         let exited_runtime = {
             let mut guard = self
@@ -2071,6 +2032,8 @@ impl AiWorkspaceState {
                 AiWorkspaceStatus {
                     session_id: Some(runtime.session_id.clone()),
                     workspace_id: workspace_id.to_string(),
+                    supported: true,
+                    unsupported_reason: None,
                     running: true,
                     ready: true,
                     application_id: Some(runtime.application_id.clone()),
@@ -2090,6 +2053,8 @@ impl AiWorkspaceState {
             Some(runtime) => AiWorkspaceStatus {
                 session_id: None,
                 workspace_id: workspace_id.to_string(),
+                supported: true,
+                unsupported_reason: None,
                 running: false,
                 ready: false,
                 application_id: None,
@@ -2108,6 +2073,8 @@ impl AiWorkspaceState {
             None => AiWorkspaceStatus {
                 session_id: None,
                 workspace_id: workspace_id.to_string(),
+                supported: true,
+                unsupported_reason: None,
                 running: false,
                 ready: false,
                 application_id: None,
@@ -2162,6 +2129,12 @@ impl AiWorkspaceState {
         target: Option<&str>,
         requested_app_session_id: Option<&str>,
     ) -> Result<AiWorkspaceStatus, String> {
+        let (supported, unsupported_reason) = platform_capability();
+        if !supported {
+            return Err(unsupported_reason
+                .unwrap_or("AI Workspace is not supported on this platform.")
+                .to_string());
+        }
         if !desktop_control::is_enabled(app, &workspace.id)? {
             return Err(
                 "Desktop permission is off for this project. Enable Desktop locally first."
@@ -2216,8 +2189,7 @@ impl AiWorkspaceState {
                 }
 
                 let current_count = runtime_application_count(runtime);
-                let (cap, admission) =
-                    resource_admission(workspace, &application.id, current_count)?;
+                let (cap, admission) = resource_admission(current_count)?;
                 let app_session_id = requested_app_session_id.clone().unwrap_or_else(|| {
                     format!(
                         "{}-app-{}-{}",
@@ -2259,7 +2231,7 @@ impl AiWorkspaceState {
             }
         }
 
-        let (cap, admission) = resource_admission(workspace, &application.id, 0)?;
+        let (cap, admission) = resource_admission(0)?;
         let display_number = choose_display()?;
         let started_at = now_ms();
         let session_id = format!("aiw-{display_number}-{started_at}");
@@ -3211,7 +3183,7 @@ mod tests {
     use super::{
         ai_semantic_backend_id, application_allowed, build_application_command,
         build_gnome_terminal_clean_shell_command, build_gnome_terminal_legacy_command,
-        build_gnome_terminal_private_server_command, display_available,
+        build_gnome_terminal_private_server_command, display_available, platform_capability,
         prepare_ai_semantic_sequence, uses_window_lifecycle, AiWorkspaceSemanticSequenceStep,
         HEIGHT, WIDTH,
     };
@@ -3219,6 +3191,24 @@ mod tests {
         models::LaunchApplication,
         semantic::{self, SemanticNodeDraft, SemanticSnapshotInput, SemanticSurface},
     };
+
+    #[test]
+    fn ai_workspace_platform_capability_matches_build_target() {
+        let (supported, reason) = platform_capability();
+        #[cfg(target_os = "linux")]
+        {
+            assert!(supported);
+            assert_eq!(reason, None);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(!supported);
+            assert_eq!(
+                reason,
+                Some("AI Workspace is currently supported on Linux only.")
+            );
+        }
+    }
 
     fn publish_ai_semantic_test_snapshot(
         workspace_id: &str,

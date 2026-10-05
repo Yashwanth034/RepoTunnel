@@ -45,7 +45,7 @@ Team Mode deliberately uses only two public MCP tools:
 - `team_status` — read the persistent Team state and optionally long-poll with `after_revision` + `wait_seconds`.
 - `team_action` — create/join/message/task/claim/handoff/review/verify/phase/complete current request.
 
-The public MCP surface is **52 tools** total; Team Mode still uses only `team_status` and `team_action`, while the two additional tools are shared normal/Team workspace bootstrap/security capabilities.
+Team Mode intentionally remains a two-tool coordination surface: `team_status` and `team_action`. Do not tie this document to a total RepoTunnel MCP tool count; the broader product surface evolves independently, and clients that cache tool discovery should refresh/re-scan after an MCP schema change.
 
 ## Balanced two-engineer execution
 

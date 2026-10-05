@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RepoTunnel Phone Helper</string>
+    <string name="service_description">Provides local semantic phone control to RepoTunnel while you explicitly allow Phone Access. For payment-sensitive apps, RepoTunnel keeps Accessibility enabled but blocks AI inspection and control until you leave the app. Full Accessibility disable is available only as an explicit compatibility fallback.</string>
+</resources>

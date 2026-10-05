@@ -1,6 +1,8 @@
 # RepoTunnel AI Continuity Guide
 
-Read this file and `STABLE_CHECKPOINT.md` before making substantial changes to RepoTunnel.
+> **Current-state note (2026-10-05):** This file is a chronological engineering/continuity log. Dated sections preserve what was true when that work happened, so older “not implemented,” “next step,” test-count, or “current running binary” statements may be superseded. For present behavior, check the live source/runtime plus `docs/product.md`, `docs/architecture.md`, and `docs/mcp.md` before acting. As of this audit, `wait_process` and durable managed supervision exist; Linux source advertises complete RepoTunnel-process restart reattachment after a persisted-state/detach/adoption regression passed, while Windows/macOS intentionally remain false pending equivalent native identity/control validation; browser selector/semantic click/type mutations and semantic sequences now persist non-replayable mutation receipts and surface helper-transport uncertainty as `ambiguous` instead of replaying a possibly completed action; the core Phone real-device audit passed; and the latest full source regression recorded 43/43 frontend tests and 448 Rust tests passed with 0 failures and 8 intentional ignores.
+
+Read this file and `STABLE_CHECKPOINT.md` before making substantial changes to RepoTunnel. Historical entries are evidence, not an instruction to redo completed work.
 
 ## Current development policy
 

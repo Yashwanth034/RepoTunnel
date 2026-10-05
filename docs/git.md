@@ -34,6 +34,12 @@ RepoTunnel does not expose `git reset`, `git clean`, or unrestricted `git restor
 
 Restore-to-HEAD is offered only for unstaged, non-conflicted tracked files in the desktop UI. Staged changes are never silently discarded.
 
+## GitHub authentication
+
+When the user connects GitHub inside RepoTunnel, approved GitHub/Git workflows can use the trusted RepoTunnel GitHub broker without exposing the credential to the AI shell or tool output. A sandboxed command failing to see a token is therefore not evidence that GitHub is disconnected; RepoTunnel's GitHub connection status is authoritative.
+
+Authentication changes, credential export, and other account-security actions remain user-controlled.
+
 ## Push flow
 
 AI Auto is not standing permission to publish repository history. A normal push is accepted only when the current human instruction explicitly asks the AI to push. RepoTunnel performs a committed-tree secret preflight, blocks force/delete/mirror/all/tags-style broad pushes and arbitrary remote URLs, and disables local Git hooks for the controlled push. Once that explicit intent exists, AI Auto does not add another approval popup. AI Review retains its normal local command approval boundary.

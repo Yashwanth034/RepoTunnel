@@ -24,6 +24,7 @@ pub(crate) enum SemanticSurface {
     AiWorkspace,
     WindowsUia,
     MacosAx,
+    Phone,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

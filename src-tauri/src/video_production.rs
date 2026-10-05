@@ -71,7 +71,7 @@ pub(crate) struct VideoProductionAsset {
     pub(crate) label: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VideoSceneSource {
     pub(crate) claim: String,
@@ -864,6 +864,7 @@ fn load_scene_file(path: &Path) -> Result<VideoProductionScene, String> {
         .map_err(|error| format!("Video Project scene JSON is invalid: {error}"))
 }
 
+#[allow(clippy::unnecessary_map_or)]
 pub(crate) fn upsert_scene(
     workspace: &Workspace,
     project_id: &str,
@@ -886,6 +887,16 @@ pub(crate) fn upsert_scene(
     } else {
         None
     };
+    let visual_changed = existing.as_ref().map_or(true, |value| {
+        value.order != input.order
+            || value.purpose != input.purpose
+            || value.teaching_point != input.teaching_point
+            || value.duration_seconds != input.duration_seconds
+            || value.sources != input.sources
+    });
+    let narration_changed = existing.as_ref().map_or(true, |value| {
+        value.narration != input.narration || value.captions_enabled != input.captions_enabled
+    });
     let now = now_millis()?;
     let scene = VideoProductionScene {
         id: input.id,
@@ -896,22 +907,42 @@ pub(crate) fn upsert_scene(
         captions_enabled: input.captions_enabled,
         duration_seconds: input.duration_seconds,
         sources: input.sources,
-        animation_source: existing
-            .as_ref()
-            .and_then(|value| value.animation_source.clone()),
-        rendered_clip: existing
-            .as_ref()
-            .and_then(|value| value.rendered_clip.clone()),
-        narration_audio: existing
-            .as_ref()
-            .and_then(|value| value.narration_audio.clone()),
-        subtitle_path: existing
-            .as_ref()
-            .and_then(|value| value.subtitle_path.clone()),
-        qa_status: existing
-            .as_ref()
-            .map(|value| value.qa_status.clone())
-            .unwrap_or_else(default_scene_qa_status),
+        animation_source: (!visual_changed)
+            .then(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.animation_source.clone())
+            })
+            .flatten(),
+        rendered_clip: (!visual_changed)
+            .then(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.rendered_clip.clone())
+            })
+            .flatten(),
+        narration_audio: (!narration_changed)
+            .then(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.narration_audio.clone())
+            })
+            .flatten(),
+        subtitle_path: (!narration_changed)
+            .then(|| {
+                existing
+                    .as_ref()
+                    .and_then(|value| value.subtitle_path.clone())
+            })
+            .flatten(),
+        qa_status: if visual_changed || narration_changed {
+            default_scene_qa_status()
+        } else {
+            existing
+                .as_ref()
+                .map(|value| value.qa_status.clone())
+                .unwrap_or_else(default_scene_qa_status)
+        },
         updated_at: now,
     };
     let bytes = serde_json::to_vec_pretty(&scene)
@@ -920,6 +951,13 @@ pub(crate) fn upsert_scene(
 
     let root = project_root(workspace, &project, AccessOperation::Write)?;
     let mut refreshed = project;
+    if visual_changed || narration_changed {
+        invalidate_tutorial_review_state(
+            &mut refreshed,
+            &["preview", "design_qa", "frame_review", "ffprobe_verify"],
+            narration_changed,
+        );
+    }
     refreshed.updated_at = now;
     save_manifest(&root, &refreshed)?;
     Ok(scene)
@@ -970,6 +1008,25 @@ pub(crate) fn list_scenes(
     Ok(scenes)
 }
 
+fn invalidate_after_scene_change(
+    workspace: &Workspace,
+    project_id: &str,
+    clear_subtitle: bool,
+) -> Result<(), String> {
+    let mut project = get_project(workspace, project_id)?;
+    if project.production_mode == "story" {
+        return Ok(());
+    }
+    let root = project_root(workspace, &project, AccessOperation::Write)?;
+    invalidate_tutorial_review_state(
+        &mut project,
+        &["preview", "design_qa", "frame_review", "ffprobe_verify"],
+        clear_subtitle,
+    );
+    project.updated_at = now_millis()?;
+    save_manifest(&root, &project)
+}
+
 fn mutate_scene(
     workspace: &Workspace,
     project_id: &str,
@@ -998,12 +1055,16 @@ pub(crate) fn record_scene_render(
     animation_source: &str,
     rendered_clip: &str,
 ) -> Result<Option<VideoProductionScene>, String> {
-    mutate_scene(workspace, project_id, scene_id, |scene| {
+    let updated = mutate_scene(workspace, project_id, scene_id, |scene| {
         scene.duration_seconds = Some(duration_seconds);
         scene.animation_source = Some(animation_source.to_string());
         scene.rendered_clip = Some(rendered_clip.to_string());
         scene.qa_status = "layout-pass".to_string();
-    })
+    })?;
+    if updated.is_some() {
+        invalidate_after_scene_change(workspace, project_id, false)?;
+    }
+    Ok(updated)
 }
 
 pub(crate) fn record_scene_narration(
@@ -1015,12 +1076,16 @@ pub(crate) fn record_scene_narration(
     narration_audio: &str,
     subtitle_path: &str,
 ) -> Result<Option<VideoProductionScene>, String> {
-    mutate_scene(workspace, project_id, scene_id, |scene| {
+    let updated = mutate_scene(workspace, project_id, scene_id, |scene| {
         scene.narration = narration.to_string();
         scene.duration_seconds = Some(duration_seconds);
         scene.narration_audio = Some(narration_audio.to_string());
         scene.subtitle_path = Some(subtitle_path.to_string());
-    })
+    })?;
+    if updated.is_some() {
+        invalidate_after_scene_change(workspace, project_id, true)?;
+    }
+    Ok(updated)
 }
 
 fn project_file_kind(path: &Path) -> &'static str {
@@ -1472,11 +1537,36 @@ fn document_location(document: &str) -> Result<(&'static str, &'static str), Str
     }
 }
 
-pub(crate) fn write_document(
+fn invalidate_tutorial_review_state(
+    project: &mut VideoProductionProject,
+    stages: &[&str],
+    clear_subtitle: bool,
+) {
+    if project.production_mode == "story" {
+        return;
+    }
+    project
+        .checkpoints
+        .retain(|checkpoint| !stages.contains(&checkpoint.stage.as_str()));
+    project.current_preview = None;
+    project.latest_draft = None;
+    project.final_export = None;
+    if clear_subtitle {
+        project.current_subtitle = None;
+    }
+    if project.status == "review" || project.status == "completed" {
+        project.status = "editing".to_string();
+    }
+    project.attention_required = false;
+    project.last_error = None;
+}
+
+fn write_document_inner(
     workspace: &Workspace,
     project_id: &str,
     document: &str,
     content: &str,
+    invalidate_workflow: bool,
 ) -> Result<VideoProductionDocument, String> {
     if content.len() > 8 * 1024 * 1024 {
         return Err("Video Project document exceeds the 8 MiB safety limit.".to_string());
@@ -1494,6 +1584,40 @@ pub(crate) fn write_document(
         "storyboard" => project.storyboard_path = Some(project_relative.clone()),
         "timeline" => project.timeline_path = Some(project_relative.clone()),
         _ => {}
+    }
+    if invalidate_workflow {
+        match field {
+            "script" => invalidate_tutorial_review_state(
+                &mut project,
+                &[
+                    "template_theme",
+                    "assets_voice",
+                    "preview",
+                    "design_qa",
+                    "frame_review",
+                    "ffprobe_verify",
+                ],
+                true,
+            ),
+            "storyboard" => invalidate_tutorial_review_state(
+                &mut project,
+                &[
+                    "template_theme",
+                    "assets_voice",
+                    "preview",
+                    "design_qa",
+                    "frame_review",
+                    "ffprobe_verify",
+                ],
+                false,
+            ),
+            "timeline" => invalidate_tutorial_review_state(
+                &mut project,
+                &["preview", "design_qa", "frame_review", "ffprobe_verify"],
+                false,
+            ),
+            _ => {}
+        }
     }
     project.updated_at = now;
     if !project
@@ -1517,6 +1641,23 @@ pub(crate) fn write_document(
         content: content.to_string(),
         updated_at: now,
     })
+}
+
+pub(crate) fn write_document(
+    workspace: &Workspace,
+    project_id: &str,
+    document: &str,
+    content: &str,
+) -> Result<VideoProductionDocument, String> {
+    write_document_inner(workspace, project_id, document, content, true)
+}
+
+pub(crate) fn write_rendered_timeline(
+    workspace: &Workspace,
+    project_id: &str,
+    content: &str,
+) -> Result<VideoProductionDocument, String> {
+    write_document_inner(workspace, project_id, "timeline", content, false)
 }
 
 pub(crate) fn read_document(
@@ -1605,6 +1746,159 @@ pub(crate) fn prune_asset_records(
     project.updated_at = now_millis()?;
     save_manifest(&root, &project)?;
     Ok(project)
+}
+
+pub(crate) fn record_workflow_checkpoint(
+    workspace: &Workspace,
+    project_id: &str,
+    stage: &str,
+    passed: bool,
+    detail: &str,
+) -> Result<VideoProductionProject, String> {
+    let allowed = [
+        "spec_check",
+        "template_theme",
+        "assets_voice",
+        "preview",
+        "design_qa",
+        "frame_review",
+        "ffprobe_verify",
+    ];
+    if !allowed.contains(&stage) {
+        return Err("Unsupported Video Production workflow checkpoint.".to_string());
+    }
+    let mut project = get_project(workspace, project_id)?;
+    if passed {
+        if stage == "spec_check" {
+            let detail_lower = detail.to_ascii_lowercase();
+            for required in ["cpu", "ram", "gpu", "disk", "method", "why"] {
+                if !detail_lower.contains(required) {
+                    return Err(format!(
+                        "A passing spec_check must include observed CPU, RAM, GPU, disk, selected method, and why it fits the machine; missing '{required}'."
+                    ));
+                }
+            }
+        }
+        let predecessor = match stage {
+            "spec_check" => None,
+            "template_theme" => Some("spec_check"),
+            "assets_voice" => Some("template_theme"),
+            "preview" => Some("assets_voice"),
+            "design_qa" => Some("preview"),
+            "frame_review" => Some("design_qa"),
+            "ffprobe_verify" => Some("frame_review"),
+            _ => None,
+        };
+        if stage == "template_theme"
+            && (project.script_path.is_none() || project.storyboard_path.is_none())
+        {
+            return Err(
+                "Template/theme selection requires the Video script and storyboard first."
+                    .to_string(),
+            );
+        }
+        if stage == "ffprobe_verify" && project.final_export.is_none() {
+            return Err(
+                "FFprobe verification cannot pass before a final Video export exists.".to_string(),
+            );
+        }
+        if let Some(required) = predecessor {
+            if !latest_checkpoint_passed(&project, required) {
+                return Err(format!(
+                    "Video workflow stage '{stage}' cannot pass before '{required}' passes."
+                ));
+            }
+        }
+    }
+
+    let descendants: &[&str] = match stage {
+        "spec_check" => &[
+            "template_theme",
+            "assets_voice",
+            "preview",
+            "design_qa",
+            "frame_review",
+            "ffprobe_verify",
+        ],
+        "template_theme" => &[
+            "assets_voice",
+            "preview",
+            "design_qa",
+            "frame_review",
+            "ffprobe_verify",
+        ],
+        "assets_voice" => &["preview", "design_qa", "frame_review", "ffprobe_verify"],
+        "preview" => &["design_qa", "frame_review", "ffprobe_verify"],
+        "design_qa" => &["frame_review", "ffprobe_verify"],
+        "frame_review" => &["ffprobe_verify"],
+        _ => &[],
+    };
+    if !descendants.is_empty() {
+        project
+            .checkpoints
+            .retain(|checkpoint| !descendants.contains(&checkpoint.stage.as_str()));
+        project.final_export = None;
+        if matches!(stage, "spec_check" | "template_theme" | "assets_voice") {
+            project.current_preview = None;
+            project.latest_draft = None;
+        }
+    }
+
+    let root = project_root(workspace, &project, AccessOperation::Write)?;
+    let now = now_millis()?;
+    project.updated_at = now;
+    project.attention_required = !passed;
+    if passed {
+        project.last_error = None;
+    }
+    project.checkpoints.push(VideoProductionCheckpoint {
+        stage: stage.to_string(),
+        status: if passed { "completed" } else { "failed" }.to_string(),
+        updated_at: now,
+        detail: Some(detail.to_string()),
+    });
+    save_manifest(&root, &project)?;
+    Ok(project)
+}
+
+pub(crate) fn latest_checkpoint_passed(project: &VideoProductionProject, stage: &str) -> bool {
+    project
+        .checkpoints
+        .iter()
+        .rev()
+        .find(|checkpoint| checkpoint.stage == stage)
+        .is_some_and(|checkpoint| checkpoint.status == "completed")
+}
+
+pub(crate) fn record_ai_workflow_checkpoint(
+    workspace: &Workspace,
+    project_id: &str,
+    stage: &str,
+    passed: bool,
+    detail: &str,
+) -> Result<VideoProductionProject, String> {
+    if !matches!(
+        stage,
+        "spec_check" | "template_theme" | "assets_voice" | "frame_review"
+    ) {
+        return Err(
+            "This Video workflow stage is system-recorded by rendering/QA and cannot be manually marked by the AI."
+                .to_string(),
+        );
+    }
+    if stage == "frame_review" && passed {
+        let lower = detail.to_ascii_lowercase();
+        let mentions_frames = lower.contains("frame");
+        let mentions_count = lower.contains('4') || lower.contains('5');
+        let professional = lower.contains("professional");
+        if !(mentions_frames && mentions_count && professional) {
+            return Err(
+                "A passing frame_review must state that 4 or 5 sampled preview frames were actually inspected and judged professional."
+                    .to_string(),
+            );
+        }
+    }
+    record_workflow_checkpoint(workspace, project_id, stage, passed, detail)
 }
 
 pub(crate) fn record_qa_result(

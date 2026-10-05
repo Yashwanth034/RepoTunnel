@@ -58,6 +58,9 @@ pub(crate) struct VideoRenderRequest {
     pub(crate) audio_mix_preset: String,
     #[serde(default)]
     pub(crate) preserve_source_audio: bool,
+    /// Low-cost tutorial design preview: scale to 480px high and 15 FPS.
+    #[serde(default)]
+    pub(crate) design_preview: bool,
     #[serde(default)]
     pub(crate) final_render: bool,
 }
@@ -73,6 +76,8 @@ pub(crate) struct VideoRenderResult {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) fps: u32,
+    #[serde(default)]
+    pub(crate) design_preview: bool,
     pub(crate) final_render: bool,
 }
 
@@ -188,6 +193,9 @@ fn validate_request(request: &VideoRenderRequest) -> Result<(), String> {
     }
     if request.clips.is_empty() {
         return Err("Video timeline must contain at least one clip.".to_string());
+    }
+    if request.design_preview && request.final_render {
+        return Err("A design preview cannot also be a final render.".to_string());
     }
     if request.clips.len() > MAX_TIMELINE_CLIPS {
         return Err(format!(
@@ -321,6 +329,26 @@ struct ClipNormalizeOptions {
     height: u32,
     fps: u32,
     preserve_source_audio: bool,
+}
+
+#[allow(clippy::manual_is_multiple_of)]
+fn render_dimensions(
+    project: &video_production::VideoProductionProject,
+    request: &VideoRenderRequest,
+) -> (u32, u32, u32) {
+    if !request.design_preview {
+        return (project.width, project.height, project.fps.clamp(12, 60));
+    }
+    let height = 480_u32;
+    let denominator = u64::from(project.height.max(1));
+    let scaled =
+        ((u64::from(project.width) * u64::from(height) + denominator / 2) / denominator) as u32;
+    let width = if scaled.max(2) % 2 == 0 {
+        scaled.max(2)
+    } else {
+        scaled.max(2).saturating_add(1)
+    };
+    (width, height, 15)
 }
 
 fn normalize_clip(
@@ -538,6 +566,7 @@ fn finalize_subtitle_delivery(
     source: &Path,
     subtitle: Option<&Path>,
     delivery: &str,
+    output_height: u32,
     output: &Path,
     cancel: Option<&AtomicBool>,
 ) -> Result<(), String> {
@@ -569,7 +598,12 @@ fn finalize_subtitle_delivery(
             ]);
         }
         "burned" | "burned+sidecar" => {
-            let filter = format!("subtitles='{}'", subtitle_filter_path(subtitle));
+            let font_size = ((44.0 * f64::from(output_height) / 1080.0).round() as u32).max(20);
+            let margin_v = ((84.0 * f64::from(output_height) / 1080.0).round() as u32).max(36);
+            let filter = format!(
+                "subtitles='{}':force_style='FontName=DejaVu Sans,FontSize={font_size},Alignment=2,MarginV={margin_v},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H99000000,BorderStyle=3,Outline=2,Shadow=0'",
+                subtitle_filter_path(subtitle)
+            );
             command.args(["-map", "0:v:0", "-map", "0:a:0?"]);
             command
                 .args([
@@ -640,6 +674,7 @@ where
         format!("Could not create temporary Video Project render directory: {error}")
     })?;
 
+    let (target_width, target_height, target_fps) = render_dimensions(project, request);
     let clip_count = request.clips.len().max(1);
     for (index, clip) in request.clips.iter().enumerate() {
         let source = project_owned_path(workspace, project, &clip.source_path)?;
@@ -651,9 +686,9 @@ where
             &render_dir.join(format!("clip-{index:04}.mp4")),
             clip,
             ClipNormalizeOptions {
-                width: project.width,
-                height: project.height,
-                fps: project.fps.clamp(12, 60),
+                width: target_width,
+                height: target_height,
+                fps: target_fps,
                 preserve_source_audio: request.preserve_source_audio,
             },
             cancel,
@@ -700,6 +735,7 @@ where
         &muxed,
         subtitle.as_deref(),
         &request.caption_delivery,
+        target_height,
         output,
         cancel,
     )?;
@@ -729,6 +765,42 @@ where
 {
     validate_request(&request)?;
     let project = video_production::get_project(workspace, project_id)?;
+    if project.production_mode != "story" && (request.design_preview || request.final_render) {
+        if project.script_path.is_none() || project.storyboard_path.is_none() {
+            return Err(
+                "Tutorial preview/final rendering is blocked until both script and storyboard are saved."
+                    .to_string(),
+            );
+        }
+        let required: &[&str] = if request.final_render {
+            &[
+                "spec_check",
+                "template_theme",
+                "assets_voice",
+                "preview",
+                "design_qa",
+                "frame_review",
+            ]
+        } else {
+            &["spec_check", "template_theme", "assets_voice"]
+        };
+        let missing = required
+            .iter()
+            .copied()
+            .filter(|stage| !video_production::latest_checkpoint_passed(&project, stage))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{} tutorial render is blocked until these workflow gates pass: {}.",
+                if request.final_render {
+                    "Final"
+                } else {
+                    "Design preview"
+                },
+                missing.join(", ")
+            ));
+        }
+    }
     let subtitle_path = request
         .subtitle_path
         .as_deref()
@@ -749,6 +821,8 @@ where
     };
     let filename = if request.final_render {
         format!("final-{stamp}.mp4")
+    } else if request.design_preview {
+        format!("design-preview-{stamp}.mp4")
     } else {
         format!("draft-{stamp}.mp4")
     };
@@ -812,6 +886,8 @@ where
         output_asset,
         Some(if request.final_render {
             "Final Video Project render"
+        } else if request.design_preview {
+            "480p/15fps Video Project design preview"
         } else {
             "Video Project draft render"
         }),
@@ -831,12 +907,26 @@ where
         workspace,
         project_id,
         Some(output_asset),
-        (!request.final_render).then_some(output_asset),
+        (!request.final_render && !request.design_preview).then_some(output_asset),
         request.final_render.then_some(output_asset),
         preview_subtitle,
     )?;
 
-    if !request.final_render {
+    if request.design_preview {
+        video_production::record_workflow_checkpoint(
+            workspace,
+            project_id,
+            "preview",
+            true,
+            "Low-resolution 480p/15fps design preview rendered successfully.",
+        )?;
+        video_production::update_project_status(
+            workspace,
+            project_id,
+            "review",
+            Some("Design preview completed; run design QA and inspect sampled frames before final rendering."),
+        )?;
+    } else if !request.final_render {
         video_production::update_project_status(
             workspace,
             project_id,
@@ -847,18 +937,20 @@ where
 
     let timeline_json = serde_json::to_string_pretty(&request)
         .map_err(|error| format!("Could not serialize rendered timeline: {error}"))?;
-    video_production::write_document(workspace, project_id, "timeline", &timeline_json)?;
+    video_production::write_rendered_timeline(workspace, project_id, &timeline_json)?;
 
     on_progress(100, "ready");
+    let (render_width, render_height, render_fps) = render_dimensions(&project, &request);
     Ok(VideoRenderResult {
         project_id: project.id,
         output_path: output_relative,
         subtitle_path,
         caption_delivery: request.caption_delivery.clone(),
         clip_count: request.clips.len(),
-        width: project.width,
-        height: project.height,
-        fps: project.fps.clamp(12, 60),
+        width: render_width,
+        height: render_height,
+        fps: render_fps,
+        design_preview: request.design_preview,
         final_render: request.final_render,
     })
 }
@@ -2020,6 +2112,7 @@ mod tests {
             music_volume: Some(0.15),
             audio_mix_preset: "simple".to_string(),
             preserve_source_audio: false,
+            design_preview: false,
             final_render: false,
         }
     }
@@ -2516,6 +2609,7 @@ mod tests {
             music_volume: Some(0.15),
             audio_mix_preset: "voice-priority".to_string(),
             preserve_source_audio: false,
+            design_preview: false,
             final_render: false,
         };
         let output = project_root.join("renders/drafts/smoke.mp4");
@@ -2674,6 +2768,7 @@ mod tests {
             music_volume: None,
             audio_mix_preset: "simple".to_string(),
             preserve_source_audio: false,
+            design_preview: false,
             final_render: true,
         };
         let timeline_json = serde_json::to_string_pretty(&request).unwrap();

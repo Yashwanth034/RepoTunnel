@@ -56,6 +56,12 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   const refreshStatus = useCallback(async () => {
     try {
       const next = await getAiWorkspaceStatus(workspace.id);
+      if (typeof next.supported !== "boolean") {
+        setBackendAvailable(false);
+        setStatus(null);
+        setFrame(null);
+        return null;
+      }
       setBackendAvailable(true);
       setStatus(next);
       setSelectedAppSessionId((current) => {
@@ -107,13 +113,12 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   }, [selectedAppSessionId, workspace.id]);
 
   useEffect(() => {
+    if (!backendAvailable) return;
+    void refreshStatus();
     if (!desktopEnabled) {
-      setStatus(null);
       setFrame(null);
       return;
     }
-    if (!backendAvailable) return;
-    void refreshStatus();
     const timer = window.setInterval(() => void refreshStatus(), 2500);
     return () => window.clearInterval(timer);
   }, [backendAvailable, desktopEnabled, refreshStatus]);
@@ -136,7 +141,7 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
   }, [expanded]);
 
   async function start() {
-    if (!applicationId || busy) return;
+    if (!applicationId || busy || status?.supported !== true) return;
     setBusy(true);
     try {
       const next = await startAiWorkspace(workspace.id, applicationId, target);
@@ -183,6 +188,18 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  if (status?.supported === false) {
+    return (
+      <section className="ai-workspace-panel disabled">
+        <div className="ai-workspace-heading">
+          <div><strong>AI Workspace</strong><span>Isolated app screen</span></div>
+          <small>Unavailable on this platform</small>
+        </div>
+        <p>{status.unsupportedReason ?? "AI Workspace is not supported on this platform."}</p>
+      </section>
+    );
   }
 
   if (!desktopEnabled) {
@@ -251,13 +268,13 @@ function AIWorkspacePanel({ workspace, applications, desktopEnabled, onError }: 
             onChange={(event) => setTarget(event.target.value)}
             placeholder="Project file or folder (optional)"
           />
-          <button className="primary-button" type="button" disabled={!applicationId || busy} onClick={() => void start()}>
+          <button className="primary-button" type="button" disabled={!status || !applicationId || busy} onClick={() => void start()}>
             {busy ? "Starting…" : status?.running ? "Open application" : "Start AI Workspace"}
           </button>
         </div>
       ) : status?.running ? (
         <p>
-          AI Workspace is at its current CPU/RAM-derived application limit
+          AI Workspace is at its fixed application-session limit
           ({status.applicationCount}/{status.maxConcurrentApplications}).
         </p>
       ) : null}

@@ -9,8 +9,8 @@ use serde::Serialize;
 use tauri::AppHandle;
 
 use crate::{
-    access::AccessOperation, models::Workspace, video, video_director, video_production,
-    video_render,
+    access::AccessOperation, models::Workspace, video, video_director, video_narration,
+    video_production, video_render,
 };
 
 #[derive(Clone, Debug, Serialize)]
@@ -147,6 +147,52 @@ fn parse_loudnorm_summary(output: &str) -> Option<(f64, f64, f64)> {
     ))
 }
 
+fn strip_inline_vtt_timestamps(line: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for ch in line.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn subtitle_display_chunks(path: &Path) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read subtitle track for caption QA: {error}"))?;
+    let mut chunks = Vec::new();
+    let mut in_style = false;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.eq_ignore_ascii_case("STYLE") {
+            in_style = true;
+            continue;
+        }
+        if in_style {
+            if line.is_empty() {
+                in_style = false;
+            }
+            continue;
+        }
+        if line.is_empty()
+            || line.eq_ignore_ascii_case("WEBVTT")
+            || line.contains("-->")
+            || line.chars().all(|ch| ch.is_ascii_digit())
+        {
+            continue;
+        }
+        let display = strip_inline_vtt_timestamps(line).trim().to_string();
+        if !display.is_empty() {
+            chunks.push(display);
+        }
+    }
+    Ok(chunks)
+}
+
 fn add_advanced_media_checks(
     checks: &mut Vec<VideoQaCheck>,
     ffmpeg: Option<&Path>,
@@ -167,7 +213,7 @@ fn add_advanced_media_checks(
         path,
         "-an",
         "-vf",
-        "blackdetect=d=0.5:pic_th=0.98,freezedetect=n=-60dB:d=2",
+        "blackdetect=d=0.5:pic_th=0.98,freezedetect=n=-60dB:d=1.5",
     ) {
         Ok(output) => {
             let black_segments = output.matches("black_start:").count();
@@ -188,14 +234,14 @@ fn add_advanced_media_checks(
                 check(
                     "staticFrames",
                     "pass",
-                    "No sustained frozen/static segment was detected.",
+                    "No static stretch longer than 1.5 seconds was detected.",
                 )
             } else {
                 check(
                     "staticFrames",
-                    "warn",
+                    "fail",
                     format!(
-                        "Detected {frozen_segments} sustained static segment(s); verify intentional still scenes."
+                        "Detected {frozen_segments} static stretch(es) longer than 1.5 seconds; motion rules require a visual change before that threshold."
                     ),
                 )
             });
@@ -298,6 +344,38 @@ fn render_metadata_for_asset(
         .find(|result| result.output_path == asset_path)
 }
 
+#[allow(dead_code)]
+fn srt_caption_texts(path: &Path) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read subtitle file for caption QA: {error}"))?;
+    let normalized = text.replace("\r\n", "\n");
+    let mut cues = Vec::new();
+    for block in normalized.split("\n\n") {
+        let lines = block
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if lines.is_empty() {
+            continue;
+        }
+        let timing = lines.iter().position(|line| line.contains("-->"));
+        let Some(timing_index) = timing else {
+            continue;
+        };
+        let spoken = lines
+            .iter()
+            .skip(timing_index + 1)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !spoken.trim().is_empty() {
+            cues.push(spoken);
+        }
+    }
+    Ok(cues)
+}
+
 pub(crate) fn qa_project(
     app: &AppHandle,
     workspace: &Workspace,
@@ -346,6 +424,19 @@ fn qa_project_with_tools(
     }
 
     let final_asset = project.final_export.as_deref() == Some(selected.as_str());
+    let render_metadata = render_metadata_for_asset(workspace, project_id, &selected);
+    let expected_width = render_metadata
+        .as_ref()
+        .map(|result| result.width)
+        .unwrap_or(project.width);
+    let expected_height = render_metadata
+        .as_ref()
+        .map(|result| result.height)
+        .unwrap_or(project.height);
+    let expected_fps = render_metadata
+        .as_ref()
+        .map(|result| result.fps)
+        .unwrap_or(project.fps);
     let mut checks = vec![check(
         "projectOwnership",
         "pass",
@@ -409,13 +500,13 @@ fn qa_project_with_tools(
                 .get("height")
                 .and_then(|value| value.as_u64())
                 .unwrap_or(0);
-            if width == u64::from(project.width) && height == u64::from(project.height) {
+            if width == u64::from(expected_width) && height == u64::from(expected_height) {
                 checks.push(check(
                     "resolution",
                     "pass",
                     format!(
-                        "Resolution is {}x{} as configured.",
-                        project.width, project.height
+                        "Resolution is {}x{} as configured for this render.",
+                        expected_width, expected_height
                     ),
                 ));
             } else {
@@ -424,7 +515,7 @@ fn qa_project_with_tools(
                     "fail",
                     format!(
                         "Expected {}x{}, found {}x{}.",
-                        project.width, project.height, width, height
+                        expected_width, expected_height, width, height
                     ),
                 ));
             }
@@ -440,7 +531,7 @@ fn qa_project_with_tools(
                     }),
             );
             match fps {
-                Some(fps) if (fps - f64::from(project.fps)).abs() <= 0.5 => checks.push(check(
+                Some(fps) if (fps - f64::from(expected_fps)).abs() <= 0.5 => checks.push(check(
                     "frameRate",
                     "pass",
                     format!("Frame rate is {fps:.2} FPS."),
@@ -448,7 +539,7 @@ fn qa_project_with_tools(
                 Some(fps) => checks.push(check(
                     "frameRate",
                     "fail",
-                    format!("Expected about {} FPS, found {fps:.2} FPS.", project.fps),
+                    format!("Expected about {} FPS, found {fps:.2} FPS.", expected_fps),
                 )),
                 None => checks.push(check(
                     "frameRate",
@@ -512,6 +603,40 @@ fn qa_project_with_tools(
             .as_ref()
             .is_some_and(|result| result.subtitle_path.is_some());
         let has_sidecar = project.current_subtitle.is_some();
+
+        if let Some(subtitle_relative) = render_metadata
+            .as_ref()
+            .and_then(|result| result.subtitle_path.as_deref())
+        {
+            match video_production::resolve_project_path(
+                workspace,
+                &project,
+                subtitle_relative,
+                AccessOperation::Read,
+                true,
+            )
+            .and_then(|subtitle_path| subtitle_display_chunks(&subtitle_path))
+            {
+                Ok(chunks) if chunks.is_empty() => checks.push(check(
+                    "captionPhrasing",
+                    "fail",
+                    "Subtitle input exists but no readable caption cues were found.",
+                )),
+                Ok(chunks) if video_narration::caption_chunks_are_phrase_safe(&chunks) => {
+                    checks.push(check(
+                        "captionPhrasing",
+                        "pass",
+                        "Caption cues respect bounded phrase/clause-safe line breaks.",
+                    ))
+                }
+                Ok(_) => checks.push(check(
+                    "captionPhrasing",
+                    "fail",
+                    "One or more caption cues are too long or end on a dangling article/preposition/conjunction; regenerate phrase-safe captions before final export.",
+                )),
+                Err(error) => checks.push(check("captionPhrasing", "fail", error)),
+            }
+        }
 
         if !subtitles.is_empty() && has_sidecar {
             checks.push(check(
@@ -585,7 +710,36 @@ fn qa_project_with_tools(
             "pass",
             "QA target is the currently registered final export.",
         ));
-        if project.production_mode == "story" {
+        if project.production_mode != "story" {
+            let required = [
+                "spec_check",
+                "template_theme",
+                "assets_voice",
+                "preview",
+                "design_qa",
+                "frame_review",
+            ];
+            let missing = required
+                .into_iter()
+                .filter(|stage| !video_production::latest_checkpoint_passed(&project, stage))
+                .collect::<Vec<_>>();
+            if missing.is_empty() {
+                checks.push(check(
+                    "designWorkflow",
+                    "pass",
+                    "Required tutorial preview, design-QA, and sampled-frame review gates passed before final completion.",
+                ));
+            } else {
+                checks.push(check(
+                    "designWorkflow",
+                    "fail",
+                    format!(
+                        "Final tutorial QA is blocked until these workflow gates pass: {}.",
+                        missing.join(", ")
+                    ),
+                ));
+            }
+        } else {
             match video_director::get_narrative_qa(workspace, project_id) {
                 Ok(report) if report.passed => checks.push(check(
                     "narrativePlan",
@@ -682,6 +836,24 @@ fn qa_project_with_tools(
         }),
     )?;
 
+    if project.production_mode != "story"
+        && render_metadata
+            .as_ref()
+            .is_some_and(|result| result.design_preview)
+    {
+        video_production::record_workflow_checkpoint(
+            workspace,
+            project_id,
+            "design_qa",
+            passed,
+            if passed {
+                "480p/15fps preview passed technical, motion, and caption QA; per-scene HTML renders already passed DOM layout QA."
+            } else {
+                "480p/15fps preview failed one or more design/technical QA checks and must be fixed before final rendering."
+            },
+        )?;
+    }
+
     if final_asset {
         let failures = report
             .checks
@@ -698,6 +870,19 @@ fn qa_project_with_tools(
         } else {
             format!("Final Video Project QA found {failures} failure(s) and {warnings} warning(s).")
         };
+        if project.production_mode != "story" {
+            video_production::record_workflow_checkpoint(
+                workspace,
+                project_id,
+                "ffprobe_verify",
+                passed,
+                if passed {
+                    "Final export passed FFprobe stream/resolution/FPS verification and the complete Video QA gate."
+                } else {
+                    "Final export did not pass the complete FFprobe/Video QA gate."
+                },
+            )?;
+        }
         video_production::record_qa_result(workspace, project_id, passed, &detail)?;
     }
 
@@ -836,6 +1021,42 @@ noise after"#;
             Some(12),
         )
         .unwrap();
+        video_production::write_document(
+            &workspace,
+            &project.id,
+            "script",
+            "A short QA validation script.",
+        )
+        .unwrap();
+        video_production::write_document(
+            &workspace,
+            &project.id,
+            "storyboard",
+            "A simple QA validation storyboard.",
+        )
+        .unwrap();
+        for (stage, detail) in [
+            (
+                "spec_check",
+                "CPU test; RAM test; GPU test; disk test; method code-driven; why deterministic QA.",
+            ),
+            ("template_theme", "Template and theme selected for QA."),
+            ("assets_voice", "Assets and voice are ready for QA."),
+            ("preview", "Preview render passed."),
+            ("design_qa", "Design QA passed."),
+            ("frame_review", "Five representative frames reviewed and professional."),
+        ] {
+            video_production::record_workflow_checkpoint(
+                &workspace,
+                &project.id,
+                stage,
+                true,
+                detail,
+            )
+            .unwrap();
+        }
+
+        let project = video_production::get_project(&workspace, &project.id).unwrap();
         let project_root =
             video_production::project_root(&workspace, &project, AccessOperation::Write).unwrap();
         let final_path = project_root.join("renders/final/test.mp4");

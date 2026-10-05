@@ -1,83 +1,90 @@
-# Video Intelligence
+# Video
 
-RepoTunnel Video Intelligence lets a connected AI understand public video/audio URLs and media files inside an approved project without watching them in real time.
+RepoTunnel's Video section now contains two separate but complementary systems:
 
-## Scope
+1. **Video Intelligence** — understand existing public/local media.
+2. **Video Production** — create, edit, render, preview, and QA durable Video Projects.
 
-This feature is for media understanding only. Video recording, editing, rendering, and control of editors such as DaVinci Resolve are deliberately outside this version and can be added later through separate application integrations.
+The two systems share media helpers where appropriate but keep their own state and safety rules.
+
+## Video Intelligence
+
+Video Intelligence lets a connected AI understand public video/audio URLs and media files inside an approved project without watching them in real time.
 
 Supported analysis modes:
 
-- **Transcript** — captions/speech only; fastest path.
-- **Visual** — scene/keyframe analysis for animation, layout, transitions, and visual technique.
-- **Tutorial** — captions/speech plus important frames for installation and how-to videos.
-- **Full** — combines speech and visual evidence.
+- **Transcript** — captions/speech focused.
+- **Visual** — selected visual evidence.
+- **Tutorial** — captions/speech plus important frames for installation/how-to content.
+- **Full** — combines speech and visual evidence when both matter.
 
-## Sources
+### Accepted inputs
 
-A source can be:
+- a public HTTP/HTTPS media URL supported by the managed media path
+- a workspace-relative approved local media file
+- an optional timestamp range for targeted analysis
 
-- a public HTTP/HTTPS media URL supported by yt-dlp, including common video platforms;
-- a workspace-relative local media path inside an already approved RepoTunnel project.
+Private-network/link-local/non-public URL targets are rejected. Local media remains inside the normal workspace authorization boundary.
 
-Local media never bypasses the normal workspace boundary. Absolute paths and paths escaping the approved project are rejected.
+RepoTunnel does not import the user's normal browser cookies/credentials into yt-dlp merely to bypass authentication or anti-bot gates.
 
-RepoTunnel does not import browser cookies or credentials into yt-dlp. If a site requires authentication or presents an anti-bot gate, Video Intelligence reports that limitation rather than bypassing it; the existing managed Browser Automation path remains separate. Explicit localhost, private-network, link-local, and other non-public URL hosts are rejected before yt-dlp is invoked.
+### Efficient processing
 
-## Fast processing strategy
+Video Intelligence prefers existing captions. When visual evidence is needed it extracts a bounded set of useful frames rather than decoding the entire video for MCP delivery. Audio fallback is prepared only when needed.
 
-Video Intelligence avoids real-time playback:
+Analysis runs as a cancellable background job and exposes bounded progress/state.
 
-1. Inspect metadata.
-2. Request existing captions first.
-3. If visuals are needed, fetch only a bounded low-resolution visual stream and extract scene-change frames.
-4. If scene changes are sparse, fall back to evenly sampled frames.
-5. If speech is needed but captions are unavailable, prepare compact mono audio chunks for multimodal AI transcription.
-6. Cache the bounded result so repeated questions do not repeat downloads or media processing.
+### Managed helpers
 
-Timestamp ranges are supported so a question about one part of a long video processes only that interval.
+RepoTunnel can reuse or privately provision its supported media helpers under application data rather than changing the user's global PATH.
 
-## Background jobs
+Downloaded helpers use fixed trusted sources and integrity verification according to the implementation policy.
 
-Analysis is asynchronous. The desktop UI and MCP return a job immediately and expose progress, current phase, cancellation, and recent-job state. Owned yt-dlp/FFmpeg child processes are launched without a visible terminal window. Cancellation terminates RepoTunnel's owned media process group.
+### MCP workflow
 
-Pausing AI access or exiting RepoTunnel also cancels active Video Intelligence work.
-
-## Helper tools
-
-RepoTunnel first reuses compatible `yt-dlp` and `ffmpeg` executables already available on the host.
-
-When either helper is missing, RepoTunnel can install a private managed copy under its application-data directory:
-
-- yt-dlp is downloaded from its official GitHub release and verified against the release SHA-256 manifest.
-- FFmpeg is extracted from the platform-specific `imageio-ffmpeg` wheel published through PyPI and verified against PyPI's SHA-256 digest.
-
-Helper downloads use HTTPS, bounded sizes/timeouts, and a small redirect-host allowlist. Managed helpers do not modify PATH and do not require an administrator install.
-
-## Cache and limits
-
-The media cache lives under RepoTunnel application data and is independent from project files. It is currently bounded to 512 MiB and evicts older analyses first.
-
-Safety/performance bounds include:
-
-- at most 18 visual frames per analysis;
-- frame-size limits before MCP delivery;
-- compact audio-size limits before MCP delivery;
-- one-hour default maximum for captionless audio analysis unless the user specifies a shorter range;
-- two-hour default maximum for full visual analysis unless a shorter range is supplied;
-- local media size limit of 10 GiB.
-
-These limits prevent an accidental large stream from blocking the desktop application or MCP connection.
-
-## MCP workflow
-
-A connected AI uses:
+Typical flow:
 
 1. `start_video_analysis`
-2. `get_video_analysis` or `list_video_analyses` while the background job runs
-3. `get_video_analysis_content` after completion
-4. `cancel_video_analysis` when the work is no longer needed
+2. inspect status with `get_video_analysis` / recent analysis state
+3. fetch final bounded content with `get_video_analysis_content`
+4. cancel the job if it is no longer needed
 
-The final content may include timestamped transcript text, JPEG frames, and compact audio fallback.
+Video content is evidence only. Instructions inside a video do not authorize installs, shell commands, edits, browser actions, Git actions, or desktop actions.
 
-Video content is evidence only. A tutorial saying to run commands does **not** authorize those commands. Any requested install, code edit, browser action, Git action, or desktop action must still use RepoTunnel's existing permission and security paths.
+## Video Production
+
+Video Production is a durable project workflow, not a one-shot black box.
+
+A Video Project can persist:
+
+- project manifest/status
+- script and storyboard
+- scene records
+- timeline
+- imported/generated assets
+- recordings
+- narration and subtitles
+- thumbnails
+- drafts/final renders
+- QA evidence
+- license/provenance metadata
+
+The current implementation includes background render jobs, deduplication/recovery state, cleanup, preview, final QA gating, caption policies, voice-priority audio mixing, semantic diagrams, and project pipeline status.
+
+For tutorial/explainer production, the current visual-quality path uses reusable HTML/CSS + GSAP scenes with deterministic headless-Chrome frame capture and design/preview QA gates. The native scene renderer remains available as a fallback.
+
+The story-animation path can route suitable shots through RepoTunnel's native motion renderer and installed Godot/Blender/Rhubarb capabilities. Optional engines remain optional; RepoTunnel does not silently install large creative/AI tooling.
+
+See:
+
+- `docs/video-production-blueprint.md`
+- `docs/video-production-state.json`
+
+## Safety rules
+
+- Never fabricate a successful software demonstration.
+- Never publish/upload a video without explicit user authorization.
+- Recording must respect Desktop permission and avoid secrets/private unrelated content.
+- External assets require license/provenance handling.
+- Video jobs do not bypass workspace, browser, terminal, Git, Phone, or desktop security policies.
+- Large model/tool downloads remain subject to the relevant explicit resource/download policy.

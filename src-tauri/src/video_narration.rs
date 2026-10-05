@@ -16,9 +16,10 @@ use crate::{
 
 const MAX_NARRATION_CHARS: usize = 120_000;
 const MAX_SUBTITLE_CUES: usize = 4_000;
-const MAX_CAPTION_WORDS: usize = 8;
-const MIN_CAPTION_WORDS: usize = 4;
-const MAX_CAPTION_CHARS: usize = 42;
+const TARGET_CAPTION_WORDS: usize = 7;
+const MAX_CAPTION_WORDS: usize = 10;
+const MIN_CAPTION_WORDS: usize = 3;
+const MAX_CAPTION_CHARS: usize = 48;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +48,8 @@ pub(crate) struct SubtitleAsset {
     pub(crate) language: String,
     pub(crate) srt_path: String,
     pub(crate) vtt_path: String,
+    /// Alternate WebVTT track with per-word cue timestamps for players that support karaoke-style highlighting.
+    pub(crate) word_highlight_vtt_path: String,
     pub(crate) cue_count: usize,
     pub(crate) duration_seconds: f64,
 }
@@ -207,25 +210,129 @@ fn estimated_duration(text: &str) -> f64 {
     (words / 2.45).clamp(0.7, 60.0 * 60.0)
 }
 
+fn clause_lead(word: &str) -> bool {
+    matches!(
+        word.trim_matches(|ch: char| !ch.is_alphanumeric())
+            .to_ascii_lowercase()
+            .as_str(),
+        "and"
+            | "but"
+            | "or"
+            | "because"
+            | "while"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "although"
+            | "though"
+            | "unless"
+            | "until"
+            | "before"
+            | "after"
+            | "without"
+            | "instead"
+            | "then"
+    )
+}
+
+fn dangling_caption_word(word: &str) -> bool {
+    matches!(
+        word.trim_matches(|ch: char| !ch.is_alphanumeric())
+            .to_ascii_lowercase()
+            .as_str(),
+        "a" | "an"
+            | "the"
+            | "and"
+            | "or"
+            | "but"
+            | "to"
+            | "of"
+            | "for"
+            | "with"
+            | "without"
+            | "from"
+            | "into"
+            | "on"
+            | "in"
+            | "at"
+            | "by"
+            | "because"
+            | "while"
+            | "when"
+            | "which"
+            | "that"
+    )
+}
+
+#[allow(clippy::unnecessary_map_or)]
+fn split_long_caption_phrase(phrase: &str) -> Vec<String> {
+    let words = phrase.split_whitespace().collect::<Vec<_>>();
+    if words.len() <= MAX_CAPTION_WORDS && phrase.chars().count() <= MAX_CAPTION_CHARS {
+        return vec![phrase.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < words.len() {
+        let remaining = words.len() - start;
+        if remaining <= MAX_CAPTION_WORDS {
+            let tail = words[start..].join(" ");
+            if tail.chars().count() <= MAX_CAPTION_CHARS {
+                chunks.push(tail);
+                break;
+            }
+        }
+
+        let max_end = (start + MAX_CAPTION_WORDS).min(words.len());
+        let target_end = (start + TARGET_CAPTION_WORDS).min(max_end);
+        let min_end = (start + MIN_CAPTION_WORDS).min(max_end);
+        let mut best = None::<(usize, usize)>;
+        for end in min_end..=max_end {
+            let previous = words[end - 1];
+            let boundary = previous
+                .chars()
+                .last()
+                .is_some_and(|ch| matches!(ch, ',' | ';' | ':' | '—'))
+                || words.get(end).is_some_and(|word| clause_lead(word));
+            if boundary && !dangling_caption_word(previous) {
+                let distance = end.abs_diff(target_end);
+                if best.map_or(true, |(_, score)| distance < score) {
+                    best = Some((end, distance));
+                }
+            }
+        }
+        let mut end = best.map(|(end, _)| end).unwrap_or(target_end.max(min_end));
+        while end > min_end && dangling_caption_word(words[end - 1]) {
+            end -= 1;
+        }
+        while end > min_end && words[start..end].join(" ").chars().count() > MAX_CAPTION_CHARS {
+            end -= 1;
+        }
+        if end <= start {
+            end = max_end.max(start + 1);
+        }
+        chunks.push(words[start..end].join(" "));
+        start = end;
+    }
+    chunks
+}
+
 fn caption_chunks(text: &str) -> Vec<String> {
     let mut output = Vec::new();
     for sentence in split_sentences(text) {
-        let mut sentence_chunks = Vec::<String>::new();
+        let words = sentence.split_whitespace().collect::<Vec<_>>();
+        if words.is_empty() {
+            continue;
+        }
+
+        let mut phrases = Vec::<String>::new();
         let mut current = Vec::<&str>::new();
-        let mut current_chars = 0usize;
-
-        for word in sentence.split_whitespace() {
-            let word_chars = word.chars().count();
-            let additional = word_chars + usize::from(!current.is_empty());
-            let over_words = current.len() >= MAX_CAPTION_WORDS;
-            let over_chars = !current.is_empty() && current_chars + additional > MAX_CAPTION_CHARS;
-            if over_words || over_chars {
-                sentence_chunks.push(current.join(" "));
+        for word in words {
+            if current.len() >= MIN_CAPTION_WORDS && clause_lead(word) {
+                phrases.push(current.join(" "));
                 current.clear();
-                current_chars = 0;
             }
-
-            current_chars += word_chars + usize::from(!current.is_empty());
             current.push(word);
 
             let punctuation_pause = word
@@ -233,22 +340,47 @@ fn caption_chunks(text: &str) -> Vec<String> {
                 .last()
                 .is_some_and(|ch| matches!(ch, ',' | ';' | ':' | '—'));
             if current.len() >= MIN_CAPTION_WORDS && punctuation_pause {
-                sentence_chunks.push(current.join(" "));
+                phrases.push(current.join(" "));
                 current.clear();
-                current_chars = 0;
             }
         }
-
         if !current.is_empty() {
-            sentence_chunks.push(current.join(" "));
+            phrases.push(current.join(" "));
+        }
+        let phrases = phrases
+            .into_iter()
+            .flat_map(|phrase| split_long_caption_phrase(&phrase))
+            .collect::<Vec<_>>();
+
+        let mut sentence_chunks = Vec::<String>::new();
+        let mut carry = String::new();
+        for phrase in phrases {
+            let phrase_words = phrase.split_whitespace().count();
+            let phrase_chars = phrase.chars().count();
+            if carry.is_empty() {
+                carry = phrase;
+                continue;
+            }
+
+            let combined_words = carry.split_whitespace().count() + phrase_words;
+            let combined_chars = carry.chars().count() + 1 + phrase_chars;
+            if combined_words <= TARGET_CAPTION_WORDS && combined_chars <= MAX_CAPTION_CHARS {
+                carry.push(' ');
+                carry.push_str(&phrase);
+            } else {
+                sentence_chunks.push(carry);
+                carry = phrase;
+            }
+        }
+        if !carry.is_empty() {
+            sentence_chunks.push(carry);
         }
 
         if sentence_chunks.len() >= 2 {
-            let last_words = sentence_chunks
+            let last_is_short = sentence_chunks
                 .last()
-                .map(|value| value.split_whitespace().count())
-                .unwrap_or(0);
-            if last_words < MIN_CAPTION_WORDS {
+                .is_some_and(|value| value.split_whitespace().count() < MIN_CAPTION_WORDS);
+            if last_is_short {
                 let last = sentence_chunks.pop().unwrap_or_default();
                 if let Some(previous) = sentence_chunks.last_mut() {
                     let combined_words =
@@ -264,9 +396,53 @@ fn caption_chunks(text: &str) -> Vec<String> {
             }
         }
 
-        output.extend(sentence_chunks);
+        for index in 0..sentence_chunks.len().saturating_sub(1) {
+            let dangling = sentence_chunks[index]
+                .split_whitespace()
+                .last()
+                .is_some_and(dangling_caption_word);
+            if dangling {
+                if let Some(word) = sentence_chunks[index]
+                    .split_whitespace()
+                    .last()
+                    .map(str::to_string)
+                {
+                    let keep = sentence_chunks[index]
+                        .split_whitespace()
+                        .take(
+                            sentence_chunks[index]
+                                .split_whitespace()
+                                .count()
+                                .saturating_sub(1),
+                        )
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    sentence_chunks[index] = keep;
+                    sentence_chunks[index + 1] = format!("{word} {}", sentence_chunks[index + 1]);
+                }
+            }
+        }
+
+        output.extend(
+            sentence_chunks
+                .into_iter()
+                .filter(|chunk| !chunk.trim().is_empty()),
+        );
     }
     output
+}
+
+pub(crate) fn caption_chunks_are_phrase_safe(chunks: &[String]) -> bool {
+    chunks.iter().enumerate().all(|(index, chunk)| {
+        let word_count = chunk.split_whitespace().count();
+        let length_ok = word_count <= MAX_CAPTION_WORDS || chunks.len() == 1;
+        let clause_ok = index + 1 == chunks.len()
+            || !chunk
+                .split_whitespace()
+                .last()
+                .is_some_and(dangling_caption_word);
+        length_ok && clause_ok && chunk.chars().count() <= MAX_CAPTION_CHARS
+    })
 }
 
 fn cues_from_text(text: &str, duration_seconds: Option<f64>) -> Result<Vec<SubtitleCue>, String> {
@@ -337,13 +513,41 @@ fn subtitle_text_srt(cues: &[SubtitleCue]) -> String {
 }
 
 fn subtitle_text_vtt(cues: &[SubtitleCue]) -> String {
-    let mut output = String::from("WEBVTT\n\n");
+    let mut output = String::from(
+        "WEBVTT\n\nSTYLE\n::cue { color: white; background-color: rgba(0,0,0,0.78); font-size: 44px; }\n\n",
+    );
     for cue in cues {
         output.push_str(&format!(
-            "{} --> {}\n{}\n\n",
+            "{} --> {} line:88% position:50% align:center size:88%\n{}\n\n",
             vtt_time(cue.start_seconds),
             vtt_time(cue.end_seconds),
             cue.text.trim()
+        ));
+    }
+    output
+}
+
+fn subtitle_text_vtt_word_highlight(cues: &[SubtitleCue]) -> String {
+    let mut output = String::from(
+        "WEBVTT\n\nSTYLE\n::cue { color: white; background-color: rgba(0,0,0,0.78); font-size: 44px; }\n::cue(:past) { color: #66e3ff; }\n::cue(:future) { color: white; }\n\n",
+    );
+    for cue in cues {
+        let words = cue.text.split_whitespace().collect::<Vec<_>>();
+        let span = (cue.end_seconds - cue.start_seconds).max(0.05);
+        let mut payload = String::new();
+        for (index, word) in words.iter().enumerate() {
+            if index > 0 {
+                let at = cue.start_seconds + span * (index as f64 / words.len().max(1) as f64);
+                payload.push(' ');
+                payload.push_str(&format!("<{}>", vtt_time(at)));
+            }
+            payload.push_str(word);
+        }
+        output.push_str(&format!(
+            "{} --> {} line:88% position:50% align:center size:88%\n{}\n\n",
+            vtt_time(cue.start_seconds),
+            vtt_time(cue.end_seconds),
+            payload
         ));
     }
     output
@@ -361,6 +565,10 @@ fn write_subtitles(
     let stamp = now_millis();
     let srt_relative = format!("{}/subtitles/{slug}-{stamp}.srt", project.relative_path);
     let vtt_relative = format!("{}/subtitles/{slug}-{stamp}.vtt", project.relative_path);
+    let word_highlight_vtt_relative = format!(
+        "{}/subtitles/{slug}-{stamp}-word-highlight.vtt",
+        project.relative_path
+    );
     let srt = video_production::resolve_project_path(
         workspace,
         &project,
@@ -375,11 +583,20 @@ fn write_subtitles(
         AccessOperation::Write,
         false,
     )?;
+    let word_highlight_vtt = video_production::resolve_project_path(
+        workspace,
+        &project,
+        &word_highlight_vtt_relative,
+        AccessOperation::Write,
+        false,
+    )?;
 
     fs::write(&srt, subtitle_text_srt(cues))
         .map_err(|error| format!("Could not save SRT subtitles: {error}"))?;
     fs::write(&vtt, subtitle_text_vtt(cues))
         .map_err(|error| format!("Could not save VTT subtitles: {error}"))?;
+    fs::write(&word_highlight_vtt, subtitle_text_vtt_word_highlight(cues))
+        .map_err(|error| format!("Could not save word-highlight VTT subtitles: {error}"))?;
 
     let prefix = format!("{}/", project.relative_path);
     let srt_asset = srt_relative
@@ -388,6 +605,9 @@ fn write_subtitles(
     let vtt_asset = vtt_relative
         .strip_prefix(&prefix)
         .ok_or_else(|| "VTT subtitle path escaped its Video Project.".to_string())?;
+    let word_highlight_vtt_asset = word_highlight_vtt_relative
+        .strip_prefix(&prefix)
+        .ok_or_else(|| "Word-highlight VTT path escaped its Video Project.".to_string())?;
     video_production::register_asset(
         workspace,
         project_id,
@@ -402,12 +622,20 @@ fn write_subtitles(
         vtt_asset,
         Some(&format!("{language} VTT subtitles")),
     )?;
+    video_production::register_asset(
+        workspace,
+        project_id,
+        "subtitle-word-highlight",
+        word_highlight_vtt_asset,
+        Some(&format!("{language} word-highlight VTT subtitles")),
+    )?;
 
     Ok(SubtitleAsset {
         project_id: project.id,
         language,
         srt_path: srt_relative,
         vtt_path: vtt_relative,
+        word_highlight_vtt_path: word_highlight_vtt_relative,
         cue_count: cues.len(),
         duration_seconds: cues.last().map(|cue| cue.end_seconds).unwrap_or(0.0),
     })
@@ -879,8 +1107,9 @@ pub(crate) fn synthesize(
 #[cfg(test)]
 mod tests {
     use super::{
-        caption_chunks, cues_from_text, select_provider, srt_time, subtitle_text_srt,
-        subtitle_text_vtt, validate_language, MAX_CAPTION_CHARS, MAX_CAPTION_WORDS,
+        caption_chunks, caption_chunks_are_phrase_safe, cues_from_text, select_provider, srt_time,
+        subtitle_text_srt, subtitle_text_vtt, subtitle_text_vtt_word_highlight, validate_language,
+        MAX_CAPTION_CHARS, MAX_CAPTION_WORDS,
     };
 
     #[test]
@@ -914,6 +1143,18 @@ mod tests {
     }
 
     #[test]
+    fn captions_do_not_leave_article_or_preposition_dangling_at_a_break() {
+        let chunks = caption_chunks(
+            "Branches let you work independently without disturbing the stable codebase.",
+        );
+        assert!(caption_chunks_are_phrase_safe(&chunks));
+        assert!(!chunks
+            .iter()
+            .any(|chunk| chunk.ends_with("without disturbing the")));
+        assert!(!chunks.iter().any(|chunk| chunk == "the stable codebase."));
+    }
+
+    #[test]
     fn managed_narration_download_requires_explicit_opt_in() {
         let blocked =
             select_provider("auto", "en-US", true, true, false, false, false, false).unwrap_err();
@@ -937,6 +1178,10 @@ mod tests {
         assert!(srt.contains("00:00:00,000"));
         assert!(vtt.starts_with("WEBVTT"));
         assert!(vtt.contains("00:00:00.000"));
+        assert!(vtt.contains("line:88% position:50% align:center size:88%"));
+        let highlighted = subtitle_text_vtt_word_highlight(&cues);
+        assert!(highlighted.contains("::cue(:past)"));
+        assert!(highlighted.contains("<00:"));
     }
 
     #[test]

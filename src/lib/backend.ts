@@ -65,6 +65,13 @@ import type {
   ProjectSnapshot,
   PublicTunnelProvider,
   PublicTunnelStatus,
+  PhoneAccessMode,
+  PhoneAccessStatus,
+  PhoneCapability,
+  PhoneDiscoveryStatus,
+  PhoneRuntimeProbe,
+  PhoneRuntimeStatus,
+  PhoneScreenFrame,
   HttpsSetupReadiness,
   HttpsSetupInstallResult,
   HttpsSetupHostnameVerification,
@@ -903,6 +910,113 @@ export async function stopGateway(): Promise<GatewayStatus> {
 
 export async function getPublicTunnelStatus(): Promise<PublicTunnelStatus> {
   return invoke<PublicTunnelStatus>("get_public_tunnel_status");
+}
+
+export async function getPhoneDiscovery(): Promise<PhoneDiscoveryStatus> {
+  return invoke<PhoneDiscoveryStatus>("get_phone_discovery");
+}
+
+export async function pairPhoneWirelessly(code: string): Promise<PhoneDiscoveryStatus> {
+  return invoke<PhoneDiscoveryStatus>("pair_phone_wirelessly", { code });
+}
+
+export async function getPhoneAccessStatus(): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("get_phone_access_status");
+}
+
+export async function selectPhoneDevice(deviceId: string | null): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("select_phone_device", { deviceId });
+}
+
+export async function setPhoneAccessMode(
+  deviceId: string,
+  mode: PhoneAccessMode,
+  limitedCapabilities: PhoneCapability[],
+): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("set_phone_access_mode", {
+    deviceId,
+    mode,
+    limitedCapabilities,
+  });
+}
+
+export async function setPhoneAccessPaused(paused: boolean): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("set_phone_access_paused", { paused });
+}
+
+export async function getPhoneRuntimeStatus(): Promise<PhoneRuntimeStatus> {
+  return invoke<PhoneRuntimeStatus>("get_phone_runtime_status");
+}
+
+export async function ensurePhoneRuntime(
+  deviceId: string,
+  preferredTransport?: "usb" | "wireless",
+): Promise<PhoneRuntimeStatus> {
+  return invoke<PhoneRuntimeStatus>("ensure_phone_runtime", {
+    deviceId,
+    preferredTransport,
+  });
+}
+
+export async function clearPhoneRuntime(): Promise<PhoneRuntimeStatus> {
+  return invoke<PhoneRuntimeStatus>("clear_phone_runtime");
+}
+
+export async function probePhoneRuntime(deviceId: string): Promise<PhoneRuntimeProbe> {
+  return invoke<PhoneRuntimeProbe>("probe_phone_runtime", { deviceId });
+}
+
+export async function getPhoneScreenFrame(
+  deviceId: string,
+  afterCapturedAt?: number,
+): Promise<PhoneScreenFrame> {
+  return invoke<PhoneScreenFrame>("get_phone_screen_frame", {
+    deviceId,
+    afterCapturedAt,
+  });
+}
+
+export async function phoneTap(deviceId: string, xRatio: number, yRatio: number): Promise<void> {
+  return invoke<void>("phone_tap", { deviceId, xRatio, yRatio });
+}
+
+export async function phoneSwipe(
+  deviceId: string,
+  startXRatio: number,
+  startYRatio: number,
+  endXRatio: number,
+  endYRatio: number,
+  durationMs: number,
+): Promise<void> {
+  return invoke<void>("phone_swipe", {
+    deviceId,
+    startXRatio,
+    startYRatio,
+    endXRatio,
+    endYRatio,
+    durationMs,
+  });
+}
+
+export type PhoneUiKey =
+  | "back"
+  | "home"
+  | "enter"
+  | "recents"
+  | "escape"
+  | "tab"
+  | "delete"
+  | "dpadUp"
+  | "dpadDown"
+  | "dpadLeft"
+  | "dpadRight";
+
+export async function phoneKeyEvent(deviceId: string, key: PhoneUiKey): Promise<void> {
+  return invoke<void>("phone_key_event", { deviceId, key });
+}
+
+export async function phoneTypeText(deviceId: string, text: string): Promise<void> {
+  return invoke<void>("phone_type_text", { deviceId, text });
 }
 
 export async function getHttpsSetupReadiness(): Promise<HttpsSetupReadiness> {

@@ -24,6 +24,7 @@ mod gmail_access;
 mod hardening;
 mod https_setup;
 mod integrations;
+mod large_project_read;
 mod launcher;
 #[cfg(any(target_os = "macos", test))]
 mod macos_ax;
@@ -34,6 +35,7 @@ mod model_hub;
 mod model_trial;
 mod models;
 mod monitoring;
+mod phone;
 mod platform_sandbox;
 mod project_context;
 mod project_index;
@@ -54,6 +56,7 @@ mod versioning;
 mod video;
 mod video_assets;
 mod video_director;
+mod video_html;
 mod video_narration;
 mod video_narration_managed;
 mod video_preview;
@@ -190,6 +193,21 @@ pub fn run() {
                 commands::get_workflow_readiness,
                 commands::get_environment_diagnostics,
                 commands::list_tool_capabilities,
+                commands::get_phone_discovery,
+                commands::pair_phone_wirelessly,
+                commands::get_phone_access_status,
+                commands::select_phone_device,
+                commands::set_phone_access_mode,
+                commands::set_phone_access_paused,
+                commands::get_phone_runtime_status,
+                commands::ensure_phone_runtime,
+                commands::clear_phone_runtime,
+                commands::probe_phone_runtime,
+                commands::get_phone_screen_frame,
+                commands::phone_tap,
+                commands::phone_swipe,
+                commands::phone_key_event,
+                commands::phone_type_text,
                 commands::get_system_resource_snapshot,
                 commands::create_temp_workspace,
                 commands::list_temp_workspaces,
@@ -423,7 +441,15 @@ pub fn run() {
             if let Err(error) = hardening::initialize(app.handle()) {
                 eprintln!("RepoTunnel production initialization warning: {error}");
             }
-            let paused = storage::load_ai_access_paused(app.handle()).unwrap_or(false);
+            let paused = match storage::load_ai_access_paused(app.handle()) {
+                Ok(paused) => paused,
+                Err(error) => {
+                    eprintln!(
+                        "RepoTunnel AI access settings could not be loaded; AI access remains paused: {error}"
+                    );
+                    true
+                }
+            };
             app.state::<AppState>().set_ai_access_paused(paused);
             updates::complete_post_update_health_check(app.handle());
             initialize_connection_runtime(app.handle());

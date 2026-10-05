@@ -797,38 +797,101 @@ fn fail_record(
     Err(error)
 }
 
+struct ApplyRecordFailure {
+    message: String,
+    keep_prepared_version: bool,
+}
+
+impl ApplyRecordFailure {
+    fn discard_prepared_version(message: String) -> Self {
+        Self {
+            message,
+            keep_prepared_version: false,
+        }
+    }
+
+    fn keep_prepared_version(message: String) -> Self {
+        Self {
+            message,
+            keep_prepared_version: true,
+        }
+    }
+}
+
 fn apply_record(
     app: &AppHandle,
     workspace: &Workspace,
     mut record: ChangeRecord,
     payload: &ChangePayload,
-) -> Result<ChangeOutcome, String> {
+) -> Result<ChangeOutcome, ApplyRecordFailure> {
     if let Err(error) = validate_payload(workspace, payload) {
-        return fail_record(app, record, error);
+        return fail_record(app, record, error)
+            .map_err(ApplyRecordFailure::discard_prepared_version);
     }
 
     let undo = match prepare_undo(workspace, payload) {
         Ok(undo) => undo,
-        Err(error) => return fail_record(app, record, error),
+        Err(error) => {
+            return fail_record(app, record, error)
+                .map_err(ApplyRecordFailure::discard_prepared_version)
+        }
     };
 
     if let Some(undo_payload) = undo.as_ref() {
         if let Err(error) = write_json(
-            &backup_path(app, &record.id)?,
+            &backup_path(app, &record.id).map_err(ApplyRecordFailure::discard_prepared_version)?,
             undo_payload,
             "change backup",
         ) {
-            return fail_record(app, record, error);
+            return fail_record(app, record, error)
+                .map_err(ApplyRecordFailure::discard_prepared_version);
         }
     }
 
     match apply_payload(workspace, payload) {
         Ok(file) => {
             record.status = ChangeStatus::Applied;
-            record.updated_at = now_millis()?;
+            record.updated_at =
+                now_millis().map_err(ApplyRecordFailure::discard_prepared_version)?;
             record.can_undo = undo.is_some();
             record.error = None;
-            persist_record(app, &record)?;
+            if let Err(history_error) = persist_record(app, &record) {
+                let rollback = undo
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "This operation does not have a direct automatic undo payload.".to_string()
+                    })
+                    .and_then(|prepared_undo| undo_payload(workspace, prepared_undo));
+
+                return match rollback {
+                    Ok(()) => {
+                        record.status = ChangeStatus::Failed;
+                        record.updated_at = now_millis().unwrap_or(record.updated_at);
+                        record.can_undo = false;
+                        record.error = Some(history_error.clone());
+                        let state_error = persist_record(app, &record).err();
+                        if state_error.is_none() {
+                            if let Ok(path) = backup_path(app, &record.id) {
+                                remove_file_if_present(&path);
+                            }
+                        }
+
+                        let message = if let Some(state_error) = state_error {
+                            format!(
+                                "The edit was rolled back because RepoTunnel could not save change history: {history_error}. The project was restored, but RepoTunnel could not record the failed change afterward: {state_error}"
+                            )
+                        } else {
+                            format!(
+                                "The edit was rolled back because RepoTunnel could not save change history: {history_error}"
+                            )
+                        };
+                        Err(ApplyRecordFailure::discard_prepared_version(message))
+                    }
+                    Err(rollback_error) => Err(ApplyRecordFailure::keep_prepared_version(format!(
+                        "RepoTunnel changed the project but could not save change history: {history_error}. Automatic rollback could not be completed, so the edit may still be present. Pre-edit recovery data was retained. Rollback error: {rollback_error}"
+                    ))),
+                };
+            }
             Ok(ChangeOutcome {
                 applied: true,
                 queued: false,
@@ -836,7 +899,25 @@ fn apply_record(
                 file,
             })
         }
-        Err(error) => fail_record(app, record, error),
+        Err(error) => {
+            fail_record(app, record, error).map_err(ApplyRecordFailure::discard_prepared_version)
+        }
+    }
+}
+
+fn rollback_after_version_commit_failure(
+    app: &AppHandle,
+    change_id: &str,
+    label: &str,
+    version_error: &str,
+) -> String {
+    match undo_change(app, change_id) {
+        Ok(_) => format!(
+            "{label} was rolled back because version history could not be saved: {version_error}. Pre-edit recovery data was retained because the version commit did not complete."
+        ),
+        Err(rollback_error) => format!(
+            "{label} could not be fully finalized because version history could not be saved: {version_error}. Automatic rollback could not be confirmed, so the edit may still be present. Pre-edit recovery data was retained. Rollback error: {rollback_error}"
+        ),
     }
 }
 
@@ -911,19 +992,20 @@ fn submit_payload_with_review(
             if let Err(error) =
                 versioning::commit_change(app, workspace, prepared_version.clone(), &outcome.change)
             {
-                // A versioned edit is only considered successful if RepoTunnel can also
-                // preserve the new state. Roll the just-applied edit back if snapshotting fails.
-                let _ = undo_change(app, &outcome.change.id);
-                versioning::abort_change(app, workspace, &prepared_version);
-                return Err(format!(
-                    "The edit was rolled back because version history could not be saved: {error}"
+                return Err(rollback_after_version_commit_failure(
+                    app,
+                    &outcome.change.id,
+                    "The edit",
+                    &error,
                 ));
             }
             Ok(outcome)
         }
-        Err(error) => {
-            versioning::abort_change(app, workspace, &prepared_version);
-            Err(error)
+        Err(failure) => {
+            if !failure.keep_prepared_version {
+                versioning::abort_change(app, workspace, &prepared_version);
+            }
+            Err(failure.message)
         }
     }
 }
@@ -1157,18 +1239,22 @@ pub(crate) fn approve_change(app: &AppHandle, change_id: &str) -> Result<ChangeO
                 prepared_version.clone(),
                 &outcome.change,
             ) {
-                let _ = undo_change(app, &outcome.change.id);
-                versioning::abort_change(app, &workspace, &prepared_version);
+                let message = rollback_after_version_commit_failure(
+                    app,
+                    &outcome.change.id,
+                    "The approved edit",
+                    &error,
+                );
                 remove_file_if_present(&request);
-                return Err(format!(
-                    "The approved edit was rolled back because version history could not be saved: {error}"
-                ));
+                return Err(message);
             }
             Ok(outcome)
         }
-        Err(error) => {
-            versioning::abort_change(app, &workspace, &prepared_version);
-            Err(error)
+        Err(failure) => {
+            if !failure.keep_prepared_version {
+                versioning::abort_change(app, &workspace, &prepared_version);
+            }
+            Err(failure.message)
         }
     };
     remove_file_if_present(&request);

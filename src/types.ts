@@ -439,6 +439,75 @@ export type PublicTunnelStatus = {
   message: string | null;
 };
 
+export type PhoneTransport = "wireless" | "usb" | "unknown";
+
+export type PhoneDeviceState =
+  | "connected"
+  | "authorizationRequired"
+  | "offline"
+  | "unavailable";
+
+export type PhoneDeviceSummary = {
+  id: string;
+  name: string;
+  manufacturer: string | null;
+  androidVersion: string | null;
+  state: PhoneDeviceState;
+  transport: PhoneTransport;
+  availableTransports: PhoneTransport[];
+};
+
+export type PhoneDiscoveryStatus = {
+  adbAvailable: boolean;
+  devices: PhoneDeviceSummary[];
+  recommendedDeviceId: string | null;
+  message: string | null;
+};
+
+export type PhoneAccessMode = "off" | "limited" | "full";
+
+export type PhoneCapability =
+  | "viewScreen"
+  | "controlInput"
+  | "appControl"
+  | "files"
+  | "appInstall"
+  | "deviceSettings"
+  | "shell"
+  | "logs"
+  | "networkTools";
+
+export type PhoneAccessStatus = {
+  selectedDeviceId: string | null;
+  mode: PhoneAccessMode;
+  paused: boolean;
+  limitedCapabilities: PhoneCapability[];
+  grantedCapabilities: PhoneCapability[];
+};
+
+export type PhoneRuntimeStatus = {
+  active: boolean;
+  deviceId: string | null;
+  name: string | null;
+  transport: PhoneTransport | null;
+  sessionStartedAt: number | null;
+  lastUsedAt: number | null;
+};
+
+export type PhoneRuntimeProbe = {
+  runtime: PhoneRuntimeStatus;
+  displaySize: string | null;
+};
+
+export type PhoneScreenFrame = {
+  mimeType: "image/png" | "image/jpeg";
+  dataBase64: string;
+  sizeBytes: number;
+  width: number;
+  height: number;
+  capturedAt: number;
+};
+
 export type HttpsSetupResource =
   | "wireguard"
   | "route64"
@@ -868,6 +937,8 @@ export type AiWorkspaceApplicationStatus = {
 export type AiWorkspaceStatus = {
   sessionId: string | null;
   workspaceId: string;
+  supported: boolean;
+  unsupportedReason: string | null;
   running: boolean;
   ready: boolean;
   applicationId: string | null;
@@ -938,7 +1009,23 @@ export type BrowserActionKind =
   | "scroll"
   | "reload";
 
-export type BrowserActionStatus = "pending" | "applied" | "failed" | "rejected";
+export type BrowserActionStatus = "pending" | "applied" | "ambiguous" | "failed" | "rejected";
+
+export type BrowserMutationCompletion = "applied" | "ambiguous";
+
+export type BrowserMutationReceipt = {
+  id: string;
+  operation: string;
+  tabId: string;
+  completion: BrowserMutationCompletion;
+  helperAcknowledged: boolean;
+  beforeUrl: string;
+  afterUrl: string | null;
+  beforeDocumentGeneration: string | null;
+  afterDocumentGeneration: string | null;
+  documentChanged: boolean;
+  transportError: string | null;
+};
 
 export type BrowserApplication = {
   id: string;
@@ -987,6 +1074,7 @@ export type BrowserActionRecord = {
   createdAt: number;
   updatedAt: number;
   error: string | null;
+  mutationReceipt?: BrowserMutationReceipt | null;
 };
 
 export type BrowserNavigationRedirect = {

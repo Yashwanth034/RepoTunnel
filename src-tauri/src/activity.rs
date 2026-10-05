@@ -708,6 +708,7 @@ pub(crate) fn record_browser_record(
     let status = match action.status {
         BrowserActionStatus::Pending => ActivityStatus::Pending,
         BrowserActionStatus::Applied => ActivityStatus::Succeeded,
+        BrowserActionStatus::Ambiguous => ActivityStatus::Failed,
         BrowserActionStatus::Failed => ActivityStatus::Failed,
         BrowserActionStatus::Rejected => ActivityStatus::Rejected,
     };
@@ -883,6 +884,7 @@ pub(crate) fn sync_browser(app: &AppHandle, record: &BrowserActionRecord) {
     let status = match record.status {
         BrowserActionStatus::Pending => ActivityStatus::Pending,
         BrowserActionStatus::Applied => ActivityStatus::Succeeded,
+        BrowserActionStatus::Ambiguous => ActivityStatus::Failed,
         BrowserActionStatus::Failed => ActivityStatus::Failed,
         BrowserActionStatus::Rejected => ActivityStatus::Rejected,
     };

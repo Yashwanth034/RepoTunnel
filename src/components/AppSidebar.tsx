@@ -11,6 +11,7 @@ export type AppView =
   | "git"
   | "connections"
   | "commands"
+  | "phone"
   | "httpsSetup"
   | "video"
   | "system"
@@ -47,6 +48,7 @@ export type IconName =
   | "checks"
   | "checkpoint"
   | "shield"
+  | "phone"
   | "pause"
   | "resume";
 
@@ -60,6 +62,7 @@ const navItems: Array<{ id: AppView; label: string; icon: IconName }> = [
   { id: "git", label: "Git", icon: "git" },
   { id: "connections", label: "Connect", icon: "link" },
   { id: "commands", label: "Commands", icon: "terminal" },
+  { id: "phone", label: "Phone", icon: "phone" },
   { id: "httpsSetup", label: "HTTPS Setup", icon: "shield" },
 ];
 
@@ -85,6 +88,7 @@ export function NavIcon({ name, size = 17 }: { name: IconName; size?: number }) 
   if (name === "checks") return <svg {...common}><circle cx="12" cy="12" r="8.5"/><path d="m8.5 12 2.3 2.3 4.8-5"/></svg>;
   if (name === "checkpoint") return <svg {...common}><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 13h5"/><path d="m13.5 16 1.5 1.5 3-3"/></svg>;
   if (name === "shield") return <svg {...common}><path d="M12 3 19 6v5c0 4.6-2.7 8-7 10-4.3-2-7-5.4-7-10V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg>;
+  if (name === "phone") return <svg {...common}><rect x="7" y="2.5" width="10" height="19" rx="2.4"/><path d="M10 5h4"/><path d="M11 18.5h2"/></svg>;
   if (name === "pause") return <svg {...common}><rect x="7" y="5" width="3.5" height="14" rx="1"/><rect x="13.5" y="5" width="3.5" height="14" rx="1"/></svg>;
   if (name === "resume") return <svg {...common}><path d="m8 5 11 7-11 7V5Z"/></svg>;
 

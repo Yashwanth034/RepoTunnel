@@ -404,6 +404,15 @@ fn supervisor_state_is_live(state: &ManagedProcessSupervisorState) -> bool {
     true
 }
 
+pub(crate) fn restart_reattachment_supported() -> bool {
+    // Full restart recovery is advertised only where RepoTunnel can both
+    // revalidate the recovered child identity and control its process group
+    // without relying on an in-memory Child handle. Linux currently provides
+    // both guarantees. Keep other platforms false until they gain equivalent
+    // native identity + recovered-stop coverage and native acceptance tests.
+    cfg!(target_os = "linux")
+}
+
 fn load_terminal_history_unlocked(app: &AppHandle) -> Result<Vec<StoredTerminalCommand>, String> {
     let path = terminal_history_path(app)?;
     if !path.exists() {
@@ -3530,6 +3539,123 @@ mod tests {
         );
         assert_eq!(stored.record.pid, Some(pid));
         assert_eq!(stored.record.started_at, Some(now));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_restart_adoption_survives_shutdown_detach() {
+        let (root, workspace) = temp_workspace("restart-adoption");
+        let marker = root.join("managed-child-survived.txt");
+        let child_pid_path = root.join("managed-child.pid");
+        let python = ["/usr/bin/python3", "/usr/local/bin/python3"]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+            .expect("python3 is required for the restart-adoption regression test");
+
+        let child_script = "import pathlib,sys,time; time.sleep(1); pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8'); time.sleep(30)";
+        let supervisor_script = "import pathlib,subprocess,sys; child=subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); pathlib.Path(sys.argv[3]).write_text(str(child.pid), encoding='utf-8'); child.wait()";
+
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(supervisor_script)
+            .arg(child_script)
+            .arg(&marker)
+            .arg(&child_pid_path)
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.process_group(0);
+
+        let supervisor = command
+            .spawn()
+            .expect("spawn restart-adoption supervisor stand-in");
+        let supervisor_pid = supervisor.id();
+
+        let child_pid = (0..40)
+            .find_map(|_| {
+                let parsed = fs::read_to_string(&child_pid_path)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok());
+                if parsed.is_none() {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                parsed
+            })
+            .expect("supervisor stand-in should publish a child PID");
+
+        let record = super::pending_process_record(
+            &workspace,
+            "python durable child".to_string(),
+            ".".to_string(),
+            Some("restart adoption".to_string()),
+        )
+        .expect("pending process");
+        let process_id = record.id.clone();
+        let mut stored = super::StoredProcess {
+            record,
+            env: BTreeMap::new(),
+            sandboxed: false,
+        };
+        let now = super::now_millis();
+        let state = super::ManagedProcessSupervisorState {
+            schema_version: super::PROCESS_SUPERVISOR_SCHEMA_VERSION,
+            process_id: process_id.clone(),
+            supervisor_pid,
+            child_pid: Some(child_pid),
+            process_identity: super::process_identity(child_pid),
+            status: crate::models::ManagedProcessStatus::Running,
+            started_at: Some(now),
+            updated_at: now,
+            exited_at: None,
+            exit_code: None,
+            error: None,
+        };
+        let state_path = root.join("managed-supervisor.state.json");
+        super::write_supervisor_state(&state_path, &state)
+            .expect("persist managed supervisor state");
+
+        runtimes().lock().unwrap().insert(
+            process_id.clone(),
+            ProcessRuntime {
+                child: supervisor,
+                _parent_keeper: super::ProcessParentKeeper {
+                    release_tx: None,
+                    thread: None,
+                },
+                _sandbox_cleanup: None,
+            },
+        );
+
+        super::detach_managed_processes_for_shutdown();
+        assert!(!runtimes().lock().unwrap().contains_key(&process_id));
+        assert!(super::process_exists(supervisor_pid));
+        assert!(super::process_exists(child_pid));
+
+        let recovered_state = super::read_supervisor_state_path(&state_path)
+            .expect("read persisted supervisor state")
+            .expect("persisted supervisor state");
+        assert_eq!(recovered_state.process_id, process_id);
+        assert!(super::apply_supervisor_state(
+            &mut stored,
+            Some(&recovered_state)
+        ));
+        assert_eq!(
+            stored.record.status,
+            crate::models::ManagedProcessStatus::Running
+        );
+        assert_eq!(stored.record.pid, Some(child_pid));
+
+        thread::sleep(Duration::from_millis(1200));
+        assert_eq!(
+            fs::read_to_string(&marker).expect("managed child marker"),
+            "survived"
+        );
+
+        let _ = super::signal_process_group(supervisor_pid, "-TERM");
+        thread::sleep(Duration::from_millis(100));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
