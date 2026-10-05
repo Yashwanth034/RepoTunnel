@@ -23,7 +23,7 @@ The native folder picker is invoked from a dedicated Rust command. This avoids g
 
 ## Workspace persistence
 
-Registered project metadata is stored under the application data directory. Automatic version-history metadata, snapshots, legacy change records, and undo data are persisted locally. Gateway and tunnel runtime state is not persisted.
+Registered project metadata is stored under the application data directory. Version-history metadata, snapshots/deltas, change records, undo/recovery data, Project Memory, and applicable connection/provider configuration are persisted locally. Ephemeral runtime handles such as active listener sockets, child-process handles, and in-memory provider sessions are recreated rather than serialized as live runtime state.
 
 ## MCP SDK
 
@@ -80,10 +80,12 @@ The MCP transport layer and local workspace engine remain separate modules. MCP 
 Read-only tools publish `readOnlyHint`; mutation tools remain classified as writes. Client confirmation behavior is an additional safety layer and never replaces RepoTunnel's local Rust permission checks.
 
 
-## Private ChatGPT transport
+## Remote connection transports
 
-RepoTunnel uses OpenAI Secure MCP Tunnel rather than exposing its local MCP listener publicly. The official `tunnel-client` runs as a managed child process and forwards the OpenAI-hosted tunnel traffic to RepoTunnel over loopback.
+The raw MCP gateway stays private to the machine. Remote connectivity is a separate layer with multiple supported provider choices rather than one privileged transport.
 
-This keeps public ingress, TLS termination, and tunnel protocol behavior outside RepoTunnel while preserving the existing Rust workspace authorization boundary.
+RepoTunnel currently supports managed ngrok, Cloudflare Tunnel, Direct HTTPS, and an optional official OpenAI Secure MCP Tunnel path. Public MCP access keeps RepoTunnel's OAuth/workspace authorization boundary regardless of provider.
 
-The Runtime API key is intentionally session-only for now. Persistent credential storage, if added later, must use an operating-system secret store rather than the JSON workspace registry.
+Direct HTTPS owns its TLS/ACME frontend while proxying only allowlisted routes to the trusted local origin. Cloudflare and Direct HTTPS use RepoTunnel's stable local origin path. ngrok uses the Rust SDK. The optional OpenAI `tunnel-client` remains a managed child process.
+
+Provider/authentication credentials are never general MCP inputs. The Secure MCP Tunnel Runtime API key remains session-only and is passed to `tunnel-client` through its child environment rather than command-line arguments or workspace JSON.

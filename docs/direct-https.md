@@ -54,17 +54,17 @@ RepoTunnel Direct HTTPS frontend
  |
  | local reverse proxy
  v
-127.0.0.1:43555 RepoTunnel MCP gateway
+127.0.0.1:43182 RepoTunnel MCP gateway
  |
  v
 Approved local workspaces
 ```
 
-The important design rule: the real MCP gateway stays loopback-only. Port 43555 is never exposed directly to the Internet. The public Direct HTTPS frontend exposes only the exact MCP/OAuth/health routes that remote MCP clients need.
+The important design rule: the real MCP gateway stays loopback-only. Port 43182 is never exposed directly to the Internet. The public Direct HTTPS frontend exposes only the exact MCP/OAuth/health routes that remote MCP clients need.
 
 ```
-TCP 443 -> RepoTunnel :43444
-TCP 80  -> RepoTunnel :44666 (ACME only)
+TCP 443 -> RepoTunnel :43183
+TCP 80  -> RepoTunnel :43184 (ACME only)
 ```
 
 ## 2. Cost and guarantees
@@ -202,23 +202,23 @@ RepoTunnel's verified Direct HTTPS ports:
 
 | Port | Purpose |
 |---|---|
-| 43555 | Local MCP gateway — loopback only, never expose publicly |
-| 43444 | Direct HTTPS listener |
-| 44666 | ACME HTTP challenge listener |
+| 43182 | Stable local MCP origin for Direct HTTPS/Cloudflare — loopback only, never expose publicly |
+| 43183 | Direct HTTPS listener |
+| 43184 | ACME HTTP challenge listener |
 
 The Linux setup creates an nftables table named `inet repotunnel_direct` and redirects:
 
-- Public TCP 443 → local TCP 43444
-- Public TCP 80 → local TCP 44666
+- Public TCP 443 → local TCP 43183
+- Public TCP 80 → local TCP 43184
 
-Rules must target the Route64 public IPv6 path and must not expose port 43555:
+Rules must target the Route64 public IPv6 path and must not expose the local origin port 43182:
 
 ```
 table inet repotunnel_direct {
  chain prerouting {
  type nat hook prerouting priority dstnat; policy accept;
- ip6 daddr <YOUR_ROUTE64_IPV6> tcp dport 443 redirect to :43444
- ip6 daddr <YOUR_ROUTE64_IPV6> tcp dport 80 redirect to :44666
+ ip6 daddr <YOUR_ROUTE64_IPV6> tcp dport 443 redirect to :43183
+ ip6 daddr <YOUR_ROUTE64_IPV6> tcp dport 80 redirect to :43184
  }
 }
 ```
@@ -242,7 +242,7 @@ systemctl is-active wg-quick@rt-direct
 ip -6 addr show dev rt-direct
 ```
 
-Once RepoTunnel Direct HTTPS is running, inbound TCP 443 must reach 43444, and inbound TCP 80 must reach 44666 during Let's Encrypt HTTP-01 validation. The verified setup passed an external TCP 80 check and completed Let's Encrypt issuance through this path.
+Once RepoTunnel Direct HTTPS is running, inbound TCP 443 must reach 43183, and inbound TCP 80 must reach 43184 during Let's Encrypt HTTP-01 validation. The verified setup passed an external TCP 80 check and completed Let's Encrypt issuance through this path.
 
 ---
 
@@ -324,18 +324,18 @@ Let's Encrypt HTTP-01
  -> /.well-known/acme-challenge/<token>
 ```
 
-RepoTunnel uses the ACME HTTP challenge listener on local port 44666; the public port mapping makes that reachable on Internet TCP 80 for the ACME path only.
+RepoTunnel uses the ACME HTTP challenge listener on local port 43184; the public port mapping makes that reachable on Internet TCP 80 for the ACME path only.
 
 After issuance, RepoTunnel should show:
 
 ```
 TLS certificate: Trusted
-HTTPS listener: :43444 online
+HTTPS listener: :43183 online
 https://my-example.duckdns.org
-https://my-example.duckdns.org/mcp -> RepoTunnel :44666
+https://my-example.duckdns.org/mcp -> RepoTunnel :43183
 ```
 
-RepoTunnel should keep the real MCP gateway bound to `127.0.0.1:43555`. The Direct HTTPS layer listens on 43444 and proxies only approved routes to the local gateway.
+RepoTunnel keeps the Direct/Cloudflare local MCP origin on `127.0.0.1:43182`. The Direct HTTPS layer listens on 43183 and proxies only approved routes to the local gateway.
 
 The certificate private key must stay in RepoTunnel's private application-data directory and must never be committed to the repository.
 
@@ -418,7 +418,7 @@ This was essential to the successful implementation. The local gateway protects 
 Public request Host: my-repotunnel.duckdns.org
  |
  v
-proxy forwards same Host to 127.0.0.1:43555
+proxy forwards same Host to 127.0.0.1:43182
  |
  v
 403 Forbidden: Host header is not allowed
@@ -427,7 +427,7 @@ proxy forwards same Host to 127.0.0.1:43555
 **Correct behavior:**
 
 - Do not copy the public Host header to the local gateway.
-- Let the HTTP client generate the local upstream Host from 127.0.0.1:43555.
+- Let the HTTP client generate the local upstream Host from 127.0.0.1:43182.
 - Preserve the original hostname in `X-Forwarded-Host`.
 - Set `X-Forwarded-Proto: https`.
 
@@ -456,30 +456,30 @@ The verified RepoTunnel build uses the current RMCP SDK and Streamable HTTP conf
 - JSON responses: enabled
 - For MCP protocol versions that require it, requests include the `Mcp-Method` header
 
-The final authenticated diagnostic returned:
+The final authenticated diagnostic returned HTTP 200 for MCP tool discovery and a non-empty RepoTunnel tool list.
 
-```
-TOOLS HTTP: 200
-TOOLS COUNT: 57
-```
-
-That confirms the entire OAuth + MCP + Direct HTTPS path, not just the health endpoint.
+Do not hard-code a tool count in this guide: RepoTunnel's MCP surface evolves. A successful authenticated `tools/list` plus a real RepoTunnel tool call confirms the OAuth + MCP + Direct HTTPS path, not just the health endpoint.
 
 ---
 
 ## Part E — Connect ChatGPT
 
-### 19. Create the RepoTunnel connector/app in ChatGPT
+### 19. Create the RepoTunnel app in ChatGPT
 
-1. Create a new custom MCP connection/app.
-2. Name it "RepoTunnel" (or another recognizable name).
-3. Use the MCP server URL: `https://my-example.duckdns.org/mcp`
-4. Choose OAuth authentication.
-5. Allow the OAuth metadata to be discovered from RepoTunnel.
-6.Set Registration method to:Dynamic Client Registration (DCR)
-6. If the UI has a "Base scopes" field, the verified configuration used `offline_access`.
-7. Complete RepoTunnel's browser authorization page.
-8. Allow ChatGPT to scan/refresh actions.
+ChatGPT's custom-app/Developer Mode UI can change by plan/workspace. Follow the current ChatGPT Apps guidance rather than relying on an old button layout.
+
+At a high level:
+
+1. Enable Developer Mode if it is available/required for the workspace.
+2. Create a custom app from ChatGPT's Apps settings.
+3. Use the MCP server URL: `https://my-example.duckdns.org/mcp`.
+4. Choose OAuth for the RepoTunnel public connection.
+5. Allow RepoTunnel's OAuth metadata/Dynamic Client Registration flow to be discovered when the ChatGPT UI supports that path.
+6. Complete RepoTunnel's browser authorization page.
+7. Scan/refresh the app's tools.
+8. Test from a fresh chat with a real RepoTunnel tool call.
+
+If the RepoTunnel MCP schema changes, refresh/re-scan the app before treating a missing action as a Direct HTTPS failure.
 
 The UI wording can change over time — the important pieces are the MCP URL, OAuth, authorization completion, and a successful action/tool scan.
 
@@ -563,8 +563,8 @@ If all three pass, the complete path is healthy.
 
 ### 24. Keep the local gateway private
 
-- `127.0.0.1:43555` stays loopback-only.
-- Never forward router port 43555.
+- `127.0.0.1:43182` stays loopback-only.
+- Never forward router port 43182.
 - Never bind the raw MCP gateway to `0.0.0.0` for convenience.
 - Only the Direct HTTPS frontend should be reachable publicly.
 
@@ -614,14 +614,14 @@ Check RepoTunnel first. Expected UI state:
 ```
 Local gateway: Online
 TLS certificate: Trusted
-HTTPS listener: :44544 online
+HTTPS listener: :43183 online
 ```
 
 ```bash
-ss -ltnp | grep -E ':(43444|43444|43455) '
+ss -ltnp | grep -E ':(43182|43183|43184) '
 ```
 
-If 43444 is offline, the public HTTPS request can't complete TLS.
+If 43183 is offline, the public HTTPS request can't complete TLS.
 
 ### 29. "403 Forbidden: Host header is not allowed"
 
@@ -631,7 +631,7 @@ Fix: strip the public Host on the upstream request, preserve it only as `X-Forwa
 
 ### 30. ChatGPT says no actions are available
 
-Verify the MCP server itself first — the successful authenticated diagnostic returned `TOOLS HTTP: 200`, `TOOLS COUNT: 57`. If `tools/list` works independently, recreate/reauthorize the ChatGPT connector and scan/refresh actions again. Test from a fresh conversation if an old chat may have a stale session.
+Verify the MCP server itself first: authenticated `tools/list` should return HTTP 200 and a non-empty RepoTunnel tool list. If discovery works independently, reauthorize/refresh the ChatGPT app and scan actions again. Test from a fresh conversation if an old chat may have cached an older tool schema.
 
 ### 31. "Reauthentication required"
 
@@ -647,17 +647,18 @@ The verified setup confirmed CGNAT at the ISP, which traditional router forwardi
 
 ---
 
-## Part I — Recommended RepoTunnel product UX
+## Part I — RepoTunnel provider choices
 
 ### 34. Connection choices for normal users
 
-RepoTunnel should present its providers roughly like this:
+RepoTunnel currently supports multiple public connection paths:
 
-- **ngrok** — easiest/default, for users who want the simplest setup and already use ngrok
-- **Cloudflare Tunnel** — alternative managed tunnel, for users who prefer Cloudflare
-- **Direct HTTPS** — advanced / zero-relay-cost path, for users who have native public IPv4/IPv6 or a routed IPv6 tunnel such as Route64
+- **ngrok** — easiest managed setup; uses the ngrok Rust SDK
+- **Cloudflare Tunnel** — managed alternative using an installed `cloudflared` client and the user's tunnel/hostname
+- **Direct HTTPS** — advanced self-routed path for users with a suitable public IPv4/IPv6 route or routed IPv6 tunnel such as Route64
+- **OpenAI Secure MCP Tunnel** — optional separate `tunnel-client` integration where that transport is used
 
-Direct HTTPS shouldn't require every RepoTunnel user to manually reproduce the Route64 configuration — it's an advanced option for users who need it.
+This document covers the verified Route64-based Direct HTTPS path only. Other RepoTunnel users do not need to reproduce Route64 when they choose a managed provider or already have a suitable public route.
 
 ---
 
@@ -671,9 +672,9 @@ Before declaring a Direct HTTPS installation complete, verify every item below.
 - [ ] Interface uses a short Linux-safe name such as `rt-direct`
 - [ ] Route64 global IPv6 is present on the interface
 - [ ] WireGuard service is enabled at boot
-- [ ] TCP 443 reaches RepoTunnel 43444
-- [ ] TCP 80 reaches RepoTunnel 44666 for ACME
-- [ ] Raw MCP gateway 43555 is not public
+- [ ] TCP 443 reaches RepoTunnel 43183
+- [ ] TCP 80 reaches RepoTunnel 43184 for ACME
+- [ ] Raw local MCP origin 43182 is not public
 
 **DNS / TLS**
 
@@ -730,7 +731,7 @@ curl -4 -sS https://my-example.duckdns.org/.well-known/oauth-protected-resource/
 curl -4 -sS https://my-example.duckdns.org/.well-known/oauth-authorization-server
 
 # RepoTunnel listeners
-ss -ltnp | grep -E ':(43555|43444|44666) '
+ss -ltnp | grep -E ':(43182|43183|43184) '
 
 # nftables public redirect rules
 sudo nft list table inet repotunnel_direct

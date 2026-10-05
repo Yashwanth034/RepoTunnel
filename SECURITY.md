@@ -8,11 +8,13 @@ Do not post secrets, private repository content, or personal filesystem paths in
 
 ## Security boundaries
 
-RepoTunnel's guarantees apply to operations performed through its approved workspace, MCP, command, Git, and AI Workspace interfaces. They do not sandbox software that the user launches manually.
+RepoTunnel's guarantees apply to operations performed through its approved workspace, MCP, command, Git/GitHub, managed browser, Desktop/AI Workspace, Video, and Phone interfaces. They do not sandbox software that the user launches manually outside those RepoTunnel-controlled paths.
 
 AI-triggered command execution is fail-closed: Bubblewrap on Linux, AppContainer + Job Object isolation on Windows, and a Seatbelt `sandbox-exec` compatibility backend on macOS. If the required sandbox is unavailable, RepoTunnel blocks the operation instead of falling back to unrestricted host execution.
 
-Keep RepoTunnel and its dependencies updated, and do not expose the loopback MCP server directly to untrusted networks.
+Keep RepoTunnel and its dependencies updated, and do not expose the raw loopback MCP server directly to untrusted networks. Use RepoTunnel's authenticated public connection paths instead.
+
+Phone Full Access does not bypass Android/device policy, and MCP cannot escalate Phone access. Payment-sensitive foreground apps intentionally block AI Phone observation/control. Managed browser/Desktop semantic paths also retain sensitive-field and stale-reference protections.
 
 ## Dependency audits
 

@@ -86,7 +86,9 @@ Linux development can validate the shared updater logic and release metadata, bu
 
 ### macOS install safety gate
 
-Signed update discovery and macOS release artifacts are enabled, but in-app installation is intentionally blocked on macOS while Tauri updater issue #3505 remains unresolved: the current updater can lose the installed `.app` if replacement fails after moving the old app into a temporary backup. RepoTunnel must not expose **Update & Restart** on macOS until either an upstream release fixes restore-on-failure or RepoTunnel has an independently verified recovery implementation. After that change, run a native failure-injection test as well as the normal patch-update acceptance test before removing the gate.
+Signed update discovery and macOS release artifacts are enabled, but the current RepoTunnel safety policy intentionally blocks in-app installation on macOS because a failed application replacement must not be allowed to remove the working installed `.app`.
+
+Do not expose **Update & Restart** on macOS until RepoTunnel's current updater stack has a verified restore-on-failure path (either through an upstream fix or an independently validated RepoTunnel recovery implementation). Before removing the gate, run native macOS failure-injection testing as well as the normal patch-update acceptance test.
 
 ## Auto-update behavior
 

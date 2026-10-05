@@ -151,6 +151,104 @@ fn save_state(app: &AppHandle, state: &VersionState) -> Result<(), String> {
     save_json(&state_path(app)?, state, "version state")
 }
 
+fn save_version_metadata_pair_with<FH, FS>(
+    previous_history: &[VersionRecord],
+    previous_state: &VersionState,
+    next_history: &[VersionRecord],
+    next_state: &VersionState,
+    mut write_history: FH,
+    mut write_state: FS,
+) -> Result<(), String>
+where
+    FH: FnMut(&[VersionRecord]) -> Result<(), String>,
+    FS: FnMut(&VersionState) -> Result<(), String>,
+{
+    write_history(next_history)?;
+    if let Err(state_error) = write_state(next_state) {
+        let history_rollback = write_history(previous_history);
+        let state_rollback = write_state(previous_state);
+        return match (history_rollback, state_rollback) {
+            (Ok(()), Ok(())) => Err(format!(
+                "Could not save the current version pointer: {state_error}. RepoTunnel restored the previous version metadata."
+            )),
+            (history_result, state_result) => {
+                let history_detail = history_result
+                    .err()
+                    .unwrap_or_else(|| "history rollback succeeded".to_string());
+                let state_detail = state_result
+                    .err()
+                    .unwrap_or_else(|| "state rollback succeeded".to_string());
+                Err(format!(
+                    "Could not save the current version pointer: {state_error}. RepoTunnel also could not fully restore the previous version metadata. History rollback: {history_detail}. State rollback: {state_detail}."
+                ))
+            }
+        };
+    }
+    Ok(())
+}
+
+fn save_version_metadata_pair(
+    app: &AppHandle,
+    previous_history: &[VersionRecord],
+    previous_state: &VersionState,
+    next_history: &[VersionRecord],
+    next_state: &VersionState,
+) -> Result<(), String> {
+    save_version_metadata_pair_with(
+        previous_history,
+        previous_state,
+        next_history,
+        next_state,
+        |history| save_history(app, history),
+        |state| save_state(app, state),
+    )
+}
+
+fn finalize_restore_state_with<FS, FR, FD>(
+    previous_state: &VersionState,
+    next_state: &VersionState,
+    has_recovery_snapshot: bool,
+    mut save_state_fn: FS,
+    mut restore_recovery: FR,
+    mut delete_recovery: FD,
+) -> Result<(), String>
+where
+    FS: FnMut(&VersionState) -> Result<(), String>,
+    FR: FnMut() -> Result<(), String>,
+    FD: FnMut(),
+{
+    if let Err(state_error) = save_state_fn(next_state) {
+        let source_rollback = has_recovery_snapshot.then(&mut restore_recovery);
+        let state_rollback = save_state_fn(previous_state);
+
+        return match (source_rollback, state_rollback) {
+            (Some(Ok(())), Ok(())) => Err(format!(
+                "Version restore was rolled back because the current version pointer could not be saved: {state_error}. Pre-restore recovery data was retained."
+            )),
+            (Some(Ok(())), Err(state_rollback_error)) => Err(format!(
+                "Version restore could not be finalized because the current version pointer could not be saved: {state_error}. RepoTunnel restored the pre-restore source state, but could not restore the previous version pointer: {state_rollback_error}. Pre-restore recovery data was retained."
+            )),
+            (Some(Err(source_rollback_error)), Ok(())) => Err(format!(
+                "Version restore could not be finalized because the current version pointer could not be saved: {state_error}. RepoTunnel restored the previous version pointer, but automatic source rollback failed, so restored file changes may still be present: {source_rollback_error}. Pre-restore recovery data was retained."
+            )),
+            (Some(Err(source_rollback_error)), Err(state_rollback_error)) => Err(format!(
+                "Version restore could not be finalized because the current version pointer could not be saved: {state_error}. Automatic source rollback also failed: {source_rollback_error}. Restoring the previous version pointer also failed: {state_rollback_error}. Restored file changes may still be present and pre-restore recovery data was retained."
+            )),
+            (None, Ok(())) => Err(format!(
+                "Version restore changed the project, but the current version pointer could not be saved: {state_error}. RepoTunnel restored the previous version pointer, but no temporary source recovery snapshot was available, so restored file changes may still be present."
+            )),
+            (None, Err(state_rollback_error)) => Err(format!(
+                "Version restore changed the project, but the current version pointer could not be saved: {state_error}. RepoTunnel also could not restore the previous version pointer: {state_rollback_error}. No temporary source recovery snapshot was available, so restored file changes may still be present."
+            )),
+        };
+    }
+
+    if has_recovery_snapshot {
+        delete_recovery();
+    }
+    Ok(())
+}
+
 fn new_id(prefix: &str) -> String {
     let millis = now_millis();
     let nanos = SystemTime::now()
@@ -939,6 +1037,9 @@ pub(crate) fn commit_change(
 ) -> Result<VersionRecord, String> {
     let after_snapshot_id = create_scoped_snapshot(app, workspace, prepared.tracked_paths.clone())?;
     let mut history = load_history(app)?;
+    let previous_history = history.clone();
+    let mut state = load_state(app)?;
+    let previous_state = state.clone();
     let file_change = VersionFileChange {
         operation: change.operation,
         primary_path: change.primary_path.clone(),
@@ -980,12 +1081,10 @@ pub(crate) fn commit_change(
     };
 
     history.sort_by_key(|version| version.created_at);
-    save_history(app, &history)?;
-    let mut state = load_state(app)?;
     state
         .current_by_workspace
         .insert(workspace.id.clone(), Some(record.id.clone()));
-    save_state(app, &state)?;
+    save_version_metadata_pair(app, &previous_history, &previous_state, &history, &state)?;
     let _ = app.emit("repotunnel://changes-updated", ());
 
     if let Some(previous) = prepared.previous_before_snapshot_id {
@@ -1153,16 +1252,16 @@ pub(crate) fn clear_workspace_history(
     workspace_id: &str,
 ) -> Result<usize, String> {
     let mut history = load_history(app)?;
+    let previous_history = history.clone();
+    let mut state = load_state(app)?;
+    let previous_state = state.clone();
     let removed_count = history
         .iter()
         .filter(|record| record.workspace_id == workspace_id)
         .count();
     history.retain(|record| record.workspace_id != workspace_id);
-    save_history(app, &history)?;
-
-    let mut state = load_state(app)?;
     state.current_by_workspace.remove(workspace_id);
-    save_state(app, &state)?;
+    save_version_metadata_pair(app, &previous_history, &previous_state, &history, &state)?;
 
     let workspace_snapshots = app_data_path(app, VERSION_DIRECTORY)?.join(workspace_id);
     if workspace_snapshots.exists() {
@@ -1347,15 +1446,13 @@ pub(crate) fn restore_version(
                 if let Some(recovery_snapshot_id) = recovery_snapshot_id.as_deref() {
                     match restore_snapshot(app, workspace, recovery_snapshot_id) {
                         Ok(_) => {
-                            delete_snapshot(app, &workspace.id, recovery_snapshot_id);
                             return Err(format!(
-                                "Version restore failed and RepoTunnel restored the pre-restore source state: {error}"
+                                "Version restore failed and RepoTunnel restored the pre-restore source state: {error}. Pre-restore recovery data was retained."
                             ));
                         }
                         Err(recovery_error) => {
-                            delete_snapshot(app, &workspace.id, recovery_snapshot_id);
                             return Err(format!(
-                                "Version restore failed: {error}. RepoTunnel also could not restore its temporary recovery snapshot: {recovery_error}"
+                                "Version restore failed: {error}. RepoTunnel also could not restore its temporary recovery snapshot: {recovery_error}. Pre-restore recovery data was retained."
                             ));
                         }
                     }
@@ -1364,15 +1461,28 @@ pub(crate) fn restore_version(
             }
         }
     }
-    if let Some(recovery_snapshot_id) = recovery_snapshot_id.as_deref() {
-        delete_snapshot(app, &workspace.id, recovery_snapshot_id);
-    }
-
     let mut state = load_state(app)?;
+    let previous_state = state.clone();
     state
         .current_by_workspace
         .insert(workspace.id.clone(), restored_version_id.clone());
-    save_state(app, &state)?;
+    finalize_restore_state_with(
+        &previous_state,
+        &state,
+        recovery_snapshot_id.is_some(),
+        |state| save_state(app, state),
+        || {
+            let recovery_snapshot_id = recovery_snapshot_id
+                .as_deref()
+                .ok_or_else(|| "No temporary recovery snapshot is available.".to_string())?;
+            restore_snapshot(app, workspace, recovery_snapshot_id).map(|_| ())
+        },
+        || {
+            if let Some(recovery_snapshot_id) = recovery_snapshot_id.as_deref() {
+                delete_snapshot(app, &workspace.id, recovery_snapshot_id);
+            }
+        },
+    )?;
     let _ = app.emit("repotunnel://changes-updated", ());
     Ok(VersionRestoreResult {
         current_version_id: restored_version_id,
@@ -1385,15 +1495,17 @@ pub(crate) fn restore_version(
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::{Cell, RefCell},
         fs::{self, File},
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        capture_live_root, expand_ancestor_closure, read_snapshot_scope, restore_plan,
-        restore_scoped_snapshot, save_json, scope_manifest, should_group_with_current,
-        snapshot_files, SnapshotBudget, SnapshotScope,
+        capture_live_root, expand_ancestor_closure, finalize_restore_state_with,
+        read_snapshot_scope, restore_plan, restore_scoped_snapshot, save_json,
+        save_version_metadata_pair_with, scope_manifest, should_group_with_current, snapshot_files,
+        SnapshotBudget, SnapshotScope, VersionState,
     };
     use crate::models::{
         ChangeOperation, CommandPolicy, VersionFileChange, VersionRecord, Workspace,
@@ -1471,6 +1583,168 @@ mod tests {
             "test version directories",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn restore_cleanup_runs_only_after_pointer_save_succeeds() {
+        let mut previous_state = VersionState::default();
+        previous_state
+            .current_by_workspace
+            .insert("workspace-1".to_string(), Some("version-1".to_string()));
+        let mut next_state = previous_state.clone();
+        next_state
+            .current_by_workspace
+            .insert("workspace-1".to_string(), Some("version-2".to_string()));
+
+        let saved = RefCell::new(Vec::<Option<String>>::new());
+        let recovery_restored = Cell::new(false);
+        let recovery_deleted = Cell::new(false);
+        let result = finalize_restore_state_with(
+            &previous_state,
+            &next_state,
+            true,
+            |state| {
+                saved.borrow_mut().push(
+                    state
+                        .current_by_workspace
+                        .get("workspace-1")
+                        .cloned()
+                        .flatten(),
+                );
+                Ok(())
+            },
+            || {
+                recovery_restored.set(true);
+                Ok(())
+            },
+            || recovery_deleted.set(true),
+        );
+
+        assert!(result.is_ok());
+        assert!(!recovery_restored.get());
+        assert!(recovery_deleted.get());
+        assert_eq!(saved.into_inner(), vec![Some("version-2".to_string())]);
+    }
+
+    #[test]
+    fn pointer_save_failure_rolls_back_and_retains_recovery_data() {
+        let mut previous_state = VersionState::default();
+        previous_state
+            .current_by_workspace
+            .insert("workspace-1".to_string(), Some("version-1".to_string()));
+        let mut next_state = previous_state.clone();
+        next_state
+            .current_by_workspace
+            .insert("workspace-1".to_string(), Some("version-2".to_string()));
+
+        let saved = RefCell::new(Vec::<Option<String>>::new());
+        let save_attempt = Cell::new(0usize);
+        let recovery_restored = Cell::new(false);
+        let recovery_deleted = Cell::new(false);
+        let result = finalize_restore_state_with(
+            &previous_state,
+            &next_state,
+            true,
+            |state| {
+                saved.borrow_mut().push(
+                    state
+                        .current_by_workspace
+                        .get("workspace-1")
+                        .cloned()
+                        .flatten(),
+                );
+                let attempt = save_attempt.get();
+                save_attempt.set(attempt + 1);
+                if attempt == 0 {
+                    Err("simulated pointer save failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                recovery_restored.set(true);
+                Ok(())
+            },
+            || recovery_deleted.set(true),
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.contains("was rolled back"));
+        assert!(error.contains("recovery data was retained"));
+        assert!(recovery_restored.get());
+        assert!(!recovery_deleted.get());
+        assert_eq!(
+            saved.into_inner(),
+            vec![Some("version-2".to_string()), Some("version-1".to_string()),]
+        );
+    }
+
+    #[test]
+    fn metadata_pair_restores_previous_values_when_pointer_save_fails() {
+        let previous_history = vec![record(None)];
+        let mut next_record = record(None);
+        next_record.id = "version-2".to_string();
+        next_record.parent_id = Some("version-1".to_string());
+        let next_history = vec![previous_history[0].clone(), next_record];
+
+        let mut previous_state = VersionState::default();
+        previous_state
+            .current_by_workspace
+            .insert("workspace-1".to_string(), Some("version-1".to_string()));
+        let mut next_state = previous_state.clone();
+        next_state
+            .current_by_workspace
+            .insert("workspace-1".to_string(), Some("version-2".to_string()));
+
+        let history_writes = RefCell::new(Vec::<Vec<String>>::new());
+        let state_writes = RefCell::new(Vec::<Option<String>>::new());
+        let state_attempt = Cell::new(0usize);
+        let result = save_version_metadata_pair_with(
+            &previous_history,
+            &previous_state,
+            &next_history,
+            &next_state,
+            |history| {
+                history_writes.borrow_mut().push(
+                    history
+                        .iter()
+                        .map(|record| record.id.clone())
+                        .collect::<Vec<_>>(),
+                );
+                Ok(())
+            },
+            |state| {
+                state_writes.borrow_mut().push(
+                    state
+                        .current_by_workspace
+                        .get("workspace-1")
+                        .cloned()
+                        .flatten(),
+                );
+                let attempt = state_attempt.get();
+                state_attempt.set(attempt + 1);
+                if attempt == 0 {
+                    Err("simulated pointer write failure".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        assert!(result
+            .unwrap_err()
+            .contains("restored the previous version metadata"));
+        assert_eq!(
+            history_writes.into_inner(),
+            vec![
+                vec!["version-1".to_string(), "version-2".to_string()],
+                vec!["version-1".to_string()],
+            ]
+        );
+        assert_eq!(
+            state_writes.into_inner(),
+            vec![Some("version-2".to_string()), Some("version-1".to_string()),]
+        );
     }
 
     #[test]

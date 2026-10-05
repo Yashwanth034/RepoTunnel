@@ -16,7 +16,7 @@ use crate::{
         ActivityGroup, ActivityKind, ActivityStatus, ManagedProcessRecord, ManagedProcessStatus,
         ProjectMemory, Workspace,
     },
-    monitoring, project_memory, secret_guard, terminal,
+    project_memory, secret_guard, terminal,
 };
 
 const CONTINUITY_FILE: &str = "continuity.json";
@@ -718,10 +718,9 @@ pub(crate) fn resume_snapshot(
 ) -> Result<ResumeSnapshot, String> {
     let memory = project_memory::get(app, workspace)?;
     let git_status = git::repository_status(workspace);
-    let mut observation = monitoring::snapshot(app, workspace)?;
-    observation
-        .processes
-        .sort_by_key(|process| std::cmp::Reverse(process.updated_at));
+    let mut process_history =
+        terminal::list_processes(app, Some(&workspace.id), 100).unwrap_or_default();
+    process_history.sort_by_key(|process| std::cmp::Reverse(process.updated_at));
     let activity_timeline = activity::timeline(app, Some(&workspace.id))?;
     capture_activity_groups(app, &activity_timeline.groups);
 
@@ -729,14 +728,12 @@ pub(crate) fn resume_snapshot(
 
     let mut active = Vec::new();
     let mut completed = Vec::new();
-    let process_history =
-        terminal::list_processes(app, Some(&workspace.id), 100).unwrap_or_default();
     let failed = unresolved_failure_summaries(&activity_timeline.groups, &process_history);
     let mut active_seen = BTreeSet::new();
     let mut completed_seen = BTreeSet::new();
     let attention_required = !failed.is_empty();
 
-    for process in &observation.processes {
+    for process in &process_history {
         if matches!(
             process.status,
             ManagedProcessStatus::Pending | ManagedProcessStatus::Running

@@ -9,14 +9,16 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 use crate::{
     access::{resolve_workspace_path, AccessOperation},
-    changes,
+    changes, github,
     models::{
         ChangeOutcome, GitActionKind, GitActionRecord, GitActionStatus, GitCommitSummary, GitDiff,
-        GitFileChange, GitRepositoryStatus, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy,
+        GitDiffCheck, GitDiffCheckIssue, GitDiffStats, GitFileChange, GitRepositoryStatus,
+        Workspace, WorkspaceAccessMode, WorkspaceChangePolicy,
     },
     secret_guard,
     storage::load_workspaces,
@@ -26,6 +28,8 @@ const ACTION_HISTORY_FILE: &str = "git-history.json";
 const ACTION_REQUEST_DIRECTORY: &str = "git-requests";
 const MAX_HISTORY: usize = 200;
 const MAX_DIFF_BYTES: usize = 256 * 1024;
+const MAX_DIFF_SUMMARY_PATHS: usize = 100;
+const MAX_DIFF_CHECK_ISSUES: usize = 200;
 const MAX_COMMIT_MESSAGE_BYTES: usize = 5 * 1024;
 static ACTION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -508,6 +512,83 @@ fn diff_paths(workspace: &Workspace, staged: bool) -> Result<(Vec<String>, usize
     Ok((safe, blocked))
 }
 
+pub(crate) fn diff_stats(workspace: &Workspace, staged: bool) -> Result<GitDiffStats, String> {
+    workspace_root(workspace)?;
+    let (paths, blocked_path_count) = diff_paths(workspace, staged)?;
+    let changed_path_count = paths.len();
+    let paths_truncated = changed_path_count > MAX_DIFF_SUMMARY_PATHS;
+    let summary_paths = paths
+        .iter()
+        .take(MAX_DIFF_SUMMARY_PATHS)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if paths.is_empty() {
+        return Ok(GitDiffStats {
+            staged,
+            changed_path_count,
+            paths: summary_paths,
+            paths_truncated,
+            insertions: 0,
+            deletions: 0,
+            binary_path_count: 0,
+            blocked_path_count,
+        });
+    }
+
+    let mut command = base_git_command(workspace)?;
+    command.arg("diff");
+    if staged {
+        command.arg("--cached");
+    }
+    command.args(["--numstat", "--no-ext-diff", "--no-textconv", "--"]);
+    for path in &paths {
+        command.arg(path);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not start Git diff summary: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "Git could not produce the diff summary.".to_string()
+        } else {
+            format!("Git could not produce the diff summary: {detail}")
+        });
+    }
+
+    let mut insertions = 0usize;
+    let mut deletions = 0usize;
+    let mut binary_path_count = 0usize;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.splitn(3, '\t');
+        let added = fields.next().unwrap_or("");
+        let deleted = fields.next().unwrap_or("");
+        let _path = fields.next();
+        match (added.parse::<usize>(), deleted.parse::<usize>()) {
+            (Ok(added), Ok(deleted)) => {
+                insertions = insertions.saturating_add(added);
+                deletions = deletions.saturating_add(deleted);
+            }
+            _ if added == "-" || deleted == "-" => {
+                binary_path_count = binary_path_count.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(GitDiffStats {
+        staged,
+        changed_path_count,
+        paths: summary_paths,
+        paths_truncated,
+        insertions,
+        deletions,
+        binary_path_count,
+        blocked_path_count,
+    })
+}
+
 pub(crate) fn diff(workspace: &Workspace, staged: bool) -> Result<GitDiff, String> {
     workspace_root(workspace)?;
     let (paths, _) = diff_paths(workspace, staged)?;
@@ -543,6 +624,106 @@ pub(crate) fn diff(workspace: &Workspace, staged: bool) -> Result<GitDiff, Strin
         staged,
         content: secret_guard::redact_text(&content),
         truncated,
+    })
+}
+
+fn parse_diff_check_issues(content: &str) -> Vec<GitDiffCheckIssue> {
+    let mut issues = Vec::new();
+    let mut pending_context: Option<usize> = None;
+
+    for raw_line in content.lines() {
+        if issues.len() >= MAX_DIFF_CHECK_ISSUES {
+            break;
+        }
+
+        if let Some((location, message)) = raw_line.rsplit_once(": ") {
+            if let Some((path, line_text)) = location.rsplit_once(':') {
+                if let Ok(line) = line_text.parse::<usize>() {
+                    issues.push(GitDiffCheckIssue {
+                        path: path.to_string(),
+                        line: Some(line),
+                        message: secret_guard::redact_text(message),
+                        context: None,
+                    });
+                    pending_context = Some(issues.len() - 1);
+                    continue;
+                }
+            }
+        }
+
+        if let Some(index) = pending_context.take() {
+            let context = raw_line.strip_prefix('+').unwrap_or(raw_line);
+            if !context.is_empty() {
+                issues[index].context = Some(secret_guard::redact_text(context));
+            }
+        }
+    }
+
+    issues
+}
+
+pub(crate) fn diff_check(workspace: &Workspace, staged: bool) -> Result<GitDiffCheck, String> {
+    workspace_root(workspace)?;
+    let (paths, _) = diff_paths(workspace, staged)?;
+    if paths.is_empty() {
+        return Ok(GitDiffCheck {
+            staged,
+            passed: true,
+            issue_count: 0,
+            issues: Vec::new(),
+            truncated: false,
+        });
+    }
+
+    let mut command = base_git_command(workspace)?;
+    command.arg("diff");
+    if staged {
+        command.arg("--cached");
+    }
+    command.args(["--check", "--no-ext-diff", "--no-textconv", "--"]);
+    for path in &paths {
+        command.arg(path);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not start Git diff check: {error}"))?;
+    let mut raw = output.stdout;
+    if !output.stderr.is_empty() {
+        if !raw.is_empty() && !raw.ends_with(b"\n") {
+            raw.push(b'\n');
+        }
+        raw.extend_from_slice(&output.stderr);
+    }
+    let (content, truncated) = limit_text(raw);
+    let issues = parse_diff_check_issues(&content);
+    let issue_count = issues.len();
+
+    if output.status.success() {
+        return Ok(GitDiffCheck {
+            staged,
+            passed: true,
+            issue_count,
+            issues,
+            truncated,
+        });
+    }
+
+    if issue_count > 0 {
+        return Ok(GitDiffCheck {
+            staged,
+            passed: false,
+            issue_count,
+            issues,
+            truncated,
+        });
+    }
+
+    let detail = secret_guard::redact_text(content.trim());
+    Err(if detail.is_empty() {
+        "Git diff check failed without reporting a whitespace/conflict-marker issue.".to_string()
+    } else {
+        format!("Git diff check could not complete: {detail}")
     })
 }
 
@@ -744,9 +925,11 @@ pub(crate) fn validate_ai_terminal_git_command(
     {
         return Err("Use RepoTunnel's dedicated Git stage/commit tools instead of raw git add/git commit. This keeps AI Auto behavior auditable and ensures the secret guard runs before Git history changes.".to_string());
     }
-    if normalized.contains("git push") {
+    let github_repo_create_push = normalized.contains("gh repo create")
+        && normalized.split_whitespace().any(|part| part == "--push");
+    if normalized.contains("git push") || github_repo_create_push {
         if !user_requested_push {
-            return Err("Git push is blocked until the user explicitly asks for the current work to be pushed. AI Auto removes approval popups; it does not grant standing permission to publish changes to a remote repository.".to_string());
+            return Err("Publishing local commits is blocked until the user explicitly asks for the current work to be pushed. AI Auto removes approval popups; it does not grant standing permission to publish changes to a remote repository.".to_string());
         }
         preflight_ai_push(workspace)?;
     }
@@ -777,6 +960,88 @@ pub(crate) fn preflight_ai_push(workspace: &Workspace) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub(crate) fn push(
+    workspace: &Workspace,
+    remote: Option<String>,
+    branch: Option<String>,
+    set_upstream: bool,
+    force_with_lease: bool,
+) -> Result<Value, String> {
+    if workspace.access_mode != WorkspaceAccessMode::ReadWrite {
+        return Err(
+            "This project is read-only. Git push is disabled until read/write access is enabled."
+                .to_string(),
+        );
+    }
+    workspace_root(workspace)?;
+    preflight_ai_push(workspace)?;
+
+    let remote = remote
+        .unwrap_or_else(|| "origin".to_string())
+        .trim()
+        .to_string();
+    if remote.is_empty() || remote.starts_with('-') || remote.chars().any(char::is_whitespace) {
+        return Err("Git remote name is invalid.".to_string());
+    }
+    let remotes = run_git(workspace, &["remote"])?;
+    if !remotes.status.success() {
+        return Err("RepoTunnel could not inspect Git remotes before push.".to_string());
+    }
+    let known_remote = String::from_utf8_lossy(&remotes.stdout)
+        .lines()
+        .any(|candidate| candidate.trim() == remote);
+    if !known_remote {
+        return Err(format!(
+            "Git remote '{remote}' does not exist in this repository."
+        ));
+    }
+
+    let branch = match branch {
+        Some(value) => value.trim().to_string(),
+        None => branch_name(workspace)?
+            .0
+            .ok_or_else(|| "Git push requires a named branch; HEAD is detached.".to_string())?,
+    };
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err("Git branch name is invalid.".to_string());
+    }
+    let branch_check = run_git(workspace, &["check-ref-format", "--branch", &branch])?;
+    if !branch_check.status.success() {
+        return Err(format!("Git branch name '{branch}' is invalid."));
+    }
+
+    let mut command = base_git_command(workspace)?;
+    github::configure_cli_command(&mut command);
+    command.arg("push");
+    if set_upstream {
+        command.arg("--set-upstream");
+    }
+    if force_with_lease {
+        command.arg("--force-with-lease");
+    }
+    command.arg(&remote).arg(&branch);
+    let output = command
+        .output()
+        .map_err(|error| format!("Could not start Git push: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "Git push failed.".to_string()
+        } else {
+            format!("Git push failed: {detail}")
+        });
+    }
+
+    Ok(json!({
+        "pushed": true,
+        "remote": remote,
+        "branch": branch,
+        "setUpstream": set_upstream,
+        "forceWithLease": force_with_lease,
+        "output": String::from_utf8_lossy(&output.stderr).trim(),
+    }))
 }
 
 pub(crate) fn request_stage(
@@ -1162,5 +1427,177 @@ mod tests {
     #[test]
     fn git_action_ids_are_distinct() {
         assert_ne!(new_action_id(), new_action_id());
+    }
+
+    #[test]
+    fn diff_check_parser_returns_file_line_message_and_context() {
+        let issues = parse_diff_check_issues(
+            "src/app.rs:12: trailing whitespace.\n+let value = 2;   \nsrc/lib.rs:9: leftover conflict marker\n+<<<<<<< ours\n",
+        );
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].path, "src/app.rs");
+        assert_eq!(issues[0].line, Some(12));
+        assert_eq!(issues[0].message, "trailing whitespace.");
+        assert_eq!(issues[0].context.as_deref(), Some("let value = 2;   "));
+        assert_eq!(issues[1].path, "src/lib.rs");
+        assert_eq!(issues[1].line, Some(9));
+        assert_eq!(issues[1].message, "leftover conflict marker");
+        assert_eq!(issues[1].context.as_deref(), Some("<<<<<<< ours"));
+    }
+
+    #[test]
+    fn native_diff_check_detects_whitespace_without_shell_git_access() {
+        if git_binary().is_err() {
+            return;
+        }
+        let nonce = now_millis();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-git-diff-check-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create temp repository");
+        let git = git_binary().expect("git binary");
+
+        let run = |args: &[&str]| {
+            let output = Command::new(&git)
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        fs::write(root.join("sample.txt"), "clean\n").expect("write baseline");
+        run(&["add", "--", "sample.txt"]);
+        run(&[
+            "-c",
+            "user.name=RepoTunnel Test",
+            "-c",
+            "user.email=repotunnel@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ]);
+        fs::write(root.join("sample.txt"), "bad whitespace   \n").expect("write dirty file");
+
+        let workspace = Workspace {
+            id: "git-diff-check-test".to_string(),
+            name: "git-diff-check-test".to_string(),
+            path: root.to_string_lossy().into_owned(),
+            added_at: 0,
+            access_mode: WorkspaceAccessMode::ReadWrite,
+            change_policy: WorkspaceChangePolicy::Automatic,
+            command_policy: crate::models::CommandPolicy::Automatic,
+        };
+        let check = diff_check(&workspace, false).expect("native diff check");
+        assert!(!check.passed);
+        assert_eq!(check.issue_count, 1);
+        assert_eq!(check.issues[0].path, "sample.txt");
+        assert_eq!(check.issues[0].line, Some(1));
+        assert!(check.issues[0].message.contains("trailing whitespace"));
+
+        let stats = diff_stats(&workspace, false).expect("native diff summary");
+        assert_eq!(stats.changed_path_count, 1);
+        assert_eq!(stats.paths, vec!["sample.txt".to_string()]);
+        assert!(!stats.paths_truncated);
+        assert_eq!(stats.insertions, 1);
+        assert_eq!(stats.deletions, 1);
+        assert_eq!(stats.binary_path_count, 0);
+        assert_eq!(stats.blocked_path_count, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_git_push_publishes_current_branch_without_exposing_credentials() {
+        if git_binary().is_err() {
+            return;
+        }
+        let nonce = now_millis();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-git-push-{}-{nonce}",
+            std::process::id()
+        ));
+        let remote = std::env::temp_dir().join(format!(
+            "repotunnel-git-push-remote-{}-{nonce}.git",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create temp repository");
+        let git = git_binary().expect("git binary");
+
+        let run = |cwd: &Path, args: &[&str]| {
+            let output = Command::new(&git)
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&root, &["init", "-q", "-b", "main"]);
+        fs::write(root.join("sample.txt"), "safe content\n").expect("write baseline");
+        run(&root, &["add", "--", "sample.txt"]);
+        run(
+            &root,
+            &[
+                "-c",
+                "user.name=RepoTunnel Test",
+                "-c",
+                "user.email=repotunnel@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "baseline",
+            ],
+        );
+        run(
+            std::env::temp_dir().as_path(),
+            &["init", "--bare", "-q", remote.to_string_lossy().as_ref()],
+        );
+        run(
+            &root,
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+
+        let workspace = Workspace {
+            id: "git-push-test".to_string(),
+            name: "git-push-test".to_string(),
+            path: root.to_string_lossy().into_owned(),
+            added_at: 0,
+            access_mode: WorkspaceAccessMode::ReadWrite,
+            change_policy: WorkspaceChangePolicy::Automatic,
+            command_policy: crate::models::CommandPolicy::Automatic,
+        };
+        let result = push(&workspace, None, None, true, false).expect("native push");
+        assert_eq!(result.get("pushed").and_then(Value::as_bool), Some(true));
+
+        let verify = Command::new(&git)
+            .args([
+                "--git-dir",
+                remote.to_string_lossy().as_ref(),
+                "rev-parse",
+                "--verify",
+                "refs/heads/main",
+            ])
+            .output()
+            .expect("verify remote branch");
+        assert!(
+            verify.status.success(),
+            "remote branch missing: {}",
+            String::from_utf8_lossy(&verify.stderr)
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(remote);
     }
 }

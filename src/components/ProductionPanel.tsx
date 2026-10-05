@@ -15,12 +15,10 @@ import type { HistorySettings, RuntimeDiagnostics, UpdateStatus } from "../types
 type ProductionPanelProps = {
   onError: (message: string) => void;
   onNotice: (message: string) => void;
-  uiScale: number;
-  onUiScaleChange: (scale: number) => void;
   hasUnsavedChanges: boolean;
 };
 
-function ProductionPanel({ onError, onNotice, uiScale, onUiScaleChange, hasUnsavedChanges }: ProductionPanelProps) {
+function ProductionPanel({ onError, onNotice, hasUnsavedChanges }: ProductionPanelProps) {
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [historySettings, setHistorySettings] = useState<HistorySettings | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
@@ -278,29 +276,6 @@ function ProductionPanel({ onError, onNotice, uiScale, onUiScaleChange, hasUnsav
               <small>Updates never replace your RepoTunnel data directory, approved projects, connection settings, History, or checkpoints.</small>
             </div>
           ) : null}
-
-          <div className="interface-settings">
-            <div className="history-retention-heading">
-              <div>
-                <strong>Interface</strong>
-                <span>Scale the entire RepoTunnel desktop UI independently from Linux or Windows display scaling.</span>
-              </div>
-              <span className="interface-scale-value">{uiScale}%</span>
-            </div>
-            <div className="interface-scale-controls">
-              {[100, 110, 125, 140, 150].map((scale) => (
-                <button
-                  type="button"
-                  key={scale}
-                  className={uiScale === scale ? "active" : ""}
-                  onClick={() => onUiScaleChange(scale)}
-                >
-                  {scale}%
-                </button>
-              ))}
-            </div>
-            <small>Shortcuts: Ctrl + + / Ctrl + - to scale, Ctrl + 0 to reset. Your choice is remembered after restart.</small>
-          </div>
 
           {historySettings ? (
             <div className="history-retention-settings">

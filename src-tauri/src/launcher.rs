@@ -302,6 +302,96 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         supports_paths: true,
     },
     CatalogApplication {
+        id: "krita",
+        name: "Krita",
+        category: "image editor",
+        executables: &[
+            "krita",
+            "krita.exe",
+            "/snap/bin/krita",
+            "/Applications/krita.app/Contents/MacOS/krita",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "inkscape",
+        name: "Inkscape",
+        category: "vector graphics",
+        executables: &[
+            "inkscape",
+            "inkscape.exe",
+            "/snap/bin/inkscape",
+            "/Applications/Inkscape.app/Contents/MacOS/inkscape",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "kdenlive",
+        name: "Kdenlive",
+        category: "video editor",
+        executables: &[
+            "kdenlive",
+            "kdenlive.exe",
+            "/snap/bin/kdenlive",
+            "/Applications/kdenlive.app/Contents/MacOS/kdenlive",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "audacity",
+        name: "Audacity",
+        category: "audio editor",
+        executables: &[
+            "audacity",
+            "Audacity.exe",
+            "/snap/bin/audacity",
+            "/Applications/Audacity.app/Contents/MacOS/Audacity",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "opentoonz",
+        name: "OpenToonz",
+        category: "2D animation",
+        executables: &[
+            "opentoonz",
+            "OpenToonz",
+            "OpenToonz.exe",
+            "/Applications/OpenToonz.app/Contents/MacOS/OpenToonz",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "synfig",
+        name: "Synfig Studio",
+        category: "2D animation",
+        executables: &[
+            "synfigstudio",
+            "synfigstudio.exe",
+            "/Applications/SynfigStudio.app/Contents/MacOS/SynfigStudio",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
+        id: "davinci-resolve",
+        name: "DaVinci Resolve",
+        category: "video editor",
+        executables: &[
+            "resolve",
+            "/opt/resolve/bin/resolve",
+            "Resolve.exe",
+            "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve",
+        ],
+        supports_urls: false,
+        supports_paths: true,
+    },
+    CatalogApplication {
         id: "docker",
         name: "Docker",
         category: "development",
@@ -622,6 +712,48 @@ fn spawn_detached(executable: &Path, args: &[String]) -> Result<u32, String> {
     Ok(pid)
 }
 
+#[allow(clippy::needless_return)]
+pub(crate) fn stop_ai_launched_pid(pid: u32) -> Result<(), String> {
+    if pid <= 1 {
+        return Err("Refusing to stop an invalid application PID.".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        let pid = i32::try_from(pid)
+            .map_err(|_| "Application PID is outside the supported range.".to_string())?;
+        let result = unsafe { libc::kill(-pid, libc::SIGTERM) };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        return Err(format!("Could not stop AI-launched application: {error}"));
+    }
+
+    #[cfg(windows)]
+    {
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("Could not request application shutdown: {error}"))?;
+        if status.success() {
+            return Ok(());
+        }
+        return Err("Windows could not stop the AI-launched application.".to_string());
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err("Application cleanup is not implemented on this platform.".to_string())
+    }
+}
+
 fn validate_url(value: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -641,6 +773,32 @@ fn validate_url(value: &str) -> Result<String, String> {
         return Err("The URL must include a host.".to_string());
     }
     Ok(parsed.to_string())
+}
+
+pub(crate) fn open_default_url_now(value: &str) -> Result<(), String> {
+    let url = validate_url(value)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let executable = PathBuf::from("explorer.exe");
+        return spawn_detached(&executable, &[url]).map(|_| ());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let executable = PathBuf::from("/usr/bin/open");
+        return spawn_detached(&executable, &[url]).map(|_| ());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let (executable, mut args) = default_opener()?;
+        args.push(url);
+        return spawn_detached(&executable, &args).map(|_| ());
+    }
+
+    #[allow(unreachable_code)]
+    Err("Opening a default browser is not supported on this platform.".to_string())
 }
 
 fn validate_relative_target(value: &str) -> Result<String, String> {

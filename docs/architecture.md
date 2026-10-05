@@ -2,34 +2,36 @@
 
 ## Overview
 
-RepoTunnel separates the user interface, local MCP transport, trusted filesystem operations, and workspace policy.
+RepoTunnel separates remote transport, OAuth/MCP serving, the desktop UI, trusted local operations, and per-resource policy.
 
 ```text
-ChatGPT / AI client
+ChatGPT / MCP-compatible AI client
    |
-   | OpenAI-hosted MCP tunnel endpoint
+   | HTTPS + OAuth where applicable
    v
-OpenAI Secure MCP Tunnel
-   ^
-   | outbound HTTPS
+ngrok / Cloudflare / Direct HTTPS / optional OpenAI Secure MCP Tunnel
    |
-tunnel-client on the local machine
+   v
+RepoTunnel authenticated MCP boundary
    |
-   | MCP Streamable HTTP over loopback
    v
 Loopback MCP gateway
    |
    v
-MCP tool router
+MCP capability router
    |
-   v
-Workspace registry + access policy
+   +----> Workspace registry + access guard
+   |         +----> Safe editing/versioning ----> Approved repository
+   |         +----> Large-project reads/index ----> Approved repository
+   |         +----> Sandboxed verification ----> Disposable project copy
+   |         +----> Live terminal/process supervisor ----> Approved repository
+   |         +----> Git/GitHub manager ----> Approved repository metadata
    |
-   +----> Safe-editing / change manager ----> Local filesystem engine ----> Approved repository
-   |
-   +----> Command policy / preset manager ----> Native OS sandbox ----> Disposable project copy
-   |
-   +----> Git manager ----> Approved repository .git metadata
+   +----> Managed browser runtime
+   +----> Desktop / isolated AI Workspace
+   +----> Android Phone runtime + capability broker
+   +----> Video Intelligence / Video Production
+   +----> Team Mode / Continuity / Project Memory
 ```
 
 ## Desktop application
@@ -37,11 +39,12 @@ Workspace registry + access policy
 The Tauri desktop application is responsible for:
 
 - native workspace selection
-- gateway lifecycle and connection status
-- permission management
-- change review, diff, history, and undo surfaces
-- Git status, diff, staging, commit-review, and history surfaces
-- security and diagnostic information
+- gateway/provider lifecycle and connection status
+- workspace, Desktop, Phone, and AI-mode permission surfaces
+- change review, version history, checkpoints, and undo/restore surfaces
+- Git/GitHub status and validated repository workflows
+- managed browser, AI Workspace, Video, Team Mode, Phone, and system settings surfaces
+- security, diagnostics, update, and continuity information
 
 React and TypeScript are used for the interface. Rust owns privileged local operations, MCP serving, and persistent workspace metadata.
 
@@ -76,7 +79,7 @@ The MCP transport is stateless for legacy protocol versions as well as the curre
 
 ## MCP server
 
-`src-tauri/src/mcp_server.rs` registers focused tools for workspace discovery and filesystem operations.
+`src-tauri/src/mcp_server.rs` registers the capability-oriented MCP surface for approved project, terminal/process, Git/GitHub, browser, desktop/AI Workspace, Video, Phone, Team Mode, media/temp-workspace, and continuity workflows. It does not turn those subsystems into unrestricted host APIs.
 
 The protocol layer does not implement filesystem access itself. Every tool:
 
@@ -97,9 +100,11 @@ Both Tauri commands and MCP tools must pass through this guard before touching p
 
 ## Project intelligence
 
-`src-tauri/src/project_index.rs` builds the code-focused view used by the desktop project overview and MCP `inspect_project` tool. It applies nested `.gitignore` / `.ignore` rules, skips generated dependency/build directories, excludes symlink traversal, classifies likely binary and oversized files, detects common source languages and manifests, and caps returned tree size.
+`src-tauri/src/project_index.rs` builds the code-focused project view. It applies nested `.gitignore` / `.ignore` rules, skips generated dependency/build directories, excludes symlink traversal, classifies likely binary and oversized files, and detects common source languages/manifests.
 
-Broad text search reuses the same smart traversal instead of independently walking every file. The project index is a relevance/performance layer; `src-tauri/src/access.rs` remains the security boundary for every candidate path.
+`src-tauri/src/large_project_read.rs` adds resumable, bounded access for projects that are too large for one response. It backs paged project inspection, paged directory listing, large text range reads, and incremental file search with cursors. Shared heavy-read gating prevents overlapping scans from overwhelming the process, and changed file/search state invalidates stale cursors.
+
+Legacy bounded project/search tools continue to reuse the same smart traversal. The index/read layers are relevance/performance mechanisms; `src-tauri/src/access.rs` remains the security boundary for every candidate path.
 
 
 ## Filesystem engine
@@ -127,6 +132,53 @@ Before execution RepoTunnel verifies that the native sandbox for the current OS 
 
 Pending command requests are fingerprinted and revalidated before local approval. MCP can request and inspect commands but cannot approve or reject its own pending execution.
 
+## Live terminal and managed-process layer
+
+`src-tauri/src/terminal.rs` owns real-workspace AI terminal commands and durable managed jobs. This path is separate from disposable verification presets.
+
+One-shot commands and managed processes run through the platform's fail-closed AI sandbox, with sanitized environments and bounded/redacted output. Managed jobs have stable RepoTunnel IDs, persisted status/log metadata, incremental output reads, stop/restart support, and bounded literal output waiting through `wait_process`.
+
+The durable supervisor survives ordinary MCP/UI reconnects. On Linux it also survives a complete RepoTunnel process restart: shutdown detaches the independent supervisor, startup reloads its persisted state, verifies the live managed child using Linux process identity, and re-adopts the existing process record/logs. The public capability remains false on Windows/macOS until equivalent recovered-process identity/control is implemented and validated natively.
+
+## Managed browser and semantic interaction
+
+`src-tauri/src/browser.rs` owns the managed Chromium-family runtime. RepoTunnel maintains isolated/persistent browser profiles according to the selected workflow, tracks tabs/downloads/network metadata, and returns an atomic navigation receipt that binds observation to the intended document generation.
+
+The shared semantic layer turns browser and supported desktop accessibility trees into short-lived `eN` references. Mutations revalidate the reference/action/sensitive-field policy.
+
+Selector and semantic click/type mutations (plus semantic sequences) now create a pre-dispatch mutation ID and persist a bounded mutation receipt with helper acknowledgement, redacted before/after URL, before/after document generation, and whether the document changed. If helper transport is lost after dispatch, RepoTunnel reconnects the helper for observation but **does not replay the mutation**; the browser action is persisted as `ambiguous` so a later AI can inspect current state instead of duplicating a potentially completed action.
+
+## Desktop and AI Workspace
+
+RepoTunnel's Desktop layer exposes explicit user-permitted application control and blocks control of RepoTunnel itself. Linux uses AT-SPI; Windows UIA and macOS AX adapters exist behind the same abstraction and require native-platform validation before native-runtime claims.
+
+AI Workspace provides an isolated virtual desktop with per-application ownership/session controls so multiple AI-owned app sessions can coexist without taking over the user's ordinary desktop.
+
+## Android Phone Access
+
+`src-tauri/src/phone.rs` owns Phone discovery, transport selection, the persistent live video/control runtime, central Off/Limited/Full capability enforcement, files/apps/settings/shell/log/network operations, and semantic Phone Helper integration.
+
+The AI-facing target is an opaque selected device identity. Wireless ADB is preferred with authorized USB fallback for the same device. Payment-sensitive foreground apps keep the helper Accessibility service enabled but block AI observation/control until the user leaves the app.
+
+## Video Intelligence
+
+`src-tauri/src/video.rs` owns optional media understanding as a separate product capability. It accepts public HTTP/HTTPS media URLs and workspace-relative local media, prefers existing captions, extracts bounded smart visual frames when needed, and prepares compact audio only when captions are unavailable. Work runs as cancellable background jobs so media processing never blocks the MCP gateway or desktop UI.
+
+RepoTunnel reuses host `yt-dlp` and `ffmpeg` when present. Missing helpers can be provisioned privately under application data with HTTPS, fixed trusted download hosts, published SHA-256 verification, private file permissions, and no PATH/admin changes. Video results are cached under a bounded application-data cache; no media artifacts are written into the user's project.
+
+MCP receives transcript text plus actual image/audio content for model grounding. Video Intelligence never interprets media instructions as execution authorization: installs, edits, browser actions, Git operations and desktop actions continue through their existing policy/security layers.
+
+## Video Production
+
+Video Production persists durable Video Projects with script/storyboard/scene/timeline state, recordings, generated assets, narration/subtitles, previews/renders, QA evidence, and license provenance. Rendering runs as durable jobs with content-state deduplication and final QA gates.
+
+Tutorial/explainer generation can use deterministic HTML/CSS/GSAP frame capture or the native renderer. Story-animation routing can use RepoTunnel's native motion pipeline and supported installed engines such as Godot/Blender/Rhubarb without making those external engines mandatory.
+
+## Team Mode and continuity
+
+Team Mode stores persistent two-engineer coordination outside the project and enforces task ownership, path claims, cross-review, and evidence-based completion.
+
+Continuity/Resume v2, factual activity history, Project Memory, and MCP App self-continuation provide recovery context without treating stale saved intent as current fact or claiming that RepoTunnel can detect every external chat interruption.
 
 ## Git integration layer
 
@@ -140,17 +192,22 @@ Restore-to-HEAD is intentionally narrower than unrestricted `git restore`: RepoT
 
 Remote push remains separate from in-project autonomy. It requires a current explicit human push instruction, performs a final committed-tree secret preflight, and uses a narrowly parsed normal push path with local hooks disabled.
 
-## ChatGPT connection layer
+## Remote connection layer
 
-`src-tauri/src/connection.rs` manages the optional OpenAI Secure MCP Tunnel runtime used for ChatGPT connectivity. RepoTunnel detects the official `tunnel-client`, starts it as a child process, points it at the current loopback `/mcp` endpoint, monitors its readiness, and terminates it when the user disconnects or the local gateway stops.
+RepoTunnel's raw MCP gateway remains private to the machine. Remote access is a separate transport/authentication layer rather than a reason to weaken the local Host/path/workspace boundary.
 
-The Runtime API key is supplied to the child process through `CONTROL_PLANE_API_KEY`; it is never persisted by RepoTunnel and is never placed in process arguments. The tunnel ID is validated against the OpenAI tunnel identifier format before launch.
+Current provider paths include:
 
-`tunnel-client` receives an ephemeral loopback health listener and health URL file. RepoTunnel uses the official `tunnel-client health --url-file` probe instead of treating a launched process as proof of readiness.
+- managed ngrok through the Rust SDK
+- Cloudflare Tunnel through a user-configured `cloudflared` runtime
+- Direct HTTPS through RepoTunnel's TLS/ACME reverse-proxy path
+- the optional official OpenAI Secure MCP Tunnel integration
 
-## Remote connection boundary
+Public MCP paths use RepoTunnel's OAuth boundary where applicable, including dynamic-client/PKCE validation. Provider credentials and authorization state are kept outside project repositories and are never exposed as general AI tool inputs.
 
-The local MCP listener remains intentionally private. `tunnel-client` initiates outbound HTTPS to the OpenAI tunnel service, so ChatGPT connectivity does not require RepoTunnel to bind to `0.0.0.0`, open an inbound firewall port, or publish the local MCP URL.
+`src-tauri/src/connection.rs` retains the optional OpenAI `tunnel-client` runtime. Its Runtime API key is supplied through `CONTROL_PLANE_API_KEY`, never persisted by RepoTunnel, and never placed in process arguments. Tunnel readiness is determined through the official health mechanism rather than assuming a launched process is connected.
+
+Direct HTTPS and Cloudflare use RepoTunnel's stable local origin path; Direct HTTPS exposes only the intended MCP/OAuth/health/certificate routes and strips client-controlled forwarding headers before proxying to the trusted local origin.
 
 
 ## Workflow readiness

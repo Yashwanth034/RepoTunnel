@@ -45,3 +45,10 @@ id_ed25519
 .direct-host-certbot-prod/
 .direct-live-acme/
 .well-known/
+
+# Local RepoTunnel Phone helper signing material (never commit)
+.repotunnel-tmp/phone-helper-release-signing/
+
+# RepoTunnel-owned local runtime/test state (never commit)
+.repotunnel-tmp/
+.repotunnel_android_home/

@@ -1025,27 +1025,10 @@ pub(crate) fn assert_browser_mutation_available(
                 .to_string()
         })?;
     binding.last_seen_at = now;
-    let agent_id = binding.agent_id.clone();
-    let owns_browser = session.locks.iter().any(|lock| {
-        lock.expires_at > now && lock.path == BROWSER_RESOURCE_LOCK && lock.agent_id == agent_id
-    });
-    if owns_browser {
-        return Ok(());
-    }
-    if let Some(lock) = session
-        .locks
-        .iter()
-        .find(|lock| lock.expires_at > now && lock.path == BROWSER_RESOURCE_LOCK)
-    {
-        let owner = session
-            .agents
-            .iter()
-            .find(|agent| agent.id == lock.agent_id)
-            .map(|agent| agent.name.as_str())
-            .unwrap_or("the other engineer");
-        return Err(format!("Interactive browser testing is currently owned by {owner}. Do not click/type in the shared browser at the same time. Wait for that engineer to release @browser, then claim it with team_action lock_paths paths=['@browser']. Read-only browser inspection/diagnostics can continue meanwhile."));
-    }
-    Err("Before interactive browser testing, claim the shared browser lease with team_action lock_paths paths=['@browser'] (task_id may be omitted). Release @browser when you finish so the other engineer can verify without colliding in the same tab.".to_string())
+    // Browser automation is isolated per AI session. Team Mode still enforces
+    // planning/paused state and file ownership, but interactive browser work no
+    // longer needs the legacy shared @browser mutex.
+    Ok(())
 }
 
 pub(crate) fn join_agent(

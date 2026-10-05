@@ -645,6 +645,80 @@ def type_text(entry, encoded, text, clear_first):
     return f"Entered {len(text)} characters into a verified non-sensitive field."
 
 
+def semantic_sequence(entry, steps):
+    if not isinstance(steps, list) or not 1 <= len(steps) <= 64:
+        raise RuntimeError("Desktop semantic sequence requires 1..64 steps.")
+
+    started = time.monotonic()
+    total_wait_ms = 0
+    total_text_bytes = 0
+    completed = 0
+    results = []
+
+    for index, step in enumerate(steps):
+        if time.monotonic() - started > 20.0:
+            raise RuntimeError(
+                f"SEQUENCE_TIMEOUT: Desktop semantic sequence exceeded 20000 ms before step {index + 1}."
+            )
+        if not isinstance(step, dict):
+            raise RuntimeError(
+                f"SEQUENCE_STEP_{index + 1}: Desktop semantic sequence step must be an object."
+            )
+        operation = str(step.get("operation") or "")
+        try:
+            if operation == "wait":
+                wait_ms = int(step.get("waitMs") or 0)
+                if wait_ms < 0 or wait_ms > 2000:
+                    raise RuntimeError("Wait must be between 0 and 2000 ms.")
+                total_wait_ms += wait_ms
+                if total_wait_ms > 10000:
+                    raise RuntimeError("Total sequence wait time exceeds 10000 ms.")
+                if wait_ms:
+                    time.sleep(wait_ms / 1000.0)
+                detail = f"Waited {wait_ms} ms."
+            elif operation == "click":
+                encoded = str(step.get("elementId") or "")
+                if not encoded:
+                    raise RuntimeError("Semantic click requires an internal element identity.")
+                detail = semantic_click(entry, encoded)
+            elif operation == "type":
+                encoded = str(step.get("elementId") or "")
+                if not encoded:
+                    raise RuntimeError("Semantic type requires an internal element identity.")
+                text = str(step.get("text") or "")
+                total_text_bytes += len(text.encode("utf-8"))
+                if total_text_bytes > 131072:
+                    raise RuntimeError("Total sequence typed text exceeds 131072 bytes.")
+                detail = type_text(
+                    entry,
+                    encoded,
+                    text,
+                    bool(step.get("clearFirst", False)),
+                )
+            else:
+                raise RuntimeError(
+                    f"Unsupported desktop semantic sequence operation: {operation or '<empty>'}."
+                )
+            completed += 1
+            results.append({
+                "index": index,
+                "operation": operation,
+                "detail": detail,
+            })
+        except Exception as exc:
+            if isinstance(exc, RuntimeError):
+                raise RuntimeError(f"SEQUENCE_STEP_{index + 1}: {exc}")
+            raise RuntimeError(f"SEQUENCE_STEP_{index + 1}: {exc}")
+
+    return {
+        "applicationId": entry["id"],
+        "stepCount": len(steps),
+        "completedSteps": completed,
+        "elapsedMs": round((time.monotonic() - started) * 1000),
+        "results": results,
+    }
+
+
 def parse_shortcut(value):
     value = clean(value)
     if not value or len(value) > 80:
@@ -780,6 +854,8 @@ def main(req):
     entry = find_app(app_id)
     if operation == "inspect":
         return inspect_app(app_id, req.get("limit"))
+    if operation == "semanticSequence":
+        return semantic_sequence(entry, req.get("steps"))
     if operation == "activate":
         win = x_window(entry, req.get("windowId"))
         return {"applicationId": app_id, "action": "activate", "detail": activate_target(entry, win)}

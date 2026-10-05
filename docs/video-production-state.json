@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "feature": "RepoTunnel Video Production",
+  "status": "completed",
+  "lockedScope": "minimal complete AI tutorial/video production inside the existing Video section",
+  "completedAt": "2026-09-21",
+  "referenceReview": {
+    "complete": true,
+    "videoIds": [
+      "hUZNPCSZDaQ",
+      "qUHyCjOo8Z8",
+      "U2hZFMVNSE0",
+      "YmLp8qe87A0",
+      "IauULFe1j-A",
+      "ZaPbP9DwBOE",
+      "kn6dxL53NkM",
+      "7yNvsFrwpp0",
+      "dt_OMxufoGE",
+      "LPZh9BOjkQs",
+      "q1QQN08ZK6I",
+      "aX7QAfld7hs"
+    ]
+  },
+  "stages": [
+    {
+      "id": 1,
+      "name": "Durable Video Project model and workspace folders",
+      "status": "completed"
+    },
+    {
+      "id": 2,
+      "name": "Video Project list/create/open UI",
+      "status": "completed"
+    },
+    {
+      "id": 3,
+      "name": "Script/storyboard/timeline persistence",
+      "status": "completed"
+    },
+    {
+      "id": 4,
+      "name": "Recording job API and permission/resource checks",
+      "status": "completed"
+    },
+    {
+      "id": 5,
+      "name": "Generated 2D scene renderer",
+      "status": "completed"
+    },
+    {
+      "id": 6,
+      "name": "Narration provider abstraction and subtitles",
+      "status": "completed"
+    },
+    {
+      "id": 7,
+      "name": "FFmpeg assembly/edit/render pipeline",
+      "status": "completed"
+    },
+    {
+      "id": 8,
+      "name": "Video Project preview/player",
+      "status": "completed"
+    },
+    {
+      "id": 9,
+      "name": "AI/MCP production tools",
+      "status": "completed"
+    },
+    {
+      "id": 10,
+      "name": "End-to-end tutorial production validation",
+      "status": "completed"
+    }
+  ],
+  "validation": {
+    "frontend": {
+      "typescript": "pass",
+      "tests": "6 passed, 0 failed",
+      "productionBuild": "pass",
+      "npmAudit": "0 vulnerabilities"
+    },
+    "rust": {
+      "tests": "198 passed, 0 failed, 1 ignored",
+      "clippyWarningsDenied": "pass",
+      "ignoredTest": "managed_supertonic_provisions_and_synthesizes_english_and_hindi",
+      "ignoredTestValidatedSeparately": true
+    },
+    "realMediaSmokeTests": {
+      "x11Recording": "pass",
+      "generatedScenePng": "pass",
+      "ffmpegVideoNarrationAssembly": "pass",
+      "endToEndTutorialPipeline": "pass",
+      "managedSupertonicEnglishHindi": "pass"
+    },
+    "release": {
+      "cargoAudit": "pass; no release-blocking vulnerabilities",
+      "rustls": "0.23.45",
+      "directHttpsRegression": "6 passed, 0 failed",
+      "releaseVersion": "0.4.1",
+      "fullReleaseGate": "43 frontend passed; 448 Rust passed, 0 failed, 8 ignored",
+      "debianPackage": "src-tauri/target/release/bundle/deb/RepoTunnel_0.4.1_amd64.deb",
+      "debianSizeBytes": 19828744,
+      "debianSha256": "328353f1cbfb1bd85c0cf0d02eb476ff148a560e3564563296eed2097c7e8fbd",
+      "packagedBinarySha256": "4eaf65cf4bd735ee39d2bc24e99a42a117a2592ff119ca9e163ad0295adde381",
+      "maintainerScripts": "none",
+      "sourceFreshness": "pass",
+      "historicalV1DebianValidation": {
+        "package": "src-tauri/target/release/bundle/deb/RepoTunnel_0.3.1_amd64.deb",
+        "sizeBytes": 15988858,
+        "sha256": "de64e3138f631363c8d59cccb22b45dcaee0af3597614f9bca411e75393949c7",
+        "isolatedPackagedBinarySmoke": "pass"
+      }
+    }
+  },
+  "invariants": [
+    "new projects use a validated standalone ~/Projects/<slug> root while legacy workspace-relative projects remain supported; production files stay inside the resolved Video Project root",
+    "Video Intelligence remains intact",
+    "Direct HTTPS/MCP/OAuth/continuity/Commands are not regressed",
+    "no stage is marked complete without implementation and tests",
+    "no stage/commit/push/install without explicit user request for those Git/install actions",
+    "external animation/media sources use an expandable provider registry with per-asset license metadata",
+    "multilingual narration uses BCP-47 language tags and provider-independent voice settings; no paid provider is mandatory"
+  ],
+  "releaseNotes": [
+    "rustls was updated from 0.23.44 to 0.23.45 after RUSTSEC-2026-0285 was discovered by the release gate",
+    "no Direct HTTPS source implementation was changed for the rustls security update",
+    "the historical v1 Debian artifact was smoke-started from an extracted package under isolated HOME/XDG directories",
+    "the current v0.4.1 Debian artifact was rebuilt after the final Phone live-view fix, passed the full release gate, and passed source-freshness verification",
+    "the current v0.4.1 package has no preinst, postinst, prerm, or postrm maintainer scripts"
+  ],
+  "visualQualityV2": {
+    "status": "implemented-built-regression-tested",
+    "implementedAt": "2026-10-05",
+    "changes": [
+      "HTML/CSS + GSAP is the default generated renderer for tutorials, explainers, promos and reels; native SVG/2D remains fallback",
+      "deterministic headless-Chrome frame seeking/capture replaces browser screen recording",
+      "reusable template library and Modern dark / Playful bright themes enforce flex/grid layout, typography and motion rules",
+      "DOM design QA checks safe area, clipping, text overlap, centering, minimum font sizes and visible frame coverage",
+      "tutorial workflow gates enforce spec -> script -> storyboard -> template/theme -> assets/voice -> scenes -> 480p/15fps preview -> design QA -> 4/5-frame visual review -> fix loop -> final -> FFprobe QA",
+      "caption splitting is phrase-aware, avoids dangling clause words, uses safe/high-contrast styling and emits optional word-highlight WebVTT",
+      "static-stretch QA threshold is 1.5 seconds",
+      "meaningful script/storyboard/scene/narration changes invalidate stale preview/design/final approvals"
+    ],
+    "staticVerification": {
+      "javascriptSyntax": "pass",
+      "rustParseFormatting": "pass",
+      "jsonSyntax": "pass",
+      "policyRendererWorkflowContract": "pass",
+      "gitDiffWhitespace": "pass"
+    },
+    "runtimeValidation": "A later full-project regression and audited Debian build covered this source: frontend 43/43 passed; Rust 440 passed, 0 failed, 8 intentionally ignored; Cargo check/Clippy and npm audit passed. No dedicated new test-video render was performed solely for visualQualityV2."
+  },
+  "nextAction": "No build/package step is pending solely for Visual Quality v2. For future Video work, inspect the durable project/pipeline state first and run only the render/QA or engine validation relevant to the requested change. Do not install/download AI, GPU, diffusion or video models unless explicitly requested."
+}

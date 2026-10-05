@@ -5,21 +5,22 @@ use std::{
         Mutex,
     },
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tauri::AppHandle;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::{
     ai_workspace, connection, direct_https, gateway,
     models::{ChatConnectionStatus, PublicTunnelStatus},
+    phone,
     public_tunnel::{self, PublicTunnelProvider},
 };
 
 struct GatewayRuntime {
     port: u16,
-    shutdown: oneshot::Sender<()>,
+    shutdown: watch::Sender<bool>,
     worker: JoinHandle<()>,
 }
 
@@ -38,6 +39,7 @@ struct PublicTunnelState {
 #[derive(Default)]
 pub(crate) struct AppState {
     pub(crate) ai_workspace: ai_workspace::AiWorkspaceState,
+    pub(crate) phone: phone::PhoneRuntimeState,
     gateway: Mutex<Option<GatewayRuntime>>,
     tunnel: Mutex<TunnelState>,
     public_tunnel: Mutex<PublicTunnelState>,
@@ -121,14 +123,74 @@ impl AppState {
             .enable_all()
             .build()
             .map_err(|error| format!("Could not initialize the MCP runtime: {error}"))?;
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let worker = thread::Builder::new()
             .name("repotunnel-gateway".to_string())
             .spawn(move || {
-                if let Err(error) =
-                    async_runtime.block_on(gateway::serve(listener, port, app, shutdown_rx))
-                {
-                    eprintln!("RepoTunnel MCP gateway error: {error}");
+                let mut initial_listener = Some(listener);
+                let mut retry_delay = Duration::from_millis(250);
+
+                loop {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+
+                    let current_listener = match initial_listener.take() {
+                        Some(listener) => listener,
+                        None => match TcpListener::bind(("127.0.0.1", port)) {
+                            Ok(listener) => listener,
+                            Err(error) => {
+                                eprintln!(
+                                    "RepoTunnel MCP gateway could not rebind port {port}: {error}"
+                                );
+                                let should_stop = async_runtime.block_on(async {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(retry_delay) => false,
+                                        changed = shutdown_rx.changed() => {
+                                            changed.is_err() || *shutdown_rx.borrow()
+                                        }
+                                    }
+                                });
+                                if should_stop {
+                                    break;
+                                }
+                                retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
+                                continue;
+                            }
+                        },
+                    };
+
+                    let result = async_runtime.block_on(gateway::serve(
+                        current_listener,
+                        port,
+                        app.clone(),
+                        shutdown_rx.clone(),
+                    ));
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+
+                    match result {
+                        Ok(()) => eprintln!(
+                            "RepoTunnel MCP gateway stopped without a shutdown request; restarting on port {port}."
+                        ),
+                        Err(error) => {
+                            eprintln!("RepoTunnel MCP gateway error: {error}; restarting on port {port}.")
+                        }
+                    }
+
+                    let should_stop = async_runtime.block_on(async {
+                        tokio::select! {
+                            _ = tokio::time::sleep(retry_delay) => false,
+                            changed = shutdown_rx.changed() => {
+                                changed.is_err() || *shutdown_rx.borrow()
+                            }
+                        }
+                    });
+                    if should_stop {
+                        break;
+                    }
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
                 }
             })
             .map_err(|error| format!("Could not start the local gateway worker: {error}"))?;
@@ -156,7 +218,7 @@ impl AppState {
         };
 
         if let Some(runtime) = runtime {
-            let _ = runtime.shutdown.send(());
+            let _ = runtime.shutdown.send(true);
             let _ = runtime.worker.join();
         }
         Ok(())
@@ -775,7 +837,7 @@ impl Drop for AppState {
 
         if let Ok(gateway) = self.gateway.get_mut() {
             if let Some(runtime) = gateway.take() {
-                let _ = runtime.shutdown.send(());
+                let _ = runtime.shutdown.send(true);
                 let _ = runtime.worker.join();
             }
         }

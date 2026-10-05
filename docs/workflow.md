@@ -5,13 +5,13 @@ RepoTunnel is designed around one repeatable development loop rather than unrela
 ## Recommended sequence
 
 1. **Preflight** — call `list_workspaces`, select the approved project, then call `get_workflow_readiness`.
-2. **Inspect** — use `inspect_project`, `search_files`, `list_directory`, and `read_file` before editing.
+2. **Inspect** — for normal projects use the bounded inspection tools; for broad/large projects prefer `inspect_project_page`, `fast_search_files`, `list_directory_page`, and `read_file_range` so exploration is resumable and bounded before editing.
 3. **Edit** — prefer `patch_file` for targeted changes. The public MCP file-tool schema stays compatibility-safe and does not require an edit-group argument.
 4. **Automatic request grouping** — when the MCP transport supplies a valid `traceparent` header, RepoTunnel derives an internal group from that trace and saves all mutations from the same AI request into one version. No extra model tool call is required.
 5. **Fallback safely** — if a client does not supply a usable request trace, edits still work and are saved as separate protected versions rather than being grouped by time.
 6. **Run and verify** — use a disposable command preset when it is sufficient, or `run_terminal_command` for real-workspace commands, dependency installation, scripts, Docker, or other host/network-dependent work.
-7. **Keep services alive** — use `start_process` for development servers/watchers, then inspect them with `read_process_output`, `list_processes`, or `get_monitoring_snapshot`.
-8. **Test the application** — use `launch_target` for normal desktop launching or the managed browser tools for repeatable UI testing. Start an automation browser, navigate/click/type/reload with `browser_action`, inspect DOM content, capture screenshots, and read console/network diagnostics.
+7. **Keep services alive** — use `start_process` for development servers/watchers, then inspect them with `read_process_output`, `list_processes`, `get_workspace_runtime_status`, or `get_monitoring_snapshot`. Use `wait_process` for a bounded literal output/exit condition instead of tight repeated polling.
+8. **Test the application** — use `launch_target` for normal desktop launching or the managed browser tools for repeatable UI testing. Use semantic browser refs when they improve grounding, and fall back to the established DOM/visual path when appropriate. Desktop/AI Workspace, Phone, and Video tools are separate capability paths and should be used only when the task actually needs them.
 9. **Monitor and iterate** — enable workspace monitoring when project-file changes matter and use `get_monitoring_snapshot` to correlate process output, ports, browser errors, and file activity. Fix and retest until actual results confirm the task.
 10. **Review Git** — inspect `git_status` and `git_diff` before staging.
 11. **Stage explicit files** — request staging only for the intended paths. In AI Auto, validated staging applies immediately; in AI Review it waits for local approval.

@@ -1,7 +1,7 @@
 {
   "name": "repotunnel",
   "private": true,
-  "version": "0.3.1",
+  "version": "0.4.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "tauri": "tauri",
     "check": "tsc --noEmit",
     "release:check": "bash scripts/check-release.sh",
+    "release:deb": "bash scripts/build-linux-deb.sh",
     "release:linux": "bash scripts/build-linux.sh",
     "test:frontend": "vitest run"
   },
@@ -32,6 +33,7 @@
     "@codemirror/view": "^6.43.10",
     "@lezer/highlight": "^1.2.3",
     "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "codemirror": "^6.0.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

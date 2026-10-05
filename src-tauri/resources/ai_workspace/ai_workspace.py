@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import hashlib
 import io
 import json
 import os
@@ -11,6 +12,14 @@ from Xlib import X, XK, display, protocol
 from Xlib.ext import xtest
 from PIL import Image
 
+try:
+    import pyatspi
+except Exception:
+    pyatspi = None
+
+MAX_SEMANTIC_ELEMENTS = 800
+MAX_SEMANTIC_TEXT = 600
+SENSITIVE_FIELDS = ("password", "passwd", "passcode", "pin", "secret", "credential", "token", "api key", "otp", "one-time")
 SENSITIVE = ("password", "passwd", "passcode", "pin", "secret", "credential", "token", "api key", "sign in", "login")
 SHIFT_BASE = {
     "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0",
@@ -62,7 +71,11 @@ def window_bounds(window):
     try:
         geom = window.get_geometry()
         root = window.query_tree().root
-        translated = window.translate_coords(root, 0, 0)
+        # Xlib Window.translate_coords() treats the receiver as the
+        # destination window and its first argument as the source window.
+        # Translate the client window origin into root coordinates; reversing
+        # these produces negative/off-screen positions when windows are tiled.
+        translated = root.translate_coords(window, 0, 0)
         return {
             "x": int(translated.x),
             "y": int(translated.y),
@@ -151,25 +164,489 @@ def target_window(d, requested=None):
     return windows[-1]
 
 
-def inspect_windows():
+def clean(value):
+    return " ".join(str(value or "").replace("\x00", " ").split())
+
+
+def semantic_role_name(node):
+    try:
+        return clean(node.getRoleName())
+    except Exception:
+        return "unknown"
+
+
+def semantic_sensitive(node):
+    role = semantic_role_name(node).lower()
+    label = (
+        clean(getattr(node, "name", ""))
+        + " "
+        + clean(getattr(node, "description", ""))
+    ).lower()
+    if "password" in role:
+        return True
+    return any(hint in label for hint in SENSITIVE_FIELDS)
+
+
+def semantic_states(node):
+    names = []
+    try:
+        state = node.getState()
+        for value in state.getStates():
+            try:
+                names.append(clean(pyatspi.stateToString(value)))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return [name for name in names if name]
+
+
+def semantic_actions(node):
+    actions = []
+    try:
+        action = node.queryAction()
+        for index in range(action.nActions):
+            actions.append(clean(action.getName(index)))
+    except Exception:
+        pass
+    return [item for item in actions if item]
+
+
+def semantic_bounds(node):
+    try:
+        component = node.queryComponent()
+        ext = component.getExtents(pyatspi.DESKTOP_COORDS)
+        if ext.width <= 0 or ext.height <= 0:
+            return None
+        return {
+            "x": int(ext.x),
+            "y": int(ext.y),
+            "width": int(ext.width),
+            "height": int(ext.height),
+        }
+    except Exception:
+        return None
+
+
+def semantic_text(node, sensitive):
+    if sensitive:
+        return ""
+    try:
+        text = node.queryText()
+        count = min(int(text.characterCount), MAX_SEMANTIC_TEXT)
+        return clean(text.getText(0, count))
+    except Exception:
+        return ""
+
+
+def semantic_signature(path, node):
+    raw = f"{path}|{semantic_role_name(node)}|{clean(getattr(node, 'name', ''))}"
+    return hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def semantic_element_id(path, node):
+    return f"{path}#{semantic_signature(path, node)}"
+
+
+def inspect_semantics(limit, allowed_pids=None):
+    allowed_pids = {
+        int(pid) for pid in (allowed_pids or [])
+        if isinstance(pid, int) or str(pid).isdigit()
+    }
+    if pyatspi is None or not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        return {
+            "semanticAvailable": False,
+            "elements": [],
+            "truncated": False,
+            "message": "Private AI Workspace accessibility is unavailable; use isolated-window coordinates and screenshots.",
+        }
+    try:
+        desktop = pyatspi.Registry.getDesktop(0)
+    except Exception:
+        return {
+            "semanticAvailable": False,
+            "elements": [],
+            "truncated": False,
+            "message": "Private AI Workspace accessibility bus is not ready; use isolated-window coordinates and screenshots.",
+        }
+
+    wanted = max(20, min(int(limit or 300), MAX_SEMANTIC_ELEMENTS))
+    elements = []
+    truncated = False
+
+    def walk(node, path, depth):
+        nonlocal truncated
+        if len(elements) >= wanted:
+            truncated = True
+            return
+        sensitive = semantic_sensitive(node)
+        role = semantic_role_name(node)
+        name = clean(getattr(node, "name", ""))
+        description = clean(getattr(node, "description", ""))
+        actions = semantic_actions(node)
+        bounds = semantic_bounds(node)
+        states = semantic_states(node)
+        text = semantic_text(node, sensitive)
+        useful = depth <= 1 or name or description or actions or text or role.lower() in (
+            "push button",
+            "button",
+            "menu",
+            "menu item",
+            "check box",
+            "radio button",
+            "text",
+            "entry",
+            "combo box",
+            "page tab",
+            "tree item",
+            "list item",
+            "slider",
+        )
+        if useful:
+            elements.append({
+                "id": semantic_element_id(path, node),
+                "role": role,
+                "name": name,
+                "description": description,
+                "text": text,
+                "states": states,
+                "actions": actions,
+                "bounds": bounds,
+                "sensitive": sensitive,
+            })
+        if depth >= 10:
+            return
+        try:
+            count = min(int(node.childCount), 200)
+        except Exception:
+            count = 0
+        for index in range(count):
+            if len(elements) >= wanted:
+                truncated = True
+                return
+            try:
+                walk(node.getChildAtIndex(index), f"{path}.{index}", depth + 1)
+            except Exception:
+                continue
+
+    try:
+        app_count = min(int(desktop.childCount), 32)
+    except Exception:
+        app_count = 0
+    for app_index in range(app_count):
+        if len(elements) >= wanted:
+            truncated = True
+            break
+        try:
+            app = desktop.getChildAtIndex(app_index)
+            app_name = clean(getattr(app, "name", "")).lower()
+            if "repotunnel" in app_name or app_name == "metacity":
+                continue
+            app_pid = None
+            try:
+                app_pid = int(app.get_process_id())
+            except Exception:
+                try:
+                    app_pid = int(app.get_process_id)
+                except Exception:
+                    pass
+            if allowed_pids and app_pid not in allowed_pids:
+                continue
+            window_count = min(int(app.childCount), 80)
+        except Exception:
+            continue
+        for window_index in range(window_count):
+            if len(elements) >= wanted:
+                truncated = True
+                break
+            try:
+                walk(
+                    app.getChildAtIndex(window_index),
+                    f"a{app_index}.w{window_index}",
+                    0,
+                )
+            except Exception:
+                continue
+
+    return {
+        "semanticAvailable": True,
+        "elements": elements,
+        "truncated": truncated,
+        "message": None if elements else "The private accessibility bus is available, but this app has not exposed semantic elements yet.",
+    }
+
+
+def resolve_semantic_element(encoded):
+    if pyatspi is None:
+        raise RuntimeError("Private AI Workspace accessibility is unavailable.")
+    encoded = str(encoded or "")
+    if "#" not in encoded:
+        raise RuntimeError("Invalid AI Workspace semantic element identity.")
+    path, expected = encoded.rsplit("#", 1)
+    parts = path.split(".")
+    if len(parts) < 2 or not parts[0].startswith("a") or not parts[1].startswith("w"):
+        raise RuntimeError("Invalid AI Workspace semantic element identity.")
+    try:
+        desktop = pyatspi.Registry.getDesktop(0)
+        app = desktop.getChildAtIndex(int(parts[0][1:]))
+        node = app.getChildAtIndex(int(parts[1][1:]))
+        for part in parts[2:]:
+            node = node.getChildAtIndex(int(part))
+    except Exception:
+        raise RuntimeError(
+            "That AI Workspace semantic element is no longer present. Inspect semantics again before acting."
+        )
+    if semantic_signature(path, node) != expected:
+        raise RuntimeError(
+            "That AI Workspace semantic element changed since inspection. Inspect semantics again before acting."
+        )
+    return node
+
+
+def semantic_allowed_window(node, allowed_window_ids):
+    allowed = {str(value) for value in (allowed_window_ids or []) if str(value)}
+    if not allowed:
+        return None
+    bounds = semantic_bounds(node)
+    if not bounds:
+        raise RuntimeError(
+            "RepoTunnel could not prove that this semantic element belongs to the selected AI Workspace app session."
+        )
+    center_x = bounds["x"] + bounds["width"] // 2
+    center_y = bounds["y"] + bounds["height"] // 2
+    d = open_display()
+    try:
+        for win, title in client_windows(d):
+            window_id = f"0x{int(win.id):x}"
+            if window_id not in allowed:
+                continue
+            wb = window_bounds(win)
+            if not wb:
+                continue
+            if (
+                wb["x"] <= center_x < wb["x"] + wb["width"]
+                and wb["y"] <= center_y < wb["y"] + wb["height"]
+            ):
+                return (window_id, wb)
+    finally:
+        d.close()
+    raise RuntimeError(
+        "RepoTunnel blocked a semantic action because the element is outside this AI's app-session windows."
+    )
+
+
+def semantic_click_element(encoded, allowed_window_ids=None):
+    node = resolve_semantic_element(encoded)
+    allowed_owned = semantic_allowed_window(node, allowed_window_ids)
+    actions = semantic_actions(node)
+    if actions:
+        preferred = ("click", "press", "activate", "open", "toggle", "select")
+        try:
+            action = node.queryAction()
+            names = [clean(action.getName(i)).lower() for i in range(action.nActions)]
+            index = next((names.index(name) for name in preferred if name in names), 0)
+            if action.doAction(index):
+                return {"detail": "Invoked the element accessibility action."}
+        except Exception:
+            pass
+
+    bounds = semantic_bounds(node)
+    if not bounds:
+        raise RuntimeError(
+            "This AI Workspace element has no clickable accessibility action or visible bounds."
+        )
+    center_x = bounds["x"] + bounds["width"] // 2
+    center_y = bounds["y"] + bounds["height"] // 2
+    d = open_display()
+    try:
+        owned = None
+        for win, title in client_windows(d):
+            window_id = f"0x{int(win.id):x}"
+            if allowed_owned is not None and window_id != allowed_owned[0]:
+                continue
+            wb = window_bounds(win)
+            if not wb:
+                continue
+            if (
+                wb["x"] <= center_x < wb["x"] + wb["width"]
+                and wb["y"] <= center_y < wb["y"] + wb["height"]
+            ):
+                owned = (win, title, wb)
+                break
+        if owned is None:
+            raise RuntimeError(
+                "RepoTunnel could not prove that this semantic element is inside an isolated application window."
+            )
+        win, _, wb = owned
+        focus_target(d, f"0x{int(win.id):x}")
+        local_x = max(0, min(wb["width"] - 1, center_x - wb["x"]))
+        local_y = max(0, min(wb["height"] - 1, center_y - wb["y"]))
+        win.warp_pointer(local_x, local_y)
+        d.sync()
+        xtest.fake_input(d, X.ButtonPress, 1)
+        xtest.fake_input(d, X.ButtonRelease, 1)
+        d.sync()
+    finally:
+        d.close()
+    return {"detail": "Clicked the verified semantic element inside the isolated application window."}
+
+
+def semantic_type_element(encoded, text, clear_first, allowed_window_ids=None):
+    node = resolve_semantic_element(encoded)
+    semantic_allowed_window(node, allowed_window_ids)
+    if semantic_sensitive(node):
+        raise RuntimeError(
+            "RepoTunnel blocks semantic typing into password, PIN, credential, token, and other sensitive fields."
+        )
+    text = str(text or "")
+    if len(text.encode("utf-8")) > 32768:
+        raise RuntimeError("AI Workspace semantic typing is limited to 32768 UTF-8 bytes per action.")
+    try:
+        node.queryComponent().grabFocus()
+    except Exception:
+        pass
+    try:
+        editable = node.queryEditableText()
+    except Exception:
+        raise RuntimeError("That AI Workspace semantic element is not an editable text field.")
+    try:
+        if clear_first:
+            editable.setTextContents(text)
+        else:
+            offset = 0
+            try:
+                current = node.queryText()
+                offset = int(current.caretOffset)
+            except Exception:
+                try:
+                    offset = int(node.queryText().characterCount)
+                except Exception:
+                    pass
+            editable.insertText(offset, text, len(text))
+    except Exception as exc:
+        raise RuntimeError(f"The isolated application refused semantic text editing: {exc}")
+    return {"characters": len(text), "semantic": True}
+
+
+def semantic_sequence(steps, allowed_window_ids=None):
+    if not isinstance(steps, list) or not 1 <= len(steps) <= 64:
+        raise RuntimeError("AI Workspace semantic sequence requires 1..64 steps.")
+
+    started = time.monotonic()
+    total_wait_ms = 0
+    total_text_bytes = 0
+    completed = 0
+    results = []
+
+    for index, step in enumerate(steps):
+        if time.monotonic() - started > 20.0:
+            return {
+                "success": False,
+                "stepCount": len(steps),
+                "completedSteps": completed,
+                "failedStep": index,
+                "error": (
+                    f"SEQUENCE_TIMEOUT: AI Workspace semantic sequence exceeded "
+                    f"20000 ms before step {index + 1}."
+                ),
+                "elapsedMs": round((time.monotonic() - started) * 1000),
+                "results": results,
+            }
+        if not isinstance(step, dict):
+            return {
+                "success": False,
+                "stepCount": len(steps),
+                "completedSteps": completed,
+                "failedStep": index,
+                "error": (
+                    f"SEQUENCE_STEP_{index + 1}: AI Workspace semantic sequence "
+                    "step must be an object."
+                ),
+                "elapsedMs": round((time.monotonic() - started) * 1000),
+                "results": results,
+            }
+        operation = str(step.get("operation") or "")
+        try:
+            if operation == "wait":
+                wait_ms = int(step.get("waitMs") or 0)
+                if wait_ms < 0 or wait_ms > 2000:
+                    raise RuntimeError("Wait must be between 0 and 2000 ms.")
+                total_wait_ms += wait_ms
+                if total_wait_ms > 10000:
+                    raise RuntimeError("Total sequence wait time exceeds 10000 ms.")
+                if wait_ms:
+                    time.sleep(wait_ms / 1000.0)
+                result = {"waitedMs": wait_ms}
+            elif operation == "click":
+                result = semantic_click_element(
+                    step.get("elementId"),
+                    allowed_window_ids,
+                )
+            elif operation == "type":
+                text = str(step.get("text") or "")
+                total_text_bytes += len(text.encode("utf-8"))
+                if total_text_bytes > 131072:
+                    raise RuntimeError("Total sequence typed text exceeds 131072 bytes.")
+                result = semantic_type_element(
+                    step.get("elementId"),
+                    text,
+                    bool(step.get("clearFirst", False)),
+                    allowed_window_ids,
+                )
+            else:
+                raise RuntimeError(
+                    f"Unsupported AI Workspace semantic sequence operation: {operation or '<empty>'}."
+                )
+            completed += 1
+            results.append({
+                "index": index,
+                "operation": operation,
+                "result": result,
+            })
+        except Exception as exc:
+            raise RuntimeError(f"SEQUENCE_STEP_{index + 1}: {exc}")
+
+    return {
+        "stepCount": len(steps),
+        "completedSteps": completed,
+        "elapsedMs": round((time.monotonic() - started) * 1000),
+        "results": results,
+    }
+
+
+def inspect_windows(limit=300, allowed_pids=None):
+    allowed_pids = {
+        int(pid) for pid in (allowed_pids or [])
+        if isinstance(pid, int) or str(pid).isdigit()
+    }
     d = open_display()
     try:
         active = active_window(d)
         active_id = int(active.id) if active is not None else None
+        active_name = active_title(d)
         windows = []
         for win, title in client_windows(d):
             info = window_info(d, win, title)
+            if allowed_pids and info.get("pid") not in allowed_pids:
+                continue
             info["active"] = int(win.id) == active_id
             windows.append(info)
-        return {
-            "activeWindowId": f"0x{active_id:x}" if active_id is not None else None,
-            "activeTitle": active_title(d),
-            "windows": windows,
-            "semanticAvailable": False,
-            "message": "Use window-relative coordinates for precise isolated-app control. Semantic accessibility is not currently exposed by this isolated app.",
-        }
+        if allowed_pids and not any(item.get("active") for item in windows):
+            active_id = None
+            active_name = ""
     finally:
         d.close()
+
+    semantic = inspect_semantics(limit, allowed_pids)
+    return {
+        "activeWindowId": f"0x{active_id:x}" if active_id is not None else None,
+        "activeTitle": active_name,
+        "windows": windows,
+        "semanticAvailable": bool(semantic.get("semanticAvailable")),
+        "elements": semantic.get("elements") or [],
+        "truncated": bool(semantic.get("truncated")),
+        "message": semantic.get("message"),
+    }
 
 
 def ensure_non_sensitive(d):
@@ -303,6 +780,33 @@ def focus_target(d, requested=None):
     d.sync()
     time.sleep(0.02)
     return win, title, window_bounds(win) or bounds
+
+
+def place_window(req):
+    window_id = req.get("windowId")
+    if not window_id:
+        raise RuntimeError("AI Workspace window placement requires windowId.")
+    d = open_display()
+    try:
+        win, _ = target_window(d, window_id)
+        screen_width, screen_height = root_size(d)
+        x = max(0, min(int(req.get("x") or 0), max(0, screen_width - 1)))
+        y = max(0, min(int(req.get("y") or 0), max(0, screen_height - 1)))
+        width = max(240, min(int(req.get("width") or screen_width), screen_width))
+        height = max(160, min(int(req.get("height") or screen_height), screen_height))
+        if x + width > screen_width:
+            width = max(240, screen_width - x)
+        if y + height > screen_height:
+            height = max(160, screen_height - y)
+        win.configure(x=x, y=y, width=width, height=height)
+        d.sync()
+        time.sleep(0.04)
+        return {
+            "windowId": f"0x{int(win.id):x}",
+            "bounds": window_bounds(win),
+        }
+    finally:
+        d.close()
 
 
 def activate(req):
@@ -543,6 +1047,15 @@ def sequence(req):
     if len(steps) > 64:
         raise RuntimeError("AI Workspace sequence is limited to 64 steps per request.")
 
+    allowed_window_ids = {
+        str(value) for value in (req.get("allowedWindowIds") or []) if str(value)
+    }
+    default_window_id = str(req.get("windowId") or "")
+    if allowed_window_ids and default_window_id not in allowed_window_ids:
+        raise RuntimeError(
+            "RepoTunnel blocked an AI Workspace sequence default window outside this app session."
+        )
+
     total_text = 0
     for step in steps:
         if not isinstance(step, dict):
@@ -563,6 +1076,14 @@ def sequence(req):
         item = dict(step)
         op = item.get("operation")
         item["windowId"] = item.get("windowId") or req.get("windowId")
+        if (
+            allowed_window_ids
+            and item.get("windowId")
+            and str(item.get("windowId")) not in allowed_window_ids
+        ):
+            raise RuntimeError(
+                f"SEQUENCE_STEP_{index + 1}: RepoTunnel blocked a window outside this AI's app session."
+            )
         result = wait_step(item) if op == "wait" else main(item)
         results.append({"index": index, "operation": op, "result": result})
 
@@ -578,16 +1099,45 @@ def main(req):
     if op == "hostHide":
         return hide_host(req)
     if op == "ping":
+        allowed_pids = {
+            int(pid) for pid in (req.get("allowedPids") or [])
+            if isinstance(pid, int) or str(pid).isdigit()
+        }
         d = open_display()
         try:
             width, height = root_size(d)
-            return {"width": width, "height": height, "windowCount": len(client_windows(d)), "activeTitle": active_title(d)}
+            windows = client_windows(d)
+            if allowed_pids:
+                windows = [
+                    (win, title) for win, title in windows
+                    if window_info(d, win, title).get("pid") in allowed_pids
+                ]
+            return {"width": width, "height": height, "windowCount": len(windows), "activeTitle": active_title(d)}
         finally:
             d.close()
     if op == "frame":
         return frame(req)
     if op == "inspect":
-        return inspect_windows()
+        return inspect_windows(req.get("limit") or 300, req.get("allowedPids"))
+    if op == "semanticClick":
+        return semantic_click_element(
+            req.get("elementId"),
+            req.get("allowedWindowIds"),
+        )
+    if op == "semanticType":
+        return semantic_type_element(
+            req.get("elementId"),
+            req.get("text") or "",
+            bool(req.get("clearFirst", False)),
+            req.get("allowedWindowIds"),
+        )
+    if op == "semanticSequence":
+        return semantic_sequence(
+            req.get("steps"),
+            req.get("allowedWindowIds"),
+        )
+    if op == "placeWindow":
+        return place_window(req)
     if op == "activate":
         return activate(req)
     if op in ("click", "scroll"):

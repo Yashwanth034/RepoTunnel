@@ -396,6 +396,15 @@ mod tests {
     }
 
     #[test]
+    fn preserves_native_addresses_offsets_and_hashes() {
+        let text =
+            "pc=0x7ffdeadc0de offset=0x1a2b3c sha256=4f8c2d1a7b6e5d4c3b2a19081716151413121110";
+        let redacted = redact_text(text);
+        assert_eq!(redacted, text);
+        assert!(detect_secret(text.as_bytes()).is_none());
+    }
+
+    #[test]
     fn redacts_terminal_output_and_sensitive_env_keys() {
         let token = fake_api_key();
         let text = format!("authorization: {} {}", "Bearer", token);
