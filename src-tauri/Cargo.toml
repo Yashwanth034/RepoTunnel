@@ -53,7 +53,7 @@ axuielement = { version = "0.9.1", default-features = false }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication", "libc"] }
 
 [target.'cfg(windows)'.dependencies]
-uiautomation = { version = "0.25.1", default-features = false, features = ["pattern"] }
+uiautomation = { version = "0.25.1", default-features = false, features = ["input", "pattern"] }
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",

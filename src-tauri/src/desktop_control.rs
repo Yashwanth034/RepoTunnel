@@ -1,10 +1,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Write,
     path::PathBuf,
-    process::{Command, Stdio},
     sync::Mutex,
+};
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+use std::{
+    io::Write,
+    process::{Command, Stdio},
 };
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +25,9 @@ use crate::{
 
 const STORE_FILE: &str = "desktop-control.json";
 const GLOBAL_PERMISSION: &str = "*";
+#[cfg(all(not(windows), not(target_os = "macos")))]
 const HELPER_RELATIVE: &str = "desktop/desktop_control.py";
+#[cfg(all(not(windows), not(target_os = "macos")))]
 const HELPER: &str = include_str!("../resources/desktop_control.py");
 const MAX_SEMANTIC_SEQUENCE_STEPS: usize = 64;
 const MAX_SEMANTIC_WAIT_MS: u64 = 2_000;
@@ -140,6 +146,7 @@ fn save_store_unlocked(app: &AppHandle, store: &PermissionStore) -> Result<(), S
         .map_err(|error| format!("Could not save desktop-control settings: {error}"))
 }
 
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn helper_path(app: &AppHandle) -> Result<PathBuf, String> {
     let path = app
         .path()
@@ -159,6 +166,7 @@ fn helper_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn python_path() -> Result<PathBuf, String> {
     ["/usr/bin/python3", "/usr/local/bin/python3"]
         .into_iter()
@@ -167,6 +175,7 @@ fn python_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "Desktop control requires Python 3 on Linux.".to_string())
 }
 
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn run_helper(app: &AppHandle, request: Value) -> Result<Value, String> {
     let helper = helper_path(app)?;
     let mut child = Command::new(python_path()?)
@@ -202,6 +211,7 @@ fn run_helper(app: &AppHandle, request: Value) -> Result<Value, String> {
     Ok(response.get("result").cloned().unwrap_or_else(|| json!({})))
 }
 
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn run_helper_observation(app: &AppHandle, request: Value) -> Result<Value, String> {
     match run_helper(app, request.clone()) {
         Ok(value) => Ok(value),
@@ -218,7 +228,7 @@ fn discovered(app: &AppHandle) -> Result<Vec<HelperApplication>, String> {
     #[cfg(windows)]
     {
         let _ = app;
-        return crate::windows_uia::list().map(|items| {
+        crate::windows_uia::list().map(|items| {
             items
                 .into_iter()
                 .map(|item| HelperApplication {
@@ -229,13 +239,13 @@ fn discovered(app: &AppHandle) -> Result<Vec<HelperApplication>, String> {
                     window_count: item.window_count,
                 })
                 .collect()
-        });
+        })
     }
 
     #[cfg(target_os = "macos")]
     {
         let _ = app;
-        return crate::macos_ax::list().map(|items| {
+        crate::macos_ax::list().map(|items| {
             items
                 .into_iter()
                 .map(|item| HelperApplication {
@@ -246,7 +256,7 @@ fn discovered(app: &AppHandle) -> Result<Vec<HelperApplication>, String> {
                     window_count: item.window_count,
                 })
                 .collect()
-        });
+        })
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -572,13 +582,13 @@ pub(crate) fn inspect(
     #[cfg(windows)]
     {
         let _ = app;
-        return crate::windows_uia::inspect(application_id, limit.clamp(20, 800));
+        crate::windows_uia::inspect(application_id, limit.clamp(20, 800))
     }
 
     #[cfg(target_os = "macos")]
     {
         let _ = app;
-        return crate::macos_ax::inspect(application_id, limit.clamp(20, 800));
+        crate::macos_ax::inspect(application_id, limit.clamp(20, 800))
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -882,13 +892,13 @@ pub(crate) fn action(
     #[cfg(windows)]
     {
         let _ = (app, window_id, shortcut, x_ratio, y_ratio, delta_x, delta_y);
-        return crate::windows_uia::action(application_id, action, element_id, text, clear_first);
+        crate::windows_uia::action(application_id, action, element_id, text, clear_first)
     }
 
     #[cfg(target_os = "macos")]
     {
         let _ = (app, window_id, shortcut, x_ratio, y_ratio, delta_x, delta_y);
-        return crate::macos_ax::action(application_id, action, element_id, text, clear_first);
+        crate::macos_ax::action(application_id, action, element_id, text, clear_first)
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
@@ -923,19 +933,19 @@ pub(crate) fn screenshot(
     #[cfg(windows)]
     {
         let _ = (app, window_id);
-        return Err(
+        Err(
             "Windows UI Automation semantic control is available, but app-window screenshot fallback is not implemented in Stage 10."
                 .to_string(),
-        );
+        )
     }
 
     #[cfg(target_os = "macos")]
     {
         let _ = (app, window_id);
-        return Err(
+        Err(
             "macOS Accessibility semantic control is available, but app-window screenshot fallback is not implemented in Stage 11."
                 .to_string(),
-        );
+        )
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]

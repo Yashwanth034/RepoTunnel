@@ -3395,7 +3395,7 @@ mod tests {
         assert_eq!(DEFAULT_TIMEOUT_SECONDS, 30 * 60);
         assert_eq!(MAX_TIMEOUT_SECONDS, 12 * 60 * 60);
         assert!(
-            super::PROCESS_SUPERVISOR_START_TIMEOUT >= Duration::from_secs(30),
+            super::PROCESS_SUPERVISOR_START_TIMEOUT >= std::time::Duration::from_secs(30),
             "managed-process startup needs enough margin for cold Linux sandbox initialization"
         );
     }

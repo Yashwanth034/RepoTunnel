@@ -2,7 +2,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -10,6 +10,9 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
@@ -2068,8 +2071,19 @@ fn build_ai_workspace_capture_command(
 #[cfg(not(target_os = "linux"))]
 fn build_ai_workspace_capture_command(
     _ffmpeg: &Path,
-    _capture: &AiWorkspaceCapture<'_>,
+    capture: &AiWorkspaceCapture<'_>,
 ) -> Result<Command, String> {
+    let _ = (
+        capture.display,
+        capture.xauth_path,
+        capture.x,
+        capture.y,
+        capture.width,
+        capture.height,
+        capture.fps,
+        capture.max_seconds,
+        capture.output,
+    );
     Err(
         "AI Workspace recording is currently available on Linux; Windows/macOS recording adapters are not yet validated."
             .to_string(),
@@ -2357,11 +2371,17 @@ pub(crate) fn stop_all_activity() {
 mod tests {
     use std::{
         env, fs,
-        path::{Path, PathBuf},
-        process::{Command, Stdio},
+        path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[cfg(target_os = "linux")]
+    use std::{
+        path::Path,
+        process::{Command, Stdio},
         thread,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::Duration,
     };
 
     use crate::{
@@ -2370,13 +2390,15 @@ mod tests {
     };
 
     use super::{
-        build_ai_workspace_capture_command, create_project, create_project_with_mode,
-        delete_project, get_scene, import_folder, list_project_files, list_projects, list_scenes,
-        project_root as resolve_project_root, read_document, record_scene_narration,
-        record_scene_render, set_project_pinned, set_resource_policy, upsert_scene, write_document,
-        AiWorkspaceCapture, VideoProductionResourcePolicy, VideoProductionSceneInput,
-        PROJECT_DIRECTORIES, STORY_DIRECTORIES,
+        create_project, create_project_with_mode, delete_project, get_scene, import_folder,
+        list_project_files, list_projects, list_scenes, project_root as resolve_project_root,
+        read_document, record_scene_narration, record_scene_render, set_project_pinned,
+        set_resource_policy, upsert_scene, write_document, VideoProductionResourcePolicy,
+        VideoProductionSceneInput, PROJECT_DIRECTORIES, STORY_DIRECTORIES,
     };
+
+    #[cfg(target_os = "linux")]
+    use super::{build_ai_workspace_capture_command, AiWorkspaceCapture};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
