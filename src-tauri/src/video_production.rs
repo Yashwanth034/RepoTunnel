@@ -2370,7 +2370,7 @@ pub(crate) fn stop_all_activity() {
 #[cfg(test)]
 mod tests {
     use std::{
-        env, fs,
+        fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
@@ -2378,6 +2378,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     use std::{
+        env,
         path::Path,
         process::{Command, Stdio},
         thread,
@@ -2732,6 +2733,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     fn program_on_path(name: &str) -> Option<PathBuf> {
         env::var_os("PATH")
             .into_iter()

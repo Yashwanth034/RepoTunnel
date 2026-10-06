@@ -259,6 +259,9 @@ fn ensure_private_dir(path: &Path) -> Result<(), String> {
 }
 
 fn private_write(path: &Path, bytes: &[u8], executable: bool) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = executable;
+
     let parent = path
         .parent()
         .ok_or_else(|| "Could not resolve RepoTunnel video helper directory.".to_string())?;

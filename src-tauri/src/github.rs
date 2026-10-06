@@ -111,9 +111,9 @@ fn github_cli_path() -> Option<PathBuf> {
 fn github_cli_config_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return env::var_os("APPDATA")
+        env::var_os("APPDATA")
             .map(PathBuf::from)
-            .map(|root| root.join("GitHub CLI"));
+            .map(|root| root.join("GitHub CLI"))
     }
 
     #[cfg(not(windows))]

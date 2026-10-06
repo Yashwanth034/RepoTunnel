@@ -251,15 +251,6 @@ mod runtime {
         )
     }
 
-    fn cached_signature(path: &str, element: &UIElement) -> String {
-        element_signature(
-            path,
-            cached_control_type_id(element),
-            &cached_name(element),
-            &cached_automation_id(element),
-        )
-    }
-
     fn cached_bounds(element: &UIElement) -> Option<Value> {
         let rect = element.get_cached_bounding_rectangle().ok()?;
         let width = rect.get_width();
@@ -408,6 +399,7 @@ mod runtime {
         Ok(grouped.into_values().collect())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn walk_cached(
         walker: &UITreeWalker,
         cache: &UICacheRequest,
@@ -839,7 +831,7 @@ mod runtime {
 }
 
 #[cfg(windows)]
-pub(crate) use runtime::{action, inspect, list, semantic_sequence, WindowsUiaApplication};
+pub(crate) use runtime::{action, inspect, list, semantic_sequence};
 
 #[cfg(test)]
 mod tests {

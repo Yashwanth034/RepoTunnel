@@ -328,6 +328,9 @@ fn protect_directory(path: &Path) -> Result<(), String> {
 }
 
 fn protect_file(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

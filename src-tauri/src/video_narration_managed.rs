@@ -102,6 +102,9 @@ fn protect_dir(path: &Path) -> Result<(), String> {
 }
 
 fn protect_file(path: &Path, executable: bool) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = (path, executable);
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
