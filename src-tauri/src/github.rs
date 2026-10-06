@@ -681,9 +681,12 @@ mod tests {
 
         let mut command = std::process::Command::new(executable_name());
         super::configure_cli_command(&mut command);
-        let debug = format!("{command:?}");
-        assert!(debug.contains("GH_CONFIG_DIR"));
-        assert!(debug.contains(config_dir.to_string_lossy().as_ref()));
+        let configured = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("GH_CONFIG_DIR"))
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from);
+        assert_eq!(configured.as_deref(), Some(config_dir.as_path()));
     }
 
     #[test]

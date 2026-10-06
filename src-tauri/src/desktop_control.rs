@@ -1016,7 +1016,7 @@ mod tests {
         semantic_backend_id, semantic_drafts_from_inspection, DesktopSemanticSequenceStep,
         PermissionStore, GLOBAL_PERMISSION,
     };
-    use crate::semantic::{self, SemanticNodeDraft, SemanticSnapshotInput, SemanticSurface};
+    use crate::semantic::{self, SemanticNodeDraft, SemanticSnapshotInput};
 
     #[test]
     fn normalizes_at_spi_elements_into_shared_semantic_drafts() {
@@ -1104,7 +1104,7 @@ mod tests {
     ) -> crate::semantic::SemanticSnapshot {
         semantic::publish_snapshot(SemanticSnapshotInput {
             workspace_id: workspace_id.to_string(),
-            surface: SemanticSurface::Desktop,
+            surface: super::desktop_semantic_surface(),
             target_id: "test-app".to_string(),
             document_identity: "test-app:0x1".to_string(),
             nodes: vec![SemanticNodeDraft {
