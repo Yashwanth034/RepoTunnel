@@ -30,7 +30,7 @@ RepoTunnel then starts the next work cycle in the same Team. No new Team session
 
 ## Verification and completion
 
-Each work request must have at least one completed cross-reviewed task, useful contribution from both AIs, no open tasks, and verified success criteria with concrete evidence. `team_action(action=complete)` records the completed request and returns the Team to **Ready**. A second completion call racing with the first is treated idempotently.
+Each work request must have at least two distinct completed cross-reviewed implementation tasks, meaningful implementation from both AIs, no open tasks, and verified success criteria with concrete evidence. `team_action(action=complete)` records the completed request and returns the Team to **Ready**. A second completion call racing with the first is treated idempotently.
 
 Only the human can permanently end the Team. **Pause** temporarily blocks Team work; **End Team** permanently detaches the A/B identities from the project.
 

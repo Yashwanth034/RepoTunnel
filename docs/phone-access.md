@@ -253,7 +253,7 @@ Older v0.3.1 builds could intermittently surface:
 
 `PHONE_HELPER_UNAVAILABLE: Resource temporarily unavailable (os error 11)`
 
-The cause was a timed Linux socket read returning `WouldBlock`/`EAGAIN` while the Android semantic worker could still be processing the same request. v0.4.0 keeps waiting on that same request/socket through transient `WouldBlock`/timeout polls until a bounded response deadline. It does **not** resend or replay the semantic action, so the fix does not introduce duplicate click/type risk.
+The cause was a timed Linux socket read returning `WouldBlock`/`EAGAIN` while the Android semantic worker could still be processing the same request. v0.4.1 keeps waiting on that same request/socket through transient `WouldBlock`/timeout polls until a bounded response deadline. It does **not** resend or replay the semantic action, so the fix does not introduce duplicate click/type risk.
 
 Regression coverage now forces transient `WouldBlock` reads and a bounded helper timeout. The raw `os error 11` condition is no longer treated as an immediate helper outage.
 
