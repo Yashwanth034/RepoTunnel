@@ -6,11 +6,13 @@ The in-app updater is deliberately separate from RepoTunnel's MCP, Direct HTTPS,
 
 ## Versioning
 
-Use semantic patch releases for small fixes:
+Use semantic versioning for future releases:
 
-- `0.3.0 -> 0.3.1` for bug fixes and small safe improvements.
-- `0.3.x -> 0.4.0` for a meaningful feature release.
+- Use a patch version for bug fixes and small safe improvements.
+- Use a minor version for meaningful feature releases.
 - Reserve `1.0.0` for the stable product milestone.
+
+The current public release is **v0.4.1**. Version changes require a separate, explicitly authorized release.
 
 Keep the version identical in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`. The release workflow rejects mismatches.
 
@@ -56,14 +58,14 @@ Treat the updater private key as a long-term release identity. Losing it prevent
 
 `.github/workflows/platform-build.yml` performs the release pipeline:
 
-1. Run frontend, Rust, formatting, Clippy, audit and test gates.
-2. Verify the Git tag matches the application version.
-3. Build platform installers with `src-tauri/tauri.release.conf.json`, which enables updater artifacts only for release builds so ordinary local packaging does not require the signing key.
-4. Collect the normal installers plus their `.sig` files and macOS `.app.tar.gz` updater archives.
-5. Extract the matching `CHANGELOG.md` section as release notes.
-6. Generate `latest.json` with `scripts/generate-updater-manifest.mjs`.
-7. Generate `RepoTunnel-SHA256SUMS.txt` for downloadable-file integrity checks.
-8. Publish all files in one GitHub Release.
+1. Prefer an authorized **`workflow_dispatch` on the default branch**. The workflow also supports tag-triggered runs; main-branch dispatch makes the stable Windows cache reusable.
+2. Run quality/security checks and platform builds in parallel. **Windows validation** (Rust Clippy and tests) is a separate job from **Windows packaging**; the validation job avoids unnecessary Node setup.
+3. Build Linux DEB/RPM/AppImage, Windows NSIS/MSI, and Apple Silicon/Intel macOS DMGs and signed updater artifacts.
+4. Wait for quality, Linux, Windows validation, Windows packaging, and both macOS builds to pass before the final release job can proceed.
+5. Collect the verified artifacts, derive release notes from the matching `CHANGELOG.md` section, generate `latest.json`, and generate `RepoTunnel-SHA256SUMS.txt`.
+6. The final job establishes the canonical `v<version>` tag for the verified commit and publishes the release.
+
+**Protected tags:** Publication and any protected-tag changes need explicit repository-owner authorization. Do not alter the published v0.4.1 tag.
 
 The installed application checks only the official endpoint:
 
@@ -82,7 +84,7 @@ Auto Update is one cross-platform RepoTunnel feature, not a Linux-only implement
 - macOS Apple Silicon: DMG plus signed `.app.tar.gz` updater archive on an arm64 macOS runner.
 - macOS Intel: DMG plus signed `.app.tar.gz` updater archive on an Intel macOS runner.
 
-Linux development can validate the shared updater logic and release metadata, but Windows installer execution and macOS bundle/update behavior must be validated on their native runners before a release is called production-ready. The final patch-release acceptance test should exercise **Check for updates -> Update & Restart -> persisted-state health check** on each supported operating-system family.
+Linux development can validate the shared updater logic and release metadata, but installation/runtime behavior must be checked on the applicable native OS. CI packaging and tests do not replace installed-app acceptance checks. Exercise **Check for updates -> Update & Restart -> persisted-state health check** only on operating systems where RepoTunnel permits in-app installation. **macOS currently supports update discovery but blocks in-app installation** pending verified recovery; test DMG installation separately.
 
 ### macOS install safety gate
 
@@ -94,12 +96,7 @@ Do not expose **Update & Restart** on macOS until RepoTunnel's current updater s
 
 RepoTunnel checks for updates on startup and at a bounded interval while the desktop app is running. Settings also provides a manual **Check for updates** action.
 
-When a newer version is available the user can:
-
-- review the release notes;
-- choose **Update & Restart**;
-- choose **Later**, which defers automatic reminders for 24 hours;
-- disable or re-enable automatic checks.
+When a newer version is available the user can review release notes, select **Later** (deferring reminders for 24 hours), or change automatic-check preferences. **Update & Restart** is offered only on platforms where RepoTunnel permits in-app installation; it is intentionally not available on macOS.
 
 RepoTunnel refuses to begin installation while work that would be interrupted is active, including Home generation, Model Trial, managed processes, running terminal commands, active Team Mode tasks, Browser Automation or AI Workspace sessions.
 
@@ -122,13 +119,13 @@ Any future data-schema migration must be backward-aware, tested independently, a
 
 ## Release checklist
 
-1. Confirm the repository contains no credentials, updater private keys, tunnel credentials, updater private keys, or other secrets; release-only secrets must come from the CI secret store.
-2. Confirm the updater signing secret exists in GitHub Actions.
-3. Update all version files together and add release notes to `CHANGELOG.md`.
-4. Run the complete validation gate.
-5. Tag the exact verified commit with `v<version>`.
-6. Let GitHub Actions build and sign every supported platform artifact.
-7. Confirm `latest.json` contains every required platform target and every referenced asset has a matching signature.
-8. Install at least one clean package for each platform that is available for testing.
-9. Verify the in-app **Check for updates -> Update & Restart** flow with a real patch release before calling Auto Update production-ready.
-10. Verify RepoTunnel reopens with existing project, security, Direct HTTPS and continuity data intact.
+1. Confirm no credentials, signing keys, or other secrets are present in public source or release assets; release-only credentials remain in the CI secret store.
+2. Verify the updater signing configuration is available to the release workflow.
+3. For a separately **approved future release**, synchronize version files and update `CHANGELOG.md`.
+4. Run validation and the applicable live acceptance checks. Confirm the intended Git publication and tag-protection operations have been authorized.
+5. Prefer `workflow_dispatch` from the default branch; keep quality, Linux, Windows validation, Windows packaging, and macOS builds parallel.
+6. Confirm all required checks pass before the final job establishes the canonical tag and publishes assets.
+7. Verify updater manifests, signatures, checksums, and asset lists. Exclude package-inspection leftovers.
+8. Test clean packages on each native platform available for acceptance.
+9. Exercise in-app installation only where enabled; preserve the current macOS install safety gate.
+10. Confirm RepoTunnel restarts with its projects, security settings, Direct HTTPS, and continuity data intact.
