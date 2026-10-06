@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RepoTunnel Continuation</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main>
+    <header class="brand">
+      <img src="icons/icon48.png" alt="" width="40" height="40" />
+      <div>
+        <h1>RepoTunnel Continuation</h1>
+        <p>Exact-chat continuation bridge</p>
+      </div>
+      <span id="bridgeState" class="badge">Waiting</span>
+    </header>
+
+    <p class="intro">
+      Save only the exact ChatGPT conversations that RepoTunnel may resume.
+    </p>
+
+    <button id="addCurrent" class="primary full" type="button">Add current ChatGPT chat</button>
+
+    <details>
+      <summary>Add by exact URL</summary>
+      <label for="targetUrl">ChatGPT conversation URL</label>
+      <div class="url-row">
+        <input id="targetUrl" type="url" placeholder="https://chatgpt.com/c/..." autocomplete="off" spellcheck="false" />
+        <button id="addUrl" class="secondary" type="button">Add</button>
+      </div>
+    </details>
+
+    <section class="saved">
+      <div class="section-heading">
+        <strong>Saved chats</strong>
+        <span id="targetCount" class="count">0/5</span>
+      </div>
+      <div id="targetList" class="target-list"></div>
+    </section>
+
+    <div class="footer-row">
+      <button id="refreshBridge" class="secondary" type="button">Check bridge</button>
+      <span id="version" class="version"></span>
+    </div>
+
+    <p class="safety">
+      RepoTunnel waits for an idle completed response, refuses to overwrite typed text, and does not replay an uncertain send.
+    </p>
+    <p id="status" class="status" aria-live="polite"></p>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
