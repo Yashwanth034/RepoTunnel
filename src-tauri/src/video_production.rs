@@ -2732,6 +2732,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     fn program_on_path(name: &str) -> Option<PathBuf> {
         env::var_os("PATH")
             .into_iter()

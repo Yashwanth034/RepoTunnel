@@ -31,7 +31,9 @@ const DISPLAY_START: u16 = 91;
 const DISPLAY_END: u16 = 119;
 const SESSION_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_SESSION";
 const APP_SESSION_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_APP_SESSION";
+#[cfg(unix)]
 const GITHUB_PROXY_BIN_PROFILE_KEY: &str = "REPOTUNNEL_AI_WORKSPACE_GITHUB_PROXY_BIN";
+#[cfg(unix)]
 const GITHUB_PROXY_ACTIVE_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_GITHUB_PROXY";
 const SESSION_STATE_FILE: &str = "ai-workspace/runtime/session.json";
 // Schema 2 intentionally invalidates older persisted desktops once. Older builds

@@ -1955,7 +1955,7 @@ fn append_restart_marker(app: &AppHandle, process_id: &str, restart_count: u32) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn spawn_with_stable_parent(mut command: Command) -> Result<(Child, ProcessParentKeeper), String> {
     let (child_tx, child_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::channel();
