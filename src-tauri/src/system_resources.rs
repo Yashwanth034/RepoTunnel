@@ -1,6 +1,6 @@
 use std::{path::Path, process::Command};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 use std::fs;
 
 use crate::models::{SystemResourceSnapshot, Workspace};
