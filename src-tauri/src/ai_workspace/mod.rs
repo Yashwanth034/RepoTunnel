@@ -3184,15 +3184,17 @@ impl Drop for AiWorkspaceState {
 mod tests {
     use super::{
         ai_semantic_backend_id, application_allowed, build_application_command,
-        build_gnome_terminal_clean_shell_command, build_gnome_terminal_legacy_command,
-        build_gnome_terminal_private_server_command, display_available, platform_capability,
-        prepare_ai_semantic_sequence, uses_window_lifecycle, AiWorkspaceSemanticSequenceStep,
-        HEIGHT, WIDTH,
+        build_gnome_terminal_clean_shell_command, build_gnome_terminal_private_server_command,
+        display_available, platform_capability, prepare_ai_semantic_sequence,
+        uses_window_lifecycle, AiWorkspaceSemanticSequenceStep, HEIGHT, WIDTH,
     };
     use crate::{
         models::LaunchApplication,
         semantic::{self, SemanticNodeDraft, SemanticSnapshotInput, SemanticSurface},
     };
+
+    #[cfg(target_os = "linux")]
+    use super::build_gnome_terminal_legacy_command;
 
     #[test]
     fn ai_workspace_platform_capability_matches_build_target() {
