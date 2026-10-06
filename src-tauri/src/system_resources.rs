@@ -1,4 +1,7 @@
-use std::{fs, path::Path, process::Command};
+use std::{path::Path, process::Command};
+
+#[cfg(target_os = "linux")]
+use std::fs;
 
 use crate::models::{SystemResourceSnapshot, Workspace};
 
