@@ -1,0 +1,75 @@
+name: Platform Rust Tests Check
+
+on:
+  push:
+    branches:
+      - "release-v0.4.1-platform-tests"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64 Tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Windows Rust tests
+        env:
+          REPOTUNNEL_WINDOWS_TEST_MANIFEST: "1"
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+
+  macos:
+    name: macOS ${{ matrix.name }} Tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple Silicon
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: macOS Rust tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift_runtime_paths="$(xcrun swift -print-target-info | python3 -c 'import json, sys; print(":".join(json.load(sys.stdin)["paths"]["runtimeLibraryPaths"]))')"
+          if [ -z "$swift_runtime_paths" ]; then
+            echo "::error title=macOS Swift runtime::Could not resolve Swift runtime library paths."
+            exit 1
+          fi
+          export DYLD_LIBRARY_PATH="$swift_runtime_paths${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          export DYLD_FALLBACK_LIBRARY_PATH="$swift_runtime_paths${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
