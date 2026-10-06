@@ -3594,6 +3594,7 @@ mod tests {
         assert!(debug.contains("unix:path=/tmp/repotunnel-aiw-test-bus"));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn gnome_terminal_legacy_fallback_is_preserved() {
         let app = gnome_terminal_app();
