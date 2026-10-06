@@ -1,146 +1,304 @@
+<div align="center">
+
+<img src="./src-tauri/icons/icon.png" alt="RepoTunnel" width="96" />
+
 # RepoTunnel
 
-**Give ChatGPT access to the project you're working on—not your entire computer.**
+### Give AI access to the project you're working on — not your entire computer.
 
-RepoTunnel is a **local-first desktop bridge for MCP-compatible AI clients**. Connect ChatGPT or another supported client to explicitly approved workspaces so it can inspect code, edit files, run tests, use development tools, and help finish real work. RepoTunnel controls the local access, permissions, execution environment, and review flow.
+**RepoTunnel is a local-first desktop gateway for MCP-compatible AI clients.**
 
-[**Download v0.4.1**](https://github.com/Yashwanth034/RepoTunnel/releases/latest) · [Get started](#get-started) · [Security](docs/security.md) · [Documentation](#documentation)
+Connect ChatGPT or another supported client to explicitly approved projects, then let the AI inspect code, edit files, run tests, use Git, operate supported tools, and continue long-running work while RepoTunnel keeps the local security boundary under your control.
 
-## What you can do
+[![Release](https://img.shields.io/badge/release-v0.4.1-1f6feb?style=flat-square)](https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1)
+[![License](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](LICENSE)
+![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square)
+![Rust](https://img.shields.io/badge/Rust-backend-000000?style=flat-square)
+![React](https://img.shields.io/badge/React-19-149ECA?style=flat-square)
 
-| Area | Capabilities |
+[**Download RepoTunnel**](#download) · [**Get started**](#get-started) · [**Continuation extension**](#chatgpt-continuation-extension) · [**Security**](#security-by-design) · [**Documentation**](#documentation)
+
+</div>
+
+<p align="center">
+  <img src="./RepoTunnel.png" alt="RepoTunnel desktop application" width="100%" />
+</p>
+
+---
+
+## Why RepoTunnel
+
+AI coding tools are useful when they can work with the real project — but handing an AI unrestricted filesystem, shell, browser, Git, device, or desktop access is a much bigger decision.
+
+RepoTunnel puts a **permissioned local gateway** between the AI and your machine:
+
+- **Explicit project access** — the AI works with approved workspaces, not arbitrary host paths.
+- **Local-first control** — permissions, approvals, history, checkpoints, connection state, and device access stay in the desktop app.
+- **Safe execution** — AI commands run through platform-specific sandboxing instead of silently falling back to unrestricted host execution.
+- **Verifiable mutations** — edits, Git actions, browser actions, Phone actions, and long-running work expose state that can be reviewed and checked.
+- **Human-owned publishing** — pushing Git history, publishing releases, uploading artifacts, and other external side effects still require an explicit user request.
+- **Long-work continuity** — Project Memory, live resume state, durable processes, and the optional ChatGPT Continuation extension help work survive reconnects and long sessions.
+
+## What RepoTunnel can do
+
+| Area | What it provides |
 | --- | --- |
-| **Projects and code** | Approve local folders or clone repositories; browse, read, search, create, patch, rename, move, and delete files within workspace permissions. |
-| **Large repositories** | Indexed project inspection, paginated directory listings, cursor-based searches, and bounded file-range reads. |
-| **Terminal and verification** | Run sandboxed build/test/check presets in disposable copies, or use guarded real-workspace commands and managed long-running processes. |
-| **Git and GitHub** | Inspect status, diffs, history, and branches; review staging and commits; use a user-connected GitHub account without exposing its credential to AI tools. Publishing requires an explicit request. |
-| **Browser automation** | Control an isolated Chromium-family browser, inspect pages and network errors, capture screenshots, manage tabs/downloads, and interact through selectors or grounded semantic references. |
-| **Desktop tools** | Control permitted applications through platform adapters or use the isolated AI Workspace for supported GUI workflows. |
-| **Long-running work** | Resume with live Git/process/activity facts, Project Memory, change history, checkpoints, and Continuity / Resume v2. |
-| **Collaboration and media** | Coordinate two AI engineers with Team Mode; analyze media or manage durable Video Production projects. |
-| **Android Phone Access** | View and control a selected authorized phone, subject to locally chosen capabilities and Android's own restrictions. |
+| **Projects & code** | Approve or clone projects; browse, search, read, create, patch, rename, move, and delete within the workspace boundary. |
+| **Large repositories** | Indexed inspection, paged directory/project views, resumable search cursors, and bounded high-offset text reads. |
+| **Safe editing & history** | AI Auto / AI Review, pending diffs, version history, conservative undo/restore, checkpoints, activity history, and stale-change protection. |
+| **Terminal & processes** | Disposable network-disabled verification sandboxes plus guarded real-workspace commands and durable managed processes. |
+| **Git & GitHub** | Status, diff, log, validated staging, staged-only commits, safe restore, secret preflight, and use of RepoTunnel's connected GitHub credential without exposing it to the AI. |
+| **Browser & desktop** | Managed Chromium automation, screenshots, network/console diagnostics, semantic actions, desktop control, and isolated AI Workspace sessions. |
+| **Android Phone** | Wireless Debugging with USB fallback, live scrcpy control, apps/files/APKs/settings/logs/network tools, and optional semantic Phone Helper integration. |
+| **Team Mode** | Two persistent AI engineers with task ownership, non-overlapping path claims, parallel implementation, cross-review, and evidence-based completion. |
+| **Video** | Video Intelligence plus durable Video Production projects with scripts, scenes, narration, subtitles, rendering, preview, QA, and asset provenance. |
+| **Continuity** | Continuity / Resume v2, Project Memory, factual recovery state, and exact-chat continuation through the optional Chromium extension. |
 
-### Browser actions with explicit uncertainty
+## Get started
 
-RepoTunnel's semantic interaction layer uses **short-lived, revalidated element references**, not permanent guesses about where a button is. Browser click/type mutations record a bounded receipt. If transport is lost after a mutation may have run, RepoTunnel reports an **ambiguous** outcome instead of blindly replaying a click or form submission.
+### 1. Install RepoTunnel
 
-The same permission and sensitive-field boundaries apply to supported desktop semantic actions.
+Download the package for your operating system from the [latest release](https://github.com/Yashwanth034/RepoTunnel/releases/latest), then open RepoTunnel.
 
-### Desktop control and AI Workspace
+### 2. Approve a project
 
-With local **Desktop** permission, RepoTunnel can operate supported application windows while blocking control of RepoTunnel itself. **AI Workspace** runs compatible GUI applications in an isolated virtual desktop so AI interactions do not take focus from your normal desktop session. Linux accessibility automation is the primary validated path; Windows and macOS semantic adapters require native validation.
+Add or clone a project and choose its local access mode:
 
-### Android Phone Access
+- **Read only** — inspection only.
+- **Read / write** — mutations are allowed through RepoTunnel's policy layer.
 
-Pair an Android phone using **Wireless Debugging**, with authorized USB fallback for the same selected device. The Phone page provides persistent **scrcpy-based live viewing and human control**, plus guarded AI capabilities for apps, files, diagnostics, and accessibility-based semantic interactions through the optional bundled Phone Helper.
+Then choose how AI changes should behave:
 
-**Human Phone-panel control and AI/MCP control follow separate paths.** The user chooses **Off / Limited / Full**, individual Limited permissions, and **Pause AI** locally; MCP cannot raise those permissions or select a different phone. Payment-sensitive foreground apps block AI screen observation and control without requiring the Accessibility service to be disabled. Android permissions and vendor policy still apply.
+- **AI Review** — supported mutations wait for local approval.
+- **AI Auto** — supported mutations can apply automatically while workspace, secret, sandbox, Phone, browser, and publish boundaries remain enforced.
+
+### 3. Connect your AI client
+
+RepoTunnel keeps the raw MCP gateway on loopback and provides supported remote connection paths:
+
+| Connection | Use case |
+| --- | --- |
+| **ngrok** | Easiest managed public HTTPS path; uses your ngrok account/token. |
+| **Cloudflare Tunnel** | Use an existing Cloudflare tunnel and `cloudflared`. |
+| **Direct HTTPS** | Advanced self-routed TLS/ACME path without a relay provider. |
+| **OpenAI Secure MCP Tunnel** | Optional integration for environments using OpenAI's tunnel client. |
+
+Public MCP access uses RepoTunnel's OAuth boundary where applicable, including DCR/PKCE support.
+
+### 4. Add RepoTunnel to ChatGPT
+
+In ChatGPT's current custom-app / Developer Mode flow:
+
+1. Create a custom MCP app.
+2. Enter the HTTPS MCP endpoint shown by RepoTunnel.
+3. Choose OAuth when using RepoTunnel's public OAuth path.
+4. Complete authorization.
+5. Refresh or rescan tools when the RepoTunnel MCP schema changes.
+6. Verify the connection with a real RepoTunnel tool call such as listing approved workspaces.
+
+> ChatGPT app availability and exact UI steps can vary by plan/workspace and may change independently of RepoTunnel.
+
+## ChatGPT Continuation Extension
+
+RepoTunnel includes an optional Chromium companion at:
+
+```text
+extensions/chatgpt-continuation/
+```
+
+It binds only the **exact ChatGPT conversations you explicitly save**. When RepoTunnel has a continuation checkpoint for that conversation, the extension waits for an idle, completed response and an empty composer before delivering the exact checkpoint.
+
+Safety behavior includes:
+
+- no guessed conversation targeting
+- no overwriting text already typed by the user
+- protection against recent human composer input
+- prepare → authorize → one-send → acknowledge delivery
+- uncertain post-send outcomes are **not automatically replayed**
+
+### Install the extension
+
+1. Open `chrome://extensions` in Chrome/Chromium or a compatible Chromium browser.
+2. Enable **Developer mode**.
+3. Choose **Load unpacked**.
+4. Select `extensions/chatgpt-continuation`.
+5. Open the ChatGPT conversation you want RepoTunnel to resume.
+6. Open **RepoTunnel Continuation** and choose **Add current ChatGPT chat**.
+
+The extension source is available on `main`. It is not a separate asset in the already-published v0.4.1 desktop release.
+
+[Extension guide](extensions/chatgpt-continuation/README.md) · [Privacy](extensions/chatgpt-continuation/PRIVACY.md)
+
+## Android Phone Access
+
+RepoTunnel can maintain a user-selected Android device connection with **Wireless Debugging preferred** and authorized USB fallback for the same device.
+
+The Phone surface supports:
+
+- **Off / Limited / Full** AI access plus a separate **Pause AI**
+- persistent live video and human control using the bundled scrcpy 4.1 server
+- guarded AI screen/touch/typing actions
+- app management, bounded files, APK install/remove, settings, shell, logs, and network diagnostics
+- short-lived semantic refs and bounded semantic transactions through the bundled **RepoTunnel Phone Helper**
+
+The helper is bundled with RepoTunnel; it is not a separate general-purpose Android app. Android Accessibility remains user-controlled and must be enabled by the user.
+
+When a payment-sensitive app is foreground, RepoTunnel blocks AI observation/control paths rather than trying to bypass the application's security model.
 
 [Phone Access details](docs/phone-access.md)
 
-### Two-engineer Team Mode
+## Browser, Desktop & AI Workspace
 
-Connect two AI engineers to one approved workspace. Team Mode coordinates separate task ownership, non-overlapping file claims, browser leases, cross-review, and evidence-based verification. The team can continue taking new work requests until you end it.
+RepoTunnel's browser layer uses isolated/persistent Chromium-family profiles and returns document-aware navigation/action state.
+
+State-changing browser and semantic actions use bounded mutation receipts. If helper transport is lost after a mutation may already have happened, RepoTunnel reports the outcome as **ambiguous** and does not blindly replay the action.
+
+Desktop control requires explicit local permission and blocks AI control of RepoTunnel itself. **AI Workspace** provides an isolated virtual desktop for supported GUI workflows so AI-owned application sessions do not need to take over the user's normal desktop.
+
+## Team Mode
+
+Team Mode keeps two AI engineers attached to one approved project.
+
+The coordination model enforces:
+
+- planning before implementation
+- distinct task ownership
+- non-overlapping path claims
+- parallel work where safe
+- cross-review by the other engineer
+- evidence-based success criteria
+- persistent teams across multiple user requests until the user explicitly ends the team
 
 [Team Mode details](docs/team-mode.md)
 
-### Video Intelligence and Production
+## Video Intelligence & Production
 
-Analyze supported public or approved local videos with transcript and visual evidence. Video Production maintains projects with scripts, storyboards, scene assets, narration, subtitles, rendering, previews, QA, and license provenance. Tutorial scenes can use HTML/CSS/GSAP; story workflows can use native motion or optional **installed** creative tools. Availability depends on local media tools and project requirements.
+RepoTunnel can analyze supported public or approved local media and can maintain durable Video Production projects.
+
+Production workflows can include script/storyboard state, generated scenes, narration, subtitles, timeline/render jobs, preview, QA, cleanup, and license/provenance records. Tutorial/explainer scenes can use deterministic HTML/CSS/GSAP capture; story workflows can route suitable work through native motion or optional installed creative engines.
 
 [Video details](docs/video.md)
 
 ## Security by design
 
-RepoTunnel is a controlled local gateway, **not unrestricted remote desktop or filesystem access**.
+RepoTunnel is designed as a **controlled local gateway**, not as unrestricted remote desktop or host shell access.
 
-- **Approved workspaces:** AI tools use workspace IDs and relative paths. Protected files, path traversal, and escapes through symlinks are blocked.
-- **AI Auto or AI Review:** Apply supported actions automatically within the policy, or require local approval. Remote MCP calls cannot approve their own queued Review requests.
-- **Fail-closed execution:** AI terminal commands run in a platform-specific OS sandbox. Disposable verification presets have no network access and do not write back into the original project.
-- **Publishing stays intentional:** AI Auto is not standing permission to push commits, publish releases, or upload other artifacts.
-- **Local control:** Pause AI, revoke remote MCP authorization, and manage Phone and Desktop permissions from RepoTunnel.
-- **Protected connection:** The raw MCP gateway binds to loopback. Public connection paths use RepoTunnel's OAuth boundary; Direct HTTPS publishes only its required routes.
+| Boundary | Behavior |
+| --- | --- |
+| **Workspace** | AI-facing file operations use workspace IDs + relative paths; traversal, protected credential files, and unsafe symlink escapes are rejected. |
+| **Commands** | AI execution fails closed through Bubblewrap on Linux, AppContainer + Job Object isolation on Windows, or the current macOS Seatbelt compatibility backend. |
+| **Review** | Remote MCP calls cannot approve/reject/undo their own locally queued Review actions. |
+| **Git** | Staging/commits are validated and secret-scanned; push requires a current explicit human publishing instruction. |
+| **Browser** | Sensitive semantic fields, stale refs, and uncertain mutations are guarded; ambiguous state-changing actions are not auto-replayed. |
+| **Phone** | MCP cannot pair/select a phone, raise access, change capability grants, or unpause Phone Access. |
+| **Network** | The raw MCP gateway remains loopback-only; public connection paths sit behind RepoTunnel's authenticated boundary. |
+| **Secrets** | Protected paths and credential-like output are filtered/redacted across the relevant RepoTunnel surfaces. |
 
-RepoTunnel does not replace operating-system, Android, third-party application, or external-service security policies.
+RepoTunnel does not attempt to bypass operating-system, Android, browser, application, or external-service security policies.
 
-[Security model](docs/security.md) · [Vulnerability reporting](SECURITY.md)
+[Technical security model](docs/security.md) · [Security policy](SECURITY.md)
 
 ## Download
 
-**Current public release: [v0.4.1](https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1)**
+**Current public release: [RepoTunnel v0.4.1](https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1)**
 
-| System | Download format |
+| Platform | Package |
 | --- | --- |
-| Linux x64 — Debian, Ubuntu, Linux Mint | `.deb` |
-| Linux x64 — Fedora/RPM-based | `.rpm` |
-| Other compatible Linux x64 distributions | `.AppImage` |
-| Windows x64 | NSIS `.exe` or `.msi` |
-| macOS Apple Silicon | `aarch64.dmg` |
-| macOS Intel | `x64.dmg` |
+| **Debian / Ubuntu / Linux Mint x64** | [`.deb`](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_amd64.deb) |
+| **Fedora / RPM-based Linux x64** | [`.rpm`](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-0.4.1-1.x86_64.rpm) |
+| **Other compatible Linux x64** | [`.AppImage`](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_amd64.AppImage) |
+| **Windows x64** | [NSIS `.exe`](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_x64-setup.exe) · [`.msi`](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_x64_en-US.msi) |
+| **macOS Apple Silicon** | [`aarch64.dmg`](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_aarch64.dmg) |
+| **macOS Intel** | [`x64.dmg`](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_x64.dmg) |
 
-Use the [official Releases page](https://github.com/Yashwanth034/RepoTunnel/releases/latest) for installers, release notes, `RepoTunnel-SHA256SUMS.txt`, and signed updater metadata. No RepoTunnel account is required.
+The release also publishes updater signatures, signed updater archives, `latest.json`, and [SHA-256 checksums](https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-SHA256SUMS.txt).
 
-### Platform notes
+No RepoTunnel account is required.
 
-RepoTunnel packages Linux, Windows, and both macOS architectures. **Packaging is not a promise of identical native automation support.**
+### Platform status
 
-- **Linux** is the primary live-validated development platform. AI command isolation uses Bubblewrap; full managed-process reattachment after a complete RepoTunnel restart is currently Linux-only.
-- **Windows** uses AppContainer and Job Object command isolation. Native UI Automation adapters exist, but desktop semantic behavior and app compatibility require Windows validation.
-- **macOS** uses a Seatbelt `sandbox-exec` compatibility backend for AI commands. Native Accessibility adapters exist, but desktop automation is not claimed to match Linux. In-app update **installation is intentionally disabled on macOS** pending verified replacement/restore safety; install newer DMGs manually.
-- **AI Workspace, browser integrations, and phone workflows** may depend on installed helpers, platform permissions, and supported application/device behavior. Android Phone Access has been exercised on a real device, not every Android vendor/version.
+RepoTunnel packages Linux, Windows, and both macOS architectures, but packaging does not imply identical native automation coverage.
 
-For the current technical boundaries, see [Product](docs/product.md), [Architecture](docs/architecture.md), and [Release / Auto Update](docs/release.md).
+- **Linux** is the primary live-validated development platform. Full managed-process reattachment after a complete RepoTunnel restart is currently Linux-only.
+- **Windows** uses AppContainer + Job Object command isolation. Native UI Automation adapters exist and require native compatibility validation.
+- **macOS** uses the current Seatbelt `sandbox-exec` compatibility backend. Update discovery is supported, but in-app update installation is intentionally disabled pending verified replacement/restore safety.
+- **Android Phone Access** has been exercised on a real Android device; vendor/OS policy can still change capability availability.
 
-## Get started
-
-1. **Install** RepoTunnel using the package for your OS and open the desktop app.
-2. **Add or clone a project.** Choose the approved workspace and its read-only/read-write permissions.
-3. **Choose AI Auto or AI Review.** These control how supported changes and command requests are handled.
-4. **Connect an MCP client.** In RepoTunnel's **Connect** page, configure a public HTTPS provider and use the exact MCP endpoint it displays (typically `https://your-host/mcp`).
-5. **Authorize the connection.** In ChatGPT's current custom-app/Developer Mode flow, add the MCP endpoint, choose OAuth, authorize RepoTunnel, and refresh its tool discovery if needed. Verify by asking the AI to list approved workspaces.
-
-**Connection choices:** Built-in **ngrok** (ngrok account/token required; CLI not required), **Cloudflare Tunnel** (configured tunnel and `cloudflared`), **Direct HTTPS** (advanced, self-routed TLS/ACME), or the optional **OpenAI Secure MCP Tunnel** integration.
-
-The raw workspace MCP gateway remains on `127.0.0.1`; never expose that gateway directly. ChatGPT custom-app availability and interface steps depend on your current ChatGPT plan/workspace.
-
-[Connection guide](docs/connection.md) · [Direct HTTPS guide](docs/direct-https.md)
-
-## How it works
+## Architecture
 
 ```text
 ChatGPT / MCP-compatible AI client
-                |
-        HTTPS + OAuth
-                |
-    RepoTunnel desktop gateway
-                |
-     Permissioned MCP tools
-                |
-       Approved workspace
-       +-- Files and search
-       +-- Sandboxed commands / processes
-       +-- Git and GitHub
-       +-- Browser / Desktop / AI Workspace
-       +-- Phone / Video / Team / Continuity
+                  │
+           HTTPS + OAuth
+                  │
+     ngrok / Cloudflare / Direct HTTPS
+       / optional Secure MCP Tunnel
+                  │
+                  ▼
+      RepoTunnel authenticated boundary
+                  │
+                  ▼
+          loopback MCP gateway
+                  │
+                  ▼
+      capability + policy router
+          │       │       │
+          │       │       ├── Browser / Desktop / AI Workspace
+          │       │       ├── Android Phone
+          │       │       ├── Video / Team / Continuity
+          │       │
+          │       └── Sandboxed commands / managed processes
+          │
+          └── Approved workspace
+                ├── files + indexed search
+                ├── safe editing + history
+                └── Git / GitHub
 ```
 
-RepoTunnel is built with **Tauri 2, Rust, React, and TypeScript**. The Rust backend enforces the local security boundary; the desktop UI provides connection, project, permission, history, and review controls.
+RepoTunnel is built with **Tauri 2, Rust, React 19, and TypeScript**. Rust owns the privileged local boundary and MCP runtime; React/TypeScript provide the desktop interface.
+
+## Development
+
+```bash
+git clone https://github.com/Yashwanth034/RepoTunnel.git
+cd RepoTunnel
+npm ci
+npm run tauri dev
+```
+
+Useful checks:
+
+```bash
+npm run check
+npm run test:frontend
+npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+```
+
+Platform-specific Tauri/native dependencies are required to build the desktop application.
 
 ## Documentation
 
-| Guide | Topics |
+| Topic | Guide |
 | --- | --- |
-| [Product](docs/product.md) · [Architecture](docs/architecture.md) | Scope, design, and platform limitations |
-| [MCP tools](docs/mcp.md) · [Projects and search](docs/project-index.md) | Tool behavior and large-repository inspection |
-| [Safe editing](docs/safe-editing.md) · [Commands](docs/commands.md) · [Git](docs/git.md) | Changes, execution, and repository operations |
-| [Browser and semantic interaction](SEMANTIC_INTERACTION_LAYER.md) · [AI continuity](AI_CONTINUITY.md) | Semantic safety and recovery design/history |
-| [Team Mode](docs/team-mode.md) · [Phone](docs/phone-access.md) · [Video](docs/video.md) | Advanced workflows |
-| [Connections](docs/connection.md) · [Direct HTTPS](docs/direct-https.md) | Remote MCP setup |
-| [Security](docs/security.md) · [Release / Auto Update](docs/release.md) | Security architecture and distribution |
-| [Acceptance checklist](docs/acceptance.md) · [Third-party notices](THIRD_PARTY_NOTICES.md) | Validation and attribution |
+| Product scope & architecture | [Product](docs/product.md) · [Architecture](docs/architecture.md) |
+| MCP contract & projects | [MCP tools](docs/mcp.md) · [Project indexing](docs/project-index.md) |
+| Editing, commands & Git | [Safe editing](docs/safe-editing.md) · [Commands](docs/commands.md) · [Git](docs/git.md) |
+| Browser & semantic safety | [Semantic Interaction Layer](SEMANTIC_INTERACTION_LAYER.md) |
+| Continuity & recovery | [AI Continuity](AI_CONTINUITY.md) |
+| Connections | [Remote MCP](docs/connection.md) · [Direct HTTPS](docs/direct-https.md) |
+| Advanced workflows | [Team Mode](docs/team-mode.md) · [Phone](docs/phone-access.md) · [Video](docs/video.md) |
+| Security & releases | [Security](docs/security.md) · [Release / Auto Update](docs/release.md) · [Acceptance](docs/acceptance.md) |
 
-## Contributing and support
+## Contributing
 
-Issues, feature requests, and pull requests: [GitHub Issues](https://github.com/Yashwanth034/RepoTunnel/issues). Please report security vulnerabilities through the guidance in [SECURITY.md](SECURITY.md), rather than including sensitive details in a public issue.
+Issues, feature requests, and pull requests are welcome through [GitHub Issues](https://github.com/Yashwanth034/RepoTunnel/issues).
 
-Released under the [MIT License](LICENSE). Copyright © 2026 Yashwanth.
+For security vulnerabilities, follow [SECURITY.md](SECURITY.md) and avoid posting secrets, private repository content, or personal filesystem paths in a public issue.
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+Copyright © 2026 Yashwanth.
