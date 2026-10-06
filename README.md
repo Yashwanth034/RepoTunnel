@@ -4,7 +4,7 @@
 
 # RepoTunnel
 
-### Give AI access to the project you're working on  ###.
+### Give AI access to the project you're working on.
 
 **RepoTunnel is a local-first desktop gateway for MCP-compatible AI clients.**
 
