@@ -135,7 +135,6 @@ jobs:
 
   linux:
     name: Linux x64
-    needs: quality
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
@@ -207,19 +206,16 @@ jobs:
           path: platform-artifacts/*
           if-no-files-found: error
 
-  windows:
-    name: Windows x64
-    needs: quality
+  windows_checks:
+    name: Windows x64 validation
     runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -227,13 +223,12 @@ jobs:
           toolchain: "1.97.1"
           components: clippy
 
-      - name: Cache Rust
+      - name: Cache Rust checks
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-
-      - name: Install dependencies
-        run: npm ci
+          shared-key: windows-x64-checks
+          save-if: ${{ github.ref_name == github.event.repository.default_branch }}
 
       - name: Verify Windows GUI subsystem
         shell: pwsh
@@ -252,11 +247,48 @@ jobs:
           REPOTUNNEL_WINDOWS_TEST_MANIFEST: "1"
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache Rust release build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: windows-x64-release
+          save-if: ${{ github.ref_name == github.event.repository.default_branch }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify Windows GUI subsystem
+        shell: pwsh
+        run: |
+          $entry = Get-Content "src-tauri/src/main.rs" -Raw
+          if (-not $entry.Contains('windows_subsystem = "windows"')) {
+            throw "Windows release builds must use the GUI subsystem."
+          }
+
       - name: Build signed installers
-        env:
-          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/usr/src/repotunnel-build
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: pwsh
         run: |
           npm run tauri -- build --config src-tauri/tauri.release.conf.json --bundles nsis,msi 2>&1 | Tee-Object -FilePath tauri-release-build.log
@@ -289,7 +321,6 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.name }}
-    needs: quality
     strategy:
       fail-fast: false
       matrix:
@@ -422,8 +453,8 @@ jobs:
 
   release:
     name: Publish release
-    if: github.ref_type == 'tag'
-    needs: [linux, windows, macos]
+    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+    needs: [quality, linux, windows_checks, windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -465,11 +496,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if [[ "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
             gh api --method PATCH \
               "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" \
               -f sha="${GITHUB_SHA}" \
               -F force=true >/dev/null
+          else
+            gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${RELEASE_TAG}" \
+              -f sha="${GITHUB_SHA}" >/dev/null
           fi
 
       - name: Publish GitHub release
@@ -487,7 +523,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if [[ "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
             gh api --method DELETE \
               "repos/${GITHUB_REPOSITORY}/git/refs/tags/${GITHUB_REF_NAME}" \
               >/dev/null || echo "Release succeeded; retry-tag cleanup can be done later."
