@@ -15,7 +15,7 @@ const {
   noindex = false,
   skipTarget = 'main-content',
 } = Astro.props;
-const fullTitle = title === 'RepoTunnel' ? title : `${title} · RepoTunnel`;
+const fullTitle = title === 'RepoTunnel' || title.startsWith('RepoTunnel — ') ? title : `${title} · RepoTunnel`;
 const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site).toString() : null;
 const socialImage = Astro.site ? new URL('/social-card.png', Astro.site).toString() : null;
 const application = type === 'software';
