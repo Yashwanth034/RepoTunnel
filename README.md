@@ -8,13 +8,41 @@
 
 **RepoTunnel is a local-first desktop gateway for MCP-compatible AI clients.**
 
-RepoTunnel lets you work on your local projects directly from a regular ChatGPT Web conversation. With the Direct HTTPS setup, ChatGPT connects to RepoTunnel running on your computer. You can use GPT‑6 Sol or GPT‑5.6 Sol to read and edit files, run commands, investigate problems, and manage the projects you have approved for access.so chatgpt webchat conversation has unlimited usage so you work on your projects without any limits or unlimited usage of gpt 6 and gpt 5.6 sol
+## Work on your local projects from ChatGPT Web
 
-Instead of copying files into chat and manually applying every suggested change, you can ask ChatGPT to work with the actual project. For example, ask it to inspect your website, understand the code, fix an issue, run the relevant checks, and explain the results. RepoTunnel carries out the authorized actions in your local environment and returns the results to the conversation, so you can review the work and continue from there.
+RepoTunnel connects your regular ChatGPT Web conversation to approved
+projects on your computer. Use GPT‑6 Sol or GPT‑5.6 Sol to read and edit
+files, run commands, investigate problems, and manage your project.
+so chatgpt webchat conversation has unlimited usage so you work on your 
+projects without any limits or unlimited usage of gpt 6 and gpt 5.6 sol
 
-Direct HTTPS provides unlimited connection usage without RepoTunnel adding a monthly tunnel request quota or connection-credit allowance. Your ongoing project work does not depend on a tunnel provider’s monthly request allowance. Keep your RepoTunnel service and HTTPS endpoint running, and use that connection for successive tasks, fixes, reviews, and improvements.
+### Work with the actual project
 
-This workflow uses your existing ChatGPT Web conversation. You do not need a separate OpenAI API key or API token purchases for those chats, and you do not need to open ChatGPT Work or Codex to work on your local projects. You give instructions in ChatGPT, RepoTunnel connects those instructions to your approved local environment, and the results come back into the same conversation.
+Ask ChatGPT to inspect your code, understand how it works, make changes,
+and run the relevant checks. RepoTunnel carries out authorized actions
+in your local environment and returns the results to the conversation.
+
+You can review what changed, discuss the results, and continue working
+without manually copying every file or applying every suggested edit.
+
+### Unlimited Direct HTTPS connection usage
+
+Direct HTTPS connects ChatGPT to your own running RepoTunnel endpoint.
+RepoTunnel adds no monthly tunnel request quota or connection-credit
+allowance, so your connection usage does not depend on a tunnel
+provider’s monthly request allowance.
+
+Keep RepoTunnel and your HTTPS endpoint running to continue using the
+connection for project tasks, fixes, reviews, and improvements.
+
+### Use your existing ChatGPT conversation
+
+This workflow needs no separate OpenAI API key or API token purchases
+for those chats. You do not need to open ChatGPT Work or Codex to access
+your local projects.
+
+Give instructions in ChatGPT, let RepoTunnel perform the approved local
+actions, and review the results in the same conversation.
 
 [![Release](https://img.shields.io/badge/release-v0.4.1-1f6feb?style=flat-square)](https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1)
 [![License](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](LICENSE)
