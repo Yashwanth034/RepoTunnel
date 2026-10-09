@@ -4,17 +4,25 @@
 
 # RepoTunnel
 
-### Give AI access to the project you're working on.
+### Give AI access to the project you're working on
 
 **RepoTunnel is a local-first desktop gateway for MCP-compatible AI clients.**
+
+[![Release](https://img.shields.io/badge/release-v0.4.1-1f6feb?style=flat-square)](https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1)
+[![License](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](LICENSE)
+![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square)
+![Rust](https://img.shields.io/badge/Rust-backend-000000?style=flat-square)
+![React](https://img.shields.io/badge/React-19-149ECA?style=flat-square)
+
+[**Download RepoTunnel**](#download) · [**Get started**](#get-started) · [**Continuation extension**](#chatgpt-continuation-extension) · [**Security**](#security-by-design) · [**Documentation**](#documentation)
+
+</div>
 
 ## Work on your local projects from ChatGPT Web
 
 RepoTunnel connects your regular ChatGPT Web conversation to approved
 projects on your computer. Use GPT‑6 Sol or GPT‑5.6 Sol to read and edit
 files, run commands, investigate problems, and manage your project.
-so chatgpt webchat conversation has unlimited usage so you work on your 
-projects without any limits or unlimited usage of gpt 6 and gpt 5.6 sol
 
 ### Work with the actual project
 
@@ -44,21 +52,12 @@ your local projects.
 Give instructions in ChatGPT, let RepoTunnel perform the approved local
 actions, and review the results in the same conversation.
 
-[![Release](https://img.shields.io/badge/release-v0.4.1-1f6feb?style=flat-square)](https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1)
-[![License](https://img.shields.io/badge/license-MIT-2ea44f?style=flat-square)](LICENSE)
-![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square)
-![Rust](https://img.shields.io/badge/Rust-backend-000000?style=flat-square)
-![React](https://img.shields.io/badge/React-19-149ECA?style=flat-square)
-
-[**Download RepoTunnel**](#download) · [**Get started**](#get-started) · [**Continuation extension**](#chatgpt-continuation-extension) · [**Security**](#security-by-design) · [**Documentation**](#documentation)
-
-</div>
-
 <p align="center">
   <img src="./RepoTunnel.png" alt="RepoTunnel desktop application" width="100%" />
 </p>
 
 ---
+
 
 ## Why RepoTunnel
 
