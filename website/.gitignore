@@ -1,0 +1,10 @@
+node_modules/
+.astro/
+dist/
+.env
+.DS_Store
+__pycache__/
+*.py[cod]
+.lock-temp/
+
+.repotunnel-tmp/

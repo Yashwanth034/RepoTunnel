@@ -1,0 +1,17 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import content from '../data/site-content.json';
+const r = content.site.release;
+---
+<BaseLayout title="Downloads" description="Download the current official RepoTunnel release for Linux, Windows and macOS.">
+  <div class="container listing-head"><span class="eyebrow"><span class="eyebrow-dot"></span>Downloads</span><h1>RepoTunnel v{r.version}</h1><p>Released {r.date}. These buttons point directly to the official GitHub Release assets published by the RepoTunnel repository.</p></div>
+  <div class="container section-tight">
+    <div class="download-grid">
+      <div class="download-card"><h2>Linux</h2><p>Debian/Ubuntu/Linux Mint, RPM-family distributions, or portable AppImage.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.linuxDeb}>.deb</a><a class="btn" href={r.downloads.linuxRpm}>.rpm</a><a class="btn" href={r.downloads.linuxAppImage}>AppImage</a></div></div>
+      <div class="download-card"><h2>Windows x64</h2><p>Choose the normal NSIS setup executable or MSI package.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.windowsExe}>Setup .exe</a><a class="btn" href={r.downloads.windowsMsi}>.msi</a></div></div>
+      <div class="download-card"><h2>macOS Apple Silicon</h2><p>DMG for Apple Silicon Macs.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.macArm}>ARM64 DMG</a></div></div>
+      <div class="download-card"><h2>macOS Intel</h2><p>DMG for Intel Macs.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.macIntel}>x64 DMG</a></div></div>
+    </div>
+    <div class="callout callout-spaced"><h2>Verify before you install</h2><p>Use the official checksum file and release page to confirm the package you downloaded.</p><div class="callout-actions"><a class="btn btn-accent" href={r.checksums}>SHA-256 checksums</a><a class="btn" href={r.releaseUrl}>Release notes on GitHub</a><a class="btn" href="/install/">Installation guide</a></div></div>
+  </div>
+</BaseLayout>

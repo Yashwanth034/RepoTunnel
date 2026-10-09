@@ -1,0 +1,86 @@
+---
+import GuideFigure, { type GuideImage } from './GuideFigure.astro';
+import CodeBlock from './CodeBlock.astro';
+import content from '../data/site-content.json';
+import { relatedPages } from '../data/related-pages';
+type Page = (typeof content.products)[number] | (typeof content.solutions)[number];
+const { page, base = '' } = Astro.props as { page: Page; base?: string };
+const slugify = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const relatedDocs: Record<string, string> = {
+  'projects':'projects/access-and-modes',
+  'mcp':'reference/mcp',
+  'terminal':'commands/verification-vs-live',
+  'git-github':'git/workflow',
+  'browser-automation':'browser/managed-browser',
+  'ai-workspace':'desktop/ai-workspace',
+  'desktop-control':'desktop/ai-workspace',
+  'android-phone':'phone/overview',
+  'team-mode':'team/two-ai-workflow',
+  'continuity':'continuity/resume-v2',
+  'video':'video/production',
+  'direct-https':'connections/direct-https',
+  'chatgpt-local-projects':'getting-started/connect-chatgpt',
+  'secure-ai-local-files':'projects/access-and-modes',
+  'local-mcp-development':'connections/overview',
+  'ai-browser-automation':'browser/managed-browser',
+  'ai-terminal-access':'commands/verification-vs-live',
+  'chatgpt-git-workflow':'git/workflow',
+  'android-ai-control':'phone/overview',
+  'two-ai-coding':'team/two-ai-workflow',
+  'long-running-ai-work':'continuity/resume-v2'
+};
+Object.assign(relatedDocs, {
+  'local-model-chat':'getting-started/home-and-local-chat',
+  'history':'history/activity-and-versions',
+  'workflow-checks':'checks/workflow-readiness',
+  'chatgpt-extension':'continuity/chatgpt-extension'
+});
+type ContentSection = {
+  title: string; paragraphs: string[]; bullets: string[];
+  code?: string | null; note?: string | null;
+  links?: {label: string; href: string}[];
+  steps?: string[];
+  image?: GuideImage;
+};
+const sections = page.sections as ContentSection[];
+const docsLink = relatedDocs[page.slug];
+if (!docsLink) throw new Error(`Missing related documentation mapping for ${base}/${page.slug}`);
+const candidates = base === 'solutions' ? content.solutions : content.products;
+const relatedSlugs = relatedPages[base]?.[page.slug];
+if (!relatedSlugs || relatedSlugs.length !== 3 || new Set(relatedSlugs).size !== 3 || relatedSlugs.includes(page.slug)) {
+  throw new Error(`Invalid related pages for ${base}/${page.slug}`);
+}
+const related = relatedSlugs.map(slug => {
+  const item = candidates.find(candidate => candidate.slug === slug);
+  if (!item) throw new Error(`Missing related page ${base}/${slug}`);
+  return item;
+});
+---
+<section class="page-hero product-hero">
+  <div class="container">
+    <div class="breadcrumbs"><a href="/">Home</a><a href={`/${base}/`}>{base === 'solutions' ? 'Solutions' : 'Product'}</a><span>{page.title}</span></div>
+    <span class="eyebrow"><span class="eyebrow-dot"></span>{page.eyebrow || (base === 'solutions' ? 'Solution guide' : 'Product capability')}</span>
+    <h1>{page.title}</h1>
+    <p class="lead">{page.description}</p>
+    <div class="product-hero-actions"><a class="btn btn-accent" href={`/docs/${docsLink}/`}>Read setup &amp; documentation</a><a class="btn" href="/install/">Get RepoTunnel</a></div>
+  </div>
+</section>
+<div class="container content-shell">
+  <article class="prose">
+    {sections.map((section) => {
+      const id = slugify(section.title);
+      return <section id={id}>
+        <h2>{section.title}</h2>
+        {section.paragraphs.map((p) => <p>{p}</p>)}
+          {section.steps && section.steps.length > 0 && <ol class="guide-steps">{section.steps.map(step => <li>{step}</li>)}</ol>}
+        {section.bullets.length > 0 && <ul>{section.bullets.map((b) => <li>{b}</li>)}</ul>}
+        {section.code && <CodeBlock code={section.code} label={section.title} />}
+        {section.note && <div class="note"><strong>Important</strong><p>{section.note}</p></div>}
+        {section.links && section.links.length > 0 && <div class="guide-links">{section.links.map(link => <a class="text-link" href={link.href} target={link.href.startsWith('https://') ? '_blank' : undefined} rel={link.href.startsWith('https://') ? 'noopener noreferrer' : undefined}>{link.label}</a>)}</div>}
+          {section.image && <GuideFigure image={section.image} />}
+      </section>;
+    })}
+  </article>
+  <aside class="toc" aria-label="On this page" data-pagefind-ignore><div class="toc-title">On this page</div>{sections.map((section) => <a href={`#${slugify(section.title)}`}>{section.title}</a>)}<a href={`/docs/${docsLink}/`}>Related documentation</a></aside>
+</div>
+<section class="related-section" data-pagefind-ignore><div class="container"><div class="section-marker"><h2>{base === 'solutions' ? 'Related workflows' : 'Related capabilities'}</h2><a href={`/${base}/`}>{base === 'solutions' ? 'All solutions' : 'All capabilities'}</a></div><div class="related-grid">{related.map(item=><a href={`/${base}/${item.slug}/`}><strong>{item.title}</strong><span>{item.description}</span></a>)}</div></div></section>

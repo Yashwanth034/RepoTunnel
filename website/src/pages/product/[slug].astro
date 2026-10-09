@@ -1,0 +1,8 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import GenericPage from '../../components/GenericPage.astro';
+import content from '../../data/site-content.json';
+export function getStaticPaths() { return content.products.map((page) => ({ params: { slug: page.slug }, props: { page } })); }
+const { page } = Astro.props;
+---
+<BaseLayout title={page.title} description={page.description} keywords={page.keywords} type="article"><GenericPage page={page} base="product" /></BaseLayout>

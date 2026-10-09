@@ -1,0 +1,11 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+export function getStaticPaths() { return [{ params: { version: '0.4.1' } }]; }
+---
+<BaseLayout title="RepoTunnel v0.4.1" description="RepoTunnel v0.4.1 release notes covering Phone Access, large-project reads, process reliability, browser receipts, Continuity, Team Mode and Video Production." type="article">
+  <section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="/">Home</a><a href="/changelog/">Changelog</a><span>v0.4.1</span></div><span class="eyebrow"><span class="eyebrow-dot"></span>2026-10-05</span><h1>RepoTunnel v0.4.1</h1><p class="lead">The first public 0.4.x release, combining the validated 0.4.0 capability work with final Phone reliability fixes.</p></div></section>
+  <div class="container content-shell"><article class="prose">
+    <section id="highlights"><h2>Highlights</h2><ul><li>Full Phone Access workflows with persistent scrcpy 4.1 live video, human control, semantic accessibility actions, bounded transactions, apps/files/settings/network/shell tooling and payment-sensitive privacy blocking.</li><li>Bounded large-project inspection, search and range-read tools with resumable cursors and concurrency protection.</li><li>Durable managed-process supervision with Linux restart reattachment backed by persisted supervisor state and process identity checks.</li><li>Browser mutation receipts so state-changing actions are not blindly replayed after uncertain helper transport failures.</li><li>Expanded Continuity/Resume, ChatGPT continuation recovery, Team Mode, AI Workspace recovery and Video Production.</li><li>Release validation reported 43/43 frontend tests and 448 Rust tests passing with 8 intentional ignores.</li></ul></section>
+    <section id="download"><h2>Download</h2><p>Use the official GitHub Release assets and checksum file.</p><p><a class="btn btn-accent" href="/downloads/">Download v0.4.1</a> <a class="btn" href="https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1">GitHub release</a></p></section>
+  </article><aside class="toc"><div class="toc-title">On this page</div><a href="#highlights">Highlights</a><a href="#download">Download</a></aside></div>
+</BaseLayout>

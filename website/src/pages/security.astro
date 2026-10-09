@@ -1,0 +1,18 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+<BaseLayout title="Security" description="RepoTunnel security covers approved workspaces, protected secrets, fail-closed commands, validated Git, OAuth, browser and desktop controls, and Phone Access.">
+  <section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="/">Home</a><span>Security</span></div><span class="eyebrow"><span class="eyebrow-dot"></span>Least privilege</span><h1>AI access within approved boundaries</h1><p class="lead">RepoTunnel's privileged local boundary is implemented in Rust and separates workspace access, command execution, Git publishing, browser actions, desktop control, phone access and remote transport into distinct policy surfaces.</p></div></section>
+  <section class="section"><div class="container"><div class="security-grid">
+    <article class="security-card"><strong>Approved workspace roots</strong><p>AI-facing file tools use workspace IDs plus relative paths. Absolute paths, parent traversal and symlink escapes are rejected.</p></article>
+    <article class="security-card"><strong>Protected secrets</strong><p>Common environment files, private keys, credential files and secret-bearing paths are denied even inside an approved project.</p></article>
+    <article class="security-card"><strong>Fail-closed commands</strong><p>Linux uses Bubblewrap, Windows uses AppContainer + Job Object, and macOS uses the current Seatbelt compatibility backend. No silent unrestricted fallback.</p></article>
+    <article class="security-card"><strong>Review is local</strong><p>Remote MCP cannot approve or reject its own queued AI Review file, command or Git actions.</p></article>
+    <article class="security-card"><strong>Push stays explicit</strong><p>AI Auto is not standing permission to publish. Git push requires a current explicit human instruction and a final secret preflight.</p></article>
+    <article class="security-card"><strong>Raw MCP stays loopback-only</strong><p>Public access is routed through RepoTunnel's authenticated connection boundary rather than exposing the raw local gateway.</p></article>
+    <article class="security-card"><strong>Browser mutation receipts</strong><p>Uncertain clicks/types are reported as ambiguous instead of blindly replayed after helper transport loss.</p></article>
+    <article class="security-card"><strong>Desktop self-control blocked</strong><p>Desktop permission is explicit and RepoTunnel itself cannot be targeted by its own AI desktop control path.</p></article>
+    <article class="security-card"><strong>Phone escalation blocked</strong><p>MCP cannot pair/select a different phone, raise Phone permissions or unpause AI access. Payment-sensitive foreground apps block AI control.</p></article>
+  </div></div></section>
+  <section class="section section-border"><div class="container callout"><h2>Read the technical security documentation</h2><p>The website summarizes the model. The repository remains the canonical source for implementation details, security policy and release acceptance tests.</p><div class="callout-actions"><a class="btn btn-accent" href="/docs/security/model/">Security docs</a><a class="btn" href="https://github.com/Yashwanth034/RepoTunnel/blob/main/docs/security.md">Technical model on GitHub</a><a class="btn" href="https://github.com/Yashwanth034/RepoTunnel/security">Security policy</a></div></div></section>
+</BaseLayout>

@@ -1,0 +1,20 @@
+---
+import content from '../data/site-content.json';
+type AppArea = {label: string; description: string; guide: string; anchor?: string};
+const utilityNames = new Set(['Settings', 'Help']);
+const areas = content.appAreas as AppArea[];
+const hrefFor = (area: AppArea) => '/docs/' + area.guide + '/' + (area.anchor ? '#' + area.anchor : '');
+---
+<div class="app-guide">
+  <div class="app-guide-main">
+    {areas.filter(area => !utilityNames.has(area.label)).map(area =>
+      <a href={hrefFor(area)}><strong>{area.label}</strong><span>{area.description}</span></a>
+    )}
+  </div>
+  <div class="app-guide-utilities">
+    {areas.filter(area => utilityNames.has(area.label)).map(area =>
+      <a href={hrefFor(area)}><strong>{area.label}</strong><span>{area.description}</span></a>
+    )}
+  </div>
+  <a class="text-link app-tour-link" href="/docs/getting-started/app-tour/">Take the screen-by-screen app tour</a>
+</div>

@@ -1,0 +1,72 @@
+{
+  "reviewedOn": "2026-10-08",
+  "images": [
+    {
+      "name": "ngrok-account",
+      "path": "src/assets/guides/ngrok-account.png",
+      "source": "https://dashboard.ngrok.com/signup",
+      "finalUrl": "https://login.ngrok.com/signup",
+      "kind": "Signed-out public page screenshot",
+      "width": 1200,
+      "height": 820,
+      "sha256": "5cb3eac073827e0f4869a903e67ee0df23018b8e1df4724e82deeefb2cfd1485",
+      "bytes": 31355,
+      "title": "ngrok sign up"
+    },
+    {
+      "name": "route64-portal",
+      "path": "src/assets/guides/route64-portal.png",
+      "source": "https://manager.route64.org/account/login/",
+      "finalUrl": "https://manager.route64.org/account/login/",
+      "kind": "Signed-out public page screenshot",
+      "width": 1200,
+      "height": 820,
+      "sha256": "d0386d7ba3cb67616b159124d64dfc2aaec87742bb6d5c73bdcd6c975b399f10",
+      "bytes": 451604,
+      "title": "Sign In | AS212895 route64.org Transit & Peering Manager"
+    },
+    {
+      "name": "duckdns",
+      "path": "src/assets/guides/duckdns.png",
+      "source": "https://www.duckdns.org/",
+      "finalUrl": "https://www.duckdns.org/",
+      "kind": "Signed-out public page screenshot",
+      "width": 1200,
+      "height": 820,
+      "sha256": "62320cf05938caa8fd253fa3da8f8401c6d6b03ee6de80a03cd608d4ca311505",
+      "bytes": 81903,
+      "title": "Duck DNS"
+    },
+    {
+      "name": "chrome-load-unpacked",
+      "path": "src/assets/guides/chrome-load-unpacked.png",
+      "source": "https://developer.chrome.com/static/docs/extensions/get-started/tutorial/hello-world/image/extensions-page-e0d64d89a6acf.png",
+      "kind": "Official documentation illustration; unmodified",
+      "width": 966,
+      "height": 704,
+      "sha256": "a0ca6ea39d8206491b921212ca17b066f1fc0d80c2c8b93c7411dd5f84a111b6",
+      "bytes": 18036
+    },
+    {
+      "name": "android-wireless-debugging",
+      "path": "src/assets/guides/android-wireless-debugging.png",
+      "source": "https://developer.android.com/static/studio/images/run/adb_wifi-wireless_debugging_setting.png",
+      "kind": "Official documentation illustration; unmodified",
+      "width": 365,
+      "height": 675,
+      "sha256": "ce42ba62d71090ebb686a1a920eceb111b5743713f91895c028b40ab732880e9",
+      "bytes": 71979
+    },
+    {
+      "name": "cloudflare-frame-150",
+      "path": "src/assets/guides/cloudflare-frame-150.png",
+      "source": "https://developers.cloudflare.com/tunnel/get-started/",
+      "kind": "Frame from Cloudflare's official public setup tutorial",
+      "timeSeconds": 150,
+      "width": 1280,
+      "height": 720,
+      "sha256": "8c1c8b5a01868bb529f7c9b3d44eacb9a6d33ad05119a52343686f2cd2edc90d",
+      "bytes": 197268
+    }
+  ]
+}

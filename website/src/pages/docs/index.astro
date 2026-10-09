@@ -1,0 +1,16 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import content from '../../data/site-content.json';
+const groups = [...new Set(content.docs.map((d) => d.group))];
+---
+<BaseLayout title="Documentation" description="Official RepoTunnel setup, security and workflow documentation for local MCP projects, connections, Git, automation, phones and recovery.">
+ <section class="page-hero docs-index-hero"><div class="container"><div class="breadcrumbs"><a href="/">Home</a><span>Docs</span></div><span class="eyebrow">REPOSITORY-GROUNDED GUIDES</span><h1>Use RepoTunnel with confidence</h1><p class="lead">Set up RepoTunnel, understand its permission boundaries and find the next step when something goes wrong.</p><div class="hero-actions"><button class="btn btn-accent" data-action="search-open">Search all guides <span aria-hidden="true">⌕</span></button><a class="btn" href="/docs/getting-started/what-is-repotunnel/">Start here</a></div></div></section>
+ <div class="container docs-index">
+  <div class="docs-index-feature">
+   <a href="/docs/getting-started/installation/"><span>01 / INSTALL</span><h2>Install and open RepoTunnel</h2><p>Choose the platform package, launch the application and approve a workspace.</p><strong>Start setup</strong></a>
+   <a href="/docs/getting-started/connect-chatgpt/"><span>02 / CONNECT</span><h2>Make your first MCP connection</h2><p>Configure an authenticated endpoint and verify it from your AI client.</p><strong>Connect ChatGPT</strong></a>
+   <a href="/docs/getting-started/app-tour/"><span>03 / EXPLORE</span><h2>Find your way around the app</h2><p>Understand every sidebar screen, local chat, recovery tools and the optional companion.</p><strong>Take the app tour</strong></a>
+  </div>
+  {groups.map(group=><section class="docs-index-group"><h2>{group}</h2><div class="docs-index-links">{content.docs.filter(d=>d.group===group).map(d=><a href={`/docs/${d.slug}/`}><strong>{d.title}</strong><span>{d.description}</span></a>)}</div></section>)}
+ </div>
+</BaseLayout>

@@ -1,0 +1,140 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import content from '../data/site-content.json';
+import AppNavigation from '../components/AppNavigation.astro';
+
+const paths = [
+  { n: '01', title: 'Install RepoTunnel', text: 'Choose the official package for your operating system.', url: '/install/', link: 'Installation' },
+  { n: '02', title: 'Approve a workspace', text: 'Select a project root and the access policy it can use.', url: '/docs/getting-started/first-project/', link: 'First project' },
+  { n: '03', title: 'Connect an AI client', text: 'Authenticate the connection and make a real MCP request.', url: '/docs/getting-started/connect-chatgpt/', link: 'Connection guide' },
+];
+---
+<BaseLayout title="Connect ChatGPT to local projects" description={content.site.description} keywords={['ChatGPT local projects', 'ChatGPT local files', 'ChatGPT Direct HTTPS', 'unlimited Direct HTTPS connections']} type="software">
+  <section class="homepage-hero">
+    <div class="container">
+      <div class="hero-kicker"><span class="signal-dot"></span><span>Local-first AI gateway</span><span class="hero-kicker-rule"></span><span>Open source</span></div>
+      <div class="hero-editorial">
+        <div class="hero-headline">
+          <h1>Connect ChatGPT <br />to your local projects</h1>
+          <p class="hero-subtitle">Work from the chat you already use</p>
+          <p class="hero-lead">Read and edit files, run commands and review real project work from your regular ChatGPT Web conversation. RepoTunnel connects the local projects you approve through MCP.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary btn-large" href="/downloads/">Download RepoTunnel</a>
+            <a class="btn btn-secondary btn-large" href="/solutions/chatgpt-local-projects/">See how it works</a>
+          </div>
+          <div class="hero-proof">
+            <span><i aria-hidden="true"></i>No account required</span>
+            <span><i aria-hidden="true"></i>Linux, Windows &amp; macOS</span>
+          </div>
+        </div>
+        <figure class="request-map" aria-label="Simplified RepoTunnel access path">
+          <figcaption class="request-map-caption"><span><i aria-hidden="true"></i> Access path</span><span>Local and authenticated</span></figcaption>
+          <div class="request-map-body">
+            <div class="flow-stage"><span class="flow-index">01</span><strong>AI client</strong><p>Requests a capability through MCP</p></div>
+            <div class="flow-connector" aria-hidden="true"><span></span></div>
+            <div class="flow-core"><span class="flow-index">02</span><div class="flow-core-title"><strong>RepoTunnel</strong></div><p>Authenticates the request, checks scope and applies the capability policy</p><div class="flow-tags"><span>Identity</span><span>Workspace</span><span>Policy</span></div></div>
+            <div class="flow-connector" aria-hidden="true"><span></span></div>
+            <div class="flow-stage"><span class="flow-index">03</span><strong>Approved capability</strong><p>Runs only inside the local boundary you selected</p></div>
+          </div>
+          <div class="request-map-footer"><span>Example capabilities</span><div><span>read_file_range</span><span>git_status</span><span>browser_inspect_page</span></div></div>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="editorial-section section-intro" id="why">
+    <div class="container">
+      <div class="section-intro-head">
+        <span class="section-label">From chat to project</span>
+        <span class="section-index">01</span>
+      </div>
+      <div class="split-heading">
+        <div>
+          <h2>Unlimited Direct HTTPS connection usage</h2>
+          <p class="display-note">No monthly tunnel request quota from RepoTunnel</p>
+        </div>
+        <div class="split-copy">
+          <p>Direct HTTPS connects ChatGPT to your own running RepoTunnel endpoint. Keep working on successive project tasks without a tunnel provider’s monthly request allowance.</p>
+          <p>Use your existing ChatGPT Web conversation, with no separate OpenAI API key or API token purchases for those chats.</p>
+          <a class="inline-link" href="/product/direct-https/">Explore Direct HTTPS</a>
+        </div>
+      </div>
+      <div class="principles">
+        <div><span>01</span><strong>Approve the workspace</strong><p>AI receives only the project roots you explicitly share.</p></div>
+        <div><span>02</span><strong>Choose the policy</strong><p>Read-only, review-first or supported automatic edits.</p></div>
+        <div><span>03</span><strong>Keep the evidence</strong><p>Changes, process state and Git activity remain inspectable.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="editorial-section capabilities-section" id="capabilities">
+    <div class="container">
+      <div class="section-intro-head">
+        <span class="section-label">Inside the app</span>
+        <a class="section-link" href="/product/">Explore the product</a>
+      </div>
+      <div class="capabilities-heading">
+        <h2>Know where each workflow lives</h2>
+        <p>Explore the screens you’ll use in RepoTunnel, with a practical guide for each one</p>
+      </div>
+      <AppNavigation />
+      <div class="extension-overview">
+        <div><span class="section-eyebrow">Optional companion</span><h3>Continue in the ChatGPT chat you saved</h3><p>RepoTunnel Continuation delivers authorized checkpoints to exact saved conversations. Load the Chromium companion from the project source and keep the desktop app running.</p><a class="text-link" href="/docs/continuity/chatgpt-extension/">Extension setup and privacy</a></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="editorial-section process-section" id="getting-started">
+    <div class="container">
+      <div class="section-intro-head">
+        <span class="section-label">First run</span>
+        <a class="section-link" href="/docs/">Browse documentation</a>
+      </div>
+      <div class="process-intro">
+        <h2>From installation to a real task in three decisions</h2>
+        <p>Start small. Approve one project, make one connection and expand only when you need another capability.</p>
+      </div>
+      <div class="process-items">
+        {paths.map((item) => <div class="process-item">
+          <span class="process-step">{item.n}</span>
+          <div><h3>{item.title}</h3><p>{item.text}</p><a href={item.url} class="process-link">{item.link}</a></div></div>)}
+      </div>
+    </div>
+  </section>
+
+  <section class="security-feature">
+    <div class="container security-feature-layout">
+      <div class="security-feature-heading">
+        <span class="section-eyebrow">Security by boundary</span>
+        <h2>The permission model is the product</h2>
+        <p>RepoTunnel does not turn AI Auto into unrestricted host access. Every capability keeps its own scope, validation and approval rules.</p>
+        <a class="btn btn-on-dark" href="/security/">Explore security</a>
+      </div>
+      <div class="security-feature-details">
+        <div><span>01</span><strong>Workspace-scoped paths</strong><p>Relative paths, approved roots and protected-file rules stay in force.</p></div>
+        <div><span>02</span><strong>Fail-closed execution</strong><p>Unsupported sandbox paths do not silently fall back to unrestricted execution.</p></div>
+        <div><span>03</span><strong>Separate device access</strong><p>Browser, desktop and Android capabilities have independent permission surfaces.</p></div>
+        <div><span>04</span><strong>Explicit publishing</strong><p>Local edit permission never becomes standing permission to publish Git history.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="editorial-section FAQ" id="questions">
+    <div class="container">
+      <div class="section-intro-head">
+        <span class="section-label">Common questions</span>
+        <a class="section-link" href="/docs/">More in the docs</a>
+      </div>
+      <div class="faq-split">
+        <div><h2>Before you connect</h2><p>A few things worth knowing before giving an AI client access to a local machine.</p></div>
+        <div class="faq-items">
+          <details><summary>Does RepoTunnel upload my project to its own cloud?</summary><p>RepoTunnel runs locally and exposes approved capabilities to the AI client. Content retrieved by the client may be processed by your AI provider, so review that provider's terms separately.</p></details>
+          <details><summary>Is a RepoTunnel subscription required?</summary><p>No. RepoTunnel is MIT-licensed and does not require its own account. AI models, tunnels and third-party platforms can have separate costs.</p></details>
+          <details><summary>Can AI modify any file it finds?</summary><p>No. Access is limited to approved workspace roots and protected paths are blocked. Device and desktop capabilities have their own permission controls.</p></details>
+          <details><summary>Do all features work identically on every OS?</summary><p>No. Linux is the primary validated platform. Windows and macOS have native-specific limits documented in the platform reference.</p></details>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</BaseLayout>

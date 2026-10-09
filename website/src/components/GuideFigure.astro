@@ -1,0 +1,33 @@
+---
+import { Image } from 'astro:assets';
+import type { ImageMetadata } from 'astro';
+
+export interface GuideImage {
+  src: string;
+  alt: string;
+  caption: string;
+  sourceHref: string;
+  sourceLabel: string;
+  width: number;
+  height: number;
+}
+const { image } = Astro.props as { image: GuideImage };
+const screenshots = import.meta.glob<{ default: ImageMetadata }>('../assets/guides/*.png', { eager: true });
+const screenshot = screenshots[`../assets/guides/${image.src.split('/').pop()}`]?.default;
+if (!screenshot) throw new Error(`Missing guide screenshot: ${image.src}`);
+const widths = [...new Set([400, 800, 1200, image.width].filter(width => width <= image.width))];
+const sizes = image.height > image.width
+  ? '(max-width: 640px) 260px, 320px'
+  : '(max-width: 640px) calc(100vw - 40px), (max-width: 1080px) calc(100vw - 96px), 760px';
+---
+<figure class:list={['guide-figure', { 'guide-figure-portrait': image.height > image.width }]}>
+  <a class="guide-image-link" href={screenshot.src} target="_blank" rel="noopener noreferrer" aria-label={`Open full-size screenshot: ${image.alt}`}>
+    <Image src={screenshot} alt={image.alt} width={image.width} height={image.height} widths={widths} sizes={sizes} format="webp" quality={90} loading="lazy" decoding="async" />
+  </a>
+  <figcaption>
+    <p>{image.caption}</p>
+    <div class="guide-figure-links">
+      <a href={image.sourceHref} target="_blank" rel="noopener noreferrer">{image.sourceLabel}</a>
+    </div>
+  </figcaption>
+</figure>

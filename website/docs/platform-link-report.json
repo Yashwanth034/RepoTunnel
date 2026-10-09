@@ -1,0 +1,229 @@
+[
+  {
+    "url": "https://certbot.eff.org/",
+    "status": 200,
+    "finalUrl": "https://certbot.eff.org/"
+  },
+  {
+    "url": "https://dash.cloudflare.com/",
+    "status": 403
+  },
+  {
+    "url": "https://dashboard.ngrok.com/",
+    "status": 200,
+    "finalUrl": "https://login.ngrok.com/"
+  },
+  {
+    "url": "https://dashboard.ngrok.com/get-started/your-authtoken",
+    "status": 200,
+    "finalUrl": "https://login.ngrok.com/"
+  },
+  {
+    "url": "https://dashboard.ngrok.com/signup",
+    "status": 200,
+    "finalUrl": "https://login.ngrok.com/"
+  },
+  {
+    "url": "https://developer.android.com/studio/debug/dev-options",
+    "status": 200,
+    "finalUrl": "https://developer.android.com/studio/debug/dev-options"
+  },
+  {
+    "url": "https://developer.android.com/tools/adb",
+    "status": 200,
+    "finalUrl": "https://developer.android.com/tools/adb"
+  },
+  {
+    "url": "https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world",
+    "status": 200,
+    "finalUrl": "https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world"
+  },
+  {
+    "url": "https://developers.cloudflare.com/tunnel/downloads/",
+    "status": 200,
+    "finalUrl": "https://developers.cloudflare.com/tunnel/downloads/"
+  },
+  {
+    "url": "https://developers.cloudflare.com/tunnel/get-started/",
+    "status": 200,
+    "finalUrl": "https://developers.cloudflare.com/tunnel/get-started/"
+  },
+  {
+    "url": "https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/",
+    "status": 200,
+    "finalUrl": "https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/"
+  },
+  {
+    "url": "https://developers.cloudflare.com/tunnel/troubleshooting/",
+    "status": 200,
+    "finalUrl": "https://developers.cloudflare.com/tunnel/troubleshooting/"
+  },
+  {
+    "url": "https://developers.openai.com/api/docs/guides/secure-mcp-tunnels",
+    "status": 200,
+    "finalUrl": "https://developers.openai.com/api/docs/guides/secure-mcp-tunnels"
+  },
+  {
+    "url": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github",
+    "status": 200,
+    "finalUrl": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/about-authentication-to-github"
+  },
+  {
+    "url": "https://docs.github.com/en/get-started/git-basics/set-up-git",
+    "status": 200,
+    "finalUrl": "https://docs.github.com/en/get-started/git-basics/set-up-git"
+  },
+  {
+    "url": "https://docs.ollama.com/quickstart",
+    "status": 200,
+    "finalUrl": "https://docs.ollama.com/quickstart"
+  },
+  {
+    "url": "https://ffmpeg.org/documentation.html",
+    "status": 200,
+    "finalUrl": "https://ffmpeg.org/documentation.html"
+  },
+  {
+    "url": "https://ffmpeg.org/ffprobe.html",
+    "status": 200,
+    "finalUrl": "https://ffmpeg.org/ffprobe.html"
+  },
+  {
+    "url": "https://git-scm.com/install/",
+    "status": 200,
+    "finalUrl": "https://git-scm.com/install/"
+  },
+  {
+    "url": "https://github.com/Yashwanth034/RepoTunnel/blob/main/docs/direct-https.md",
+    "status": 200,
+    "finalUrl": "https://github.com/Yashwanth034/RepoTunnel/blob/main/docs/direct-https.md"
+  },
+  {
+    "url": "https://github.com/Yashwanth034/RepoTunnel/blob/main/extensions/chatgpt-continuation/PRIVACY.md",
+    "status": 200,
+    "finalUrl": "https://github.com/Yashwanth034/RepoTunnel/blob/main/extensions/chatgpt-continuation/PRIVACY.md"
+  },
+  {
+    "url": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1",
+    "status": 200,
+    "finalUrl": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1"
+  },
+  {
+    "url": "https://github.com/Yashwanth034/RepoTunnel/tree/main/extensions/chatgpt-continuation",
+    "status": 200,
+    "finalUrl": "https://github.com/Yashwanth034/RepoTunnel/tree/main/extensions/chatgpt-continuation"
+  },
+  {
+    "url": "https://github.com/ggml-org/llama.cpp",
+    "status": 200,
+    "finalUrl": "https://github.com/ggml-org/llama.cpp"
+  },
+  {
+    "url": "https://github.com/yt-dlp/yt-dlp",
+    "status": 200,
+    "finalUrl": "https://github.com/yt-dlp/yt-dlp"
+  },
+  {
+    "url": "https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt",
+    "status": 403
+  },
+  {
+    "url": "https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading",
+    "status": 200,
+    "finalUrl": "https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading"
+  },
+  {
+    "url": "https://letsencrypt.org/docs/challenge-types/",
+    "status": 200,
+    "finalUrl": "https://letsencrypt.org/docs/challenge-types/"
+  },
+  {
+    "url": "https://lmstudio.ai/docs/developer/core/server",
+    "status": 200,
+    "finalUrl": "https://lmstudio.ai/docs/developer/core/server"
+  },
+  {
+    "url": "https://lmstudio.ai/download",
+    "status": 200,
+    "finalUrl": "https://lmstudio.ai/download"
+  },
+  {
+    "url": "https://manager.route64.org/",
+    "status": 200,
+    "finalUrl": "https://manager.route64.org/account/login/"
+  },
+  {
+    "url": "https://modelcontextprotocol.io/docs/getting-started/intro",
+    "status": 200,
+    "finalUrl": "https://modelcontextprotocol.io/docs/2026-07-28/getting-started/intro"
+  },
+  {
+    "url": "https://ngrok.com/",
+    "status": 200,
+    "finalUrl": "https://ngrok.com/"
+  },
+  {
+    "url": "https://ngrok.com/docs/start",
+    "status": 200,
+    "finalUrl": "https://ngrok.com/docs/start"
+  },
+  {
+    "url": "https://ngrok.com/pricing",
+    "status": 200,
+    "finalUrl": "https://ngrok.com/pricing"
+  },
+  {
+    "url": "https://ollama.com/download",
+    "status": 200,
+    "finalUrl": "https://ollama.com/download"
+  },
+  {
+    "url": "https://route64.org/",
+    "status": 200,
+    "finalUrl": "https://route64.org/en"
+  },
+  {
+    "url": "https://status.ngrok.com/",
+    "status": 200,
+    "finalUrl": "https://status.ngrok.com/"
+  },
+  {
+    "url": "https://v4-frontend.netiter.com/",
+    "status": 200,
+    "finalUrl": "https://v4-frontend.netiter.com/"
+  },
+  {
+    "url": "https://www.duckdns.org/",
+    "status": 200,
+    "finalUrl": "https://www.duckdns.org/"
+  },
+  {
+    "url": "https://www.duckdns.org/spec.jsp",
+    "status": 200,
+    "finalUrl": "https://www.duckdns.org/spec.jsp"
+  },
+  {
+    "url": "https://www.google.com/chrome/",
+    "status": 200,
+    "finalUrl": "https://www.google.com/chrome/"
+  },
+  {
+    "url": "https://www.wireguard.com/install/",
+    "status": 200,
+    "finalUrl": "https://www.wireguard.com/install/"
+  },
+  {
+    "url": "https://www.gnu.org/software/coreutils/manual/html_node/sha2-utilities.html",
+    "status": 403
+  },
+  {
+    "url": "https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/get-filehash",
+    "status": 200,
+    "finalUrl": "https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/get-filehash"
+  },
+  {
+    "url": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-SHA256SUMS.txt",
+    "status": 200,
+    "finalUrl": "https://release-assets.githubusercontent.com/github-production-release-asset/1339945417/42660f2b-b86a-434f-b15b-05ff667323fc"
+  }
+]

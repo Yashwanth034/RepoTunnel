@@ -1,0 +1,86 @@
+---
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+import SearchDialog from '../components/SearchDialog.astro';
+import siteData from '../data/site-content.json';
+
+
+import '../styles/site.css';
+import '../styles/responsive.css';
+const {
+  title = 'RepoTunnel',
+  description = 'RepoTunnel is a local-first AI workspace gateway for approved projects and local development capabilities.',
+  keywords = [],
+  type = 'website',
+  noindex = false,
+  skipTarget = 'main-content',
+} = Astro.props;
+const fullTitle = title === 'RepoTunnel' ? title : `${title} · RepoTunnel`;
+const canonical = Astro.site ? new URL(Astro.url.pathname, Astro.site).toString() : null;
+const socialImage = Astro.site ? new URL('/social-card.png', Astro.site).toString() : null;
+const application = type === 'software';
+const schema = {
+  '@context': 'https://schema.org',
+  '@type': application ? 'SoftwareApplication' : type === 'article' ? 'TechArticle' : 'WebPage',
+  name: application ? siteData.site.name : title,
+  headline: title,
+  description,
+  url: canonical || undefined,
+  isPartOf: { '@type': 'WebSite', name: 'RepoTunnel', url: Astro.site?.toString() || undefined },
+  publisher: { '@type': 'Organization', name: 'RepoTunnel', url: 'https://github.com/Yashwanth034/RepoTunnel' },
+  ...(application ? {
+    applicationCategory: 'DeveloperApplication',
+    operatingSystem: 'Linux, Windows, macOS',
+    softwareVersion: siteData.site.release.version,
+    codeRepository: 'https://github.com/Yashwanth034/RepoTunnel',
+    license: 'https://github.com/Yashwanth034/RepoTunnel/blob/main/LICENSE',
+    downloadUrl: 'https://github.com/Yashwanth034/RepoTunnel/releases/latest',
+    offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' }
+  } : {})
+};
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#fbfbfa" />
+  <meta name="repotunnel-search-mode" content={import.meta.env.PROD ? 'pagefind' : 'static'} />
+  <meta name="description" content={description} />
+  {keywords.length > 0 && <meta name="keywords" content={keywords.join(', ')} />}
+  {noindex && <meta name="robots" content="noindex,nofollow" />}
+  {canonical && <link rel="canonical" href={canonical} />}
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="alternate icon" href="/favicon.ico" type="image/x-icon" />
+  <meta property="og:type" content={type === 'article' ? 'article' : 'website'} />
+  <meta property="og:title" content={fullTitle} />
+  <meta property="og:description" content={description} />
+  {canonical && <meta property="og:url" content={canonical} />}
+  {socialImage && <meta property="og:image" content={socialImage} />}
+  <meta property="og:site_name" content="RepoTunnel" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content={fullTitle} />
+  <meta name="twitter:description" content={description} />
+  {socialImage && <meta name="twitter:image" content={socialImage} />}
+  <title>{fullTitle}</title>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)}></script>
+  <script is:inline>
+    (() => {
+      try {
+        const theme = localStorage.getItem('repotunnel-theme');
+        document.documentElement.dataset.theme = theme === 'dark' ? 'dark' : 'light';
+      } catch {
+        document.documentElement.dataset.theme = 'light';
+      }
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href={`#${skipTarget}`}>Skip to content</a>
+  <Header currentPath={Astro.url.pathname} />
+  <main id="main-content" tabindex="-1" data-pagefind-body={noindex ? undefined : true}><slot /></main>
+  <Footer />
+  <SearchDialog />
+  <script src="/site.js" defer></script>
+</body>
+</html>

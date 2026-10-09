@@ -1,0 +1,8 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import content from '../../data/site-content.json';
+---
+<BaseLayout title="Solutions" description="Practical guides for connecting ChatGPT to local projects, secure AI file access, browser automation, Git, Android, multi-agent coding and continuity.">
+  <div class="container listing-head"><span class="eyebrow"><span class="eyebrow-dot"></span>Solutions</span><h1>Practical ways to put local AI to work</h1><p>Follow real workflows for projects, browser testing, Git, Android devices and longer development sessions.</p></div>
+  <div class="container listing-grid">{content.solutions.map((item) => <article class="card listing-card"><span class="eyebrow">Solution</span><h2>{item.title}</h2><p>{item.description}</p><a class="card-link" href={`/solutions/${item.slug}/`} aria-label={`Open guide: ${item.title}`}>Open guide</a></article>)}</div>
+</BaseLayout>

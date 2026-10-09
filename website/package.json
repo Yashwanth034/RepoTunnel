@@ -1,0 +1,24 @@
+{
+  "name": "repotunnel-website",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && pagefind --site dist && node scripts/finalize_build.mjs",
+    "preview": "astro preview",
+    "check": "python3 scripts/verify_source.py && npm run build && python3 scripts/verify_static.py",
+    "verify:source": "python3 scripts/verify_source.py",
+    "verify:static": "python3 scripts/verify_static.py",
+    "predev": "node scripts/generate_search_index.mjs",
+    "prebuild": "node scripts/generate_search_index.mjs"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "3.7.4",
+    "astro": "7.3.8"
+  },
+  "devDependencies": {
+    "pagefind": "^1.4.0",
+    "typescript": "^5.9.0"
+  }
+}

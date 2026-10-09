@@ -1,0 +1,105 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import GuideFigure, { type GuideImage } from '../components/GuideFigure.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import content from '../data/site-content.json';
+type DocPage = (typeof content.docs)[number];
+const { page } = Astro.props as { page: DocPage };
+const groups = [...new Set(content.docs.map((d) => d.group))];
+const currentIndex = content.docs.findIndex((d) => d.slug === page.slug);
+const previous = currentIndex > 0 ? content.docs[currentIndex - 1] : null;
+const next = currentIndex < content.docs.length - 1 ? content.docs[currentIndex + 1] : null;
+const slugify = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+const sourceFilesBySlug: Record<string, string> = {
+  'getting-started/what-is-repotunnel': 'docs/product.md',
+  'getting-started/installation': 'docs/release.md',
+  'getting-started/first-project': 'docs/product.md',
+  'getting-started/connect-chatgpt': 'docs/connection.md',
+  'installation/linux': 'docs/release.md',
+  'installation/windows': 'docs/release.md',
+  'installation/macos': 'docs/release.md',
+  'connections/overview': 'docs/connection.md',
+  'connections/ngrok': 'docs/connection.md',
+  'connections/cloudflare': 'docs/connection.md',
+  'connections/direct-https': 'docs/direct-https.md',
+  'projects/access-and-modes': 'docs/product.md',
+  'projects/large-repositories': 'docs/project-index.md',
+  'editing/safe-editing': 'docs/safe-editing.md',
+  'commands/verification-vs-live': 'docs/commands.md',
+  'git/workflow': 'docs/git.md',
+  'browser/managed-browser': 'SEMANTIC_INTERACTION_LAYER.md',
+  'browser/semantic-actions': 'SEMANTIC_INTERACTION_LAYER.md',
+  'desktop/ai-workspace': 'docs/architecture.md',
+  'phone/overview': 'docs/phone-access.md',
+  'phone/privacy': 'docs/phone-access.md',
+  'team/two-ai-workflow': 'docs/team-mode.md',
+  'continuity/resume-v2': 'AI_CONTINUITY.md',
+  'continuity/chatgpt-extension': 'extensions/chatgpt-continuation/README.md',
+  'video/intelligence': 'docs/video.md',
+  'video/production': 'docs/video.md',
+  'security/model': 'docs/security.md',
+  'security/secrets': 'docs/security.md',
+  'reference/platforms': 'docs/acceptance.md',
+  'reference/mcp': 'docs/mcp.md',
+  'troubleshooting/connection': 'docs/connection.md',
+  'troubleshooting/terminal': 'docs/commands.md',
+  'getting-started/app-tour': 'src/components/AppSidebar.tsx',
+  'getting-started/home-and-local-chat': 'src/components/HomeChat.tsx',
+  'history/activity-and-versions': 'src/components/ChangeHistoryPanel.tsx',
+  'history/checkpoints': 'src/components/CheckpointManager.tsx',
+  'checks/workflow-readiness': 'docs/workflow.md',
+  'projects/project-memory': 'src/components/ProjectMemoryPanel.tsx',
+  'reference/settings-and-help': 'src/components/ProductionPanel.tsx',
+  'connections/secure-mcp-tunnel': 'docs/connection.md',
+};
+const sourceFile = sourceFilesBySlug[page.slug];
+if (!sourceFile) throw new Error(`Missing source-document mapping for docs/${page.slug}`);
+const repoSource = 'https://github.com/Yashwanth034/RepoTunnel/blob/main/' + sourceFile;
+type ContentSection = {
+  title: string; paragraphs: string[]; bullets: string[];
+  code?: string | null; note?: string | null;
+  links?: {label: string; href: string}[];
+  steps?: string[];
+  image?: GuideImage;
+};
+const sections = (page.sections || []) as ContentSection[];
+---
+<BaseLayout title={page.title} description={page.description} keywords={page.keywords} type="article" skipTarget="docs-content">
+  <div class="container docs-layout">
+    <aside class="docs-sidebar" aria-label="Documentation navigation" data-pagefind-ignore>
+      <button class="btn docs-mobile-toggle" data-action="docs-menu" aria-expanded="false" aria-controls="docs-nav-groups">Browse documentation <span aria-hidden="true">⌄</span></button>
+      <button class="docs-search-button" data-action="search-open"><span>Search docs</span><kbd>/</kbd></button>
+      <div class="docs-nav-groups" id="docs-nav-groups">
+        <a class="docs-home-link" href="/docs/">Documentation overview</a>
+        {groups.map((group) => <div class="docs-group"><strong>{group}</strong>{content.docs.filter((d) => d.group === group).map((doc) => <a aria-current={doc.slug === page.slug ? 'page' : undefined} class={doc.slug === page.slug ? 'active' : ''} href={`/docs/${doc.slug}/`}>{doc.title}</a>)}</div>)}
+      </div>
+    </aside>
+    <article class="docs-article">
+      <section class="page-hero">
+        <div class="breadcrumbs"><a href="/">Home</a><a href="/docs/">Docs</a><span>{page.title}</span></div>
+        <span class="eyebrow"><span class="eyebrow-dot"></span>{page.group}</span>
+        <h1 id="docs-content" tabindex="-1">{page.title}</h1>
+        <p class="lead">{page.description}</p>
+        <div class="docs-article-meta"><span>DOCS / {String(currentIndex + 1).padStart(2,'0')}</span><a href={repoSource} target="_blank" rel="noopener noreferrer">Source documentation</a></div>
+        <p class="docs-version-note">Guides follow the current project source. Check the <a href="/changelog/">release notes</a> for your installed version.</p>
+      </section>
+      <div class="content-shell"><div class="prose">
+        {sections.map((section) => <section id={slugify(section.title)}>
+          <h2>{section.title}</h2>
+          {section.paragraphs?.map((p) => <p>{p}</p>)}
+          {section.steps && section.steps.length > 0 && <ol class="guide-steps">{section.steps.map(step => <li>{step}</li>)}</ol>}
+          {(section.bullets?.length ?? 0) > 0 && <ul>{section.bullets.map((b) => <li>{b}</li>)}</ul>}
+          {section.code && <CodeBlock code={section.code} label={section.title} />}
+          {section.note && <div class="note"><strong>Note</strong><p>{section.note}</p></div>}
+          {section.links && section.links.length > 0 && <div class="guide-links">{section.links.map(link => <a class="text-link" href={link.href} target={link.href.startsWith('https://') ? '_blank' : undefined} rel={link.href.startsWith('https://') ? 'noopener noreferrer' : undefined}>{link.label}</a>)}</div>}
+          {section.image && <GuideFigure image={section.image} />}
+        </section>)}
+        <nav class="docs-pagination" aria-label="Previous and next documentation pages">
+          {previous ? <a href={`/docs/${previous.slug}/`}><small>PREVIOUS</small><strong>{previous.title}</strong></a> : <a href="/docs/"><small>ALL GUIDES</small><strong>Documentation overview</strong></a>}
+          {next ? <a href={`/docs/${next.slug}/`}><small>NEXT</small><strong>{next.title}</strong></a> : <a href="/docs/"><small>ALL GUIDES</small><strong>Documentation overview</strong></a>}
+        </nav>
+      </div></div>
+    </article>
+    <aside class="docs-toc toc" aria-label="On this page" data-pagefind-ignore><div class="toc-title">On this page</div>{sections.map((section) => <a href={`#${slugify(section.title)}`}>{section.title}</a>)}<a class="toc-back" href="#">Back to top</a></aside>
+  </div>
+</BaseLayout>

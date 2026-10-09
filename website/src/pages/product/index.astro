@@ -1,0 +1,8 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import content from '../../data/site-content.json';
+---
+<BaseLayout title="Product" description="Explore RepoTunnel’s local chat, projects, teams, recovery, readiness checks, developer tools, Phone, Video and optional continuation extension.">
+  <div class="container listing-head product-listing-head"><span class="eyebrow"><span class="eyebrow-dot"></span>Product</span><h1>Everything AI can use, in one place</h1><p>From local files to desktop applications, explore what RepoTunnel can do and where each permission boundary applies.</p><a class="btn btn-primary" href="/docs/getting-started/app-tour/">Explore the app screen by screen</a></div>
+  <div class="container listing-grid">{content.products.map((item) => <a class="card listing-card product-card" href={`/product/${item.slug}/`}><span class="eyebrow">{item.eyebrow}</span><h2>{item.title}</h2><p>{item.description}</p></a>)}</div>
+</BaseLayout>

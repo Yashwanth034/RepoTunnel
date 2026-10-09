@@ -1,0 +1,31 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import content from '../data/site-content.json';
+const r = content.site.release;
+---
+<BaseLayout title="Install RepoTunnel" description="Install RepoTunnel on Linux, Windows or macOS using the official v0.4.1 GitHub release packages.">
+  <section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="/">Home</a><span>Install</span></div><span class="eyebrow"><span class="eyebrow-dot"></span>Official release</span><h1>Install RepoTunnel</h1><p class="lead">Choose the official package for your operating system. RepoTunnel v{r.version} is the current public release documented by the project.</p></div></section>
+  <div class="container content-shell">
+    <article class="prose">
+      <section id="choose-your-platform"><h2>Choose your platform</h2><div class="tabs" data-tabs role="tablist" aria-label="Installation platform"><button id="tab-linux" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="install-linux" tabindex="0">Linux</button><button id="tab-windows" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="install-windows" tabindex="-1">Windows</button><button id="tab-macos" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="install-macos" tabindex="-1">macOS</button></div>
+        <div id="install-linux" class="tab-panel" role="tabpanel" aria-labelledby="tab-linux" tabindex="0"><div class="download-grid">
+          <div class="download-card"><h3>Debian / Ubuntu / Linux Mint</h3><p>Recommended package for Debian-family x64 systems.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.linuxDeb}>Download .deb</a><a class="btn" href="/docs/installation/linux/">Linux guide</a></div></div>
+          <div class="download-card"><h3>Fedora / RPM compatible</h3><p>RPM package for supported x86_64 distributions.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.linuxRpm}>Download .rpm</a></div></div>
+          <div class="download-card"><h3>Other compatible Linux x64</h3><p>Portable AppImage release.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.linuxAppImage}>Download AppImage</a></div></div>
+        </div></div>
+        <div id="install-windows" class="tab-panel" role="tabpanel" aria-labelledby="tab-windows" tabindex="0" hidden><div class="download-grid">
+          <div class="download-card"><h3>Windows x64 setup</h3><p>NSIS installer for most Windows users.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.windowsExe}>Download .exe</a><a class="btn" href="/docs/installation/windows/">Windows guide</a></div></div>
+          <div class="download-card"><h3>Windows x64 MSI</h3><p>MSI package for environments that prefer MSI deployment.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.windowsMsi}>Download .msi</a></div></div>
+        </div></div>
+        <div id="install-macos" class="tab-panel" role="tabpanel" aria-labelledby="tab-macos" tabindex="0" hidden><div class="download-grid">
+          <div class="download-card"><h3>Apple Silicon</h3><p>DMG for Apple Silicon Macs.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.macArm}>Download ARM64 DMG</a><a class="btn" href="/docs/installation/macos/">macOS guide</a></div></div>
+          <div class="download-card"><h3>Intel</h3><p>DMG for Intel Macs.</p><div class="download-actions"><a class="btn btn-accent" href={r.downloads.macIntel}>Download x64 DMG</a></div></div>
+        </div></div>
+      </section>
+      <section id="verify-your-download"><h2>Verify your download</h2><p>Each release publishes <code>RepoTunnel-SHA256SUMS.txt</code>. Verify the package you downloaded before installation, especially when your operating system shows a trust warning.</p><p><a class="btn" href={r.checksums}>Open SHA-256 checksums</a></p></section>
+      <section id="after-installation"><h2>After installation</h2><ol><li>Open RepoTunnel.</li><li>Add an existing local project or clone a repository.</li><li>Choose read-only/read-write access and AI Review or AI Auto.</li><li>Configure a supported public MCP connection.</li><li>Connect your AI client and verify the full path with a real RepoTunnel tool call.</li></ol><p><a class="btn btn-accent" href="/docs/getting-started/connect-chatgpt/">Connect ChatGPT</a></p></section>
+      <section id="optional-extension"><h2>Optional ChatGPT continuation extension</h2><p>RepoTunnel Continuation can deliver authorized checkpoints to exact saved ChatGPT conversations. It is optional and is loaded unpacked in a compatible Chromium browser from <code>extensions/chatgpt-continuation</code> on the project’s main branch.</p><p>The v0.4.1 desktop release does not publish a separate extension asset. Keep RepoTunnel running locally, follow the source installation steps and save only the chats you want it to continue.</p><p><a class="text-link" href="/docs/continuity/chatgpt-extension/">Install the companion and review its privacy</a></p></section>
+    </article>
+    <aside class="toc"><div class="toc-title">Install</div><a href="#choose-your-platform">Platform packages</a><a href="#verify-your-download">Verify download</a><a href="#after-installation">After installation</a><a href="#optional-extension">Optional extension</a></aside>
+  </div>
+</BaseLayout>
