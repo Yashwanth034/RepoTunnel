@@ -52,6 +52,9 @@ your local projects.
 Give instructions in ChatGPT, let RepoTunnel perform the approved local
 actions, and review the results in the same conversation.
 
+## 🎬 Demo
+https://github.com/user-attachments/assets/edbc2646-1c3d-4195-8243-f4f13a680a34
+
 <p align="center">
   <img src="./RepoTunnel.png" alt="RepoTunnel desktop application" width="100%" />
 </p>
