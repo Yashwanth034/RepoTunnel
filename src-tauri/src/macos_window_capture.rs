@@ -283,7 +283,6 @@ mod native {
     use std::{
         ffi::{c_void, CStr},
         os::raw::c_char,
-        path::Path,
         process::{Command, Stdio},
         thread,
         time::{Duration, Instant},

@@ -839,6 +839,8 @@ fn release_identity(release: &CapabilityRelease) -> TargetIdentity {
 }
 
 fn make_managed_binary_executable(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

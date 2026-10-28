@@ -223,7 +223,7 @@ fn disk_usage(path: &Path) -> (Option<u64>, Option<u64>) {
         return (None, None);
     }
     let status = unsafe { status.assume_init() };
-    let block_size = status.f_frsize as u64;
+    let block_size = status.f_frsize;
     let total = (status.f_blocks as u64).saturating_mul(block_size);
     let available = (status.f_bavail as u64).saturating_mul(block_size);
     if total == 0 {

@@ -32,10 +32,13 @@ const HELPER_RELATIVE: &str = "ai-workspace/ai_workspace.py";
 const HELPER: &str = include_str!("../../resources/ai_workspace/ai_workspace.py");
 const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 const DISPLAY_START: u16 = 91;
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 const DISPLAY_END: u16 = 119;
 const SESSION_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_SESSION";
 const OWNER_ROOT_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_OWNER_ROOT";
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 const MANAGED_DISPLAY_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_DISPLAY";
 const APP_SESSION_ENV: &str = "REPOTUNNEL_AI_WORKSPACE_APP_SESSION";
 #[cfg(unix)]
@@ -58,6 +61,7 @@ const MAX_SEMANTIC_WAIT_MS: u64 = 2_000;
 const MAX_SEMANTIC_TOTAL_WAIT_MS: u64 = 10_000;
 const MAX_SEMANTIC_TYPE_BYTES: usize = 32_768;
 const MAX_SEMANTIC_SEQUENCE_TEXT_BYTES: usize = 131_072;
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 static AI_WORKSPACE_HELPER_RESTART_LOCK: Mutex<()> = Mutex::new(());
 static AI_WORKSPACE_HELPER_RUNTIMES: OnceLock<Mutex<BTreeMap<String, AiWorkspaceHelperRuntime>>> =
     OnceLock::new();
@@ -209,12 +213,14 @@ pub(crate) struct AiWorkspaceFrame {
 
 type AiWorkspaceHelperReply = Result<Value, String>;
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 struct AiWorkspaceHelperClient {
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<BTreeMap<u64, mpsc::Sender<AiWorkspaceHelperReply>>>>,
     next_id: AtomicU64,
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 struct AiWorkspaceHelperRuntime {
     child: Child,
     client: Arc<AiWorkspaceHelperClient>,
@@ -1869,6 +1875,7 @@ fn persisted_runtime_processes_live(state: &PersistedRuntime) -> bool {
         .all(|process| process_matches_identity(process.pid, process.process_identity.as_deref()))
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
 fn persisted_task_bound_process_is_live(process: &PersistedProcess) -> bool {
     let Some(identity) = process.process_identity.as_deref() else {
         return false;
@@ -2205,6 +2212,7 @@ fn approved_native_ai_workspace_application(
 }
 
 #[cfg(any(windows, target_os = "macos"))]
+#[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
 fn persisted_native_gui_process_is_owned(
     app: &AppHandle,
     process: &PersistedProcess,
@@ -2407,17 +2415,20 @@ fn required_binary(path: &str, name: &str) -> Result<PathBuf, String> {
     }
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn display_available(number: u16) -> bool {
     !Path::new(&format!("/tmp/.X11-unix/X{number}")).exists()
         && !Path::new(&format!("/tmp/.X{number}-lock")).exists()
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn choose_display() -> Result<u16, String> {
     (DISPLAY_START..=DISPLAY_END)
         .find(|number| display_available(*number))
         .ok_or_else(|| "No free local X display is available for AI Workspace.".to_string())
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn random_cookie() -> Result<String, String> {
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")
@@ -2486,6 +2497,7 @@ fn stop_child(child: &mut Child) {
 }
 
 #[cfg(windows)]
+#[cfg_attr(any(windows, target_os = "macos"), allow(clippy::collapsible_if))]
 fn stop_attached_windows_process(pid: u32, expected_identity: Option<&str>) {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, WAIT_TIMEOUT},
@@ -2648,6 +2660,7 @@ where
     Ok(())
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
 fn stop_ai_workspace_app_and_confirm(
     app: &AppHandle,
     application_id: &str,
@@ -2920,6 +2933,7 @@ fn refresh_runtime_applications(app: &AppHandle, runtime: &mut Runtime) -> Resul
 // helper. A predictable reused path could otherwise point at a symlink or
 // an existing session's cookie file. The random filename nonce is distinct
 // from the actual authentication secret.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn reserve_private_xauthority_file(directory: &Path, display: &str) -> Result<PathBuf, String> {
     let suffix = display.strip_prefix(':').ok_or_else(|| {
         "AI Workspace X11 display identifier is not an absolute display number.".to_string()
@@ -2945,6 +2959,7 @@ fn reserve_private_xauthority_file(directory: &Path, display: &str) -> Result<Pa
     Ok(path)
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn install_private_xauthority_record(
     path: &Path,
     display: &str,
@@ -2984,6 +2999,7 @@ fn install_private_xauthority_record(
     Ok(())
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn xauth_file(app: &AppHandle, display: &str) -> Result<PathBuf, String> {
     let dir = app_data(app)?.join("ai-workspace/runtime");
     let path = reserve_private_xauthority_file(&dir, display)?;
@@ -3006,6 +3022,7 @@ fn xauth_file(app: &AppHandle, display: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn start_private_session_bus(
     display: &str,
     xauth: &Path,
@@ -3052,6 +3069,7 @@ fn start_private_session_bus(
     Ok((child, address))
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn private_accessibility_bus_available(
     display: &str,
     xauth: &Path,
@@ -3094,6 +3112,7 @@ fn helper_runtimes() -> &'static Mutex<BTreeMap<String, AiWorkspaceHelperRuntime
     AI_WORKSPACE_HELPER_RUNTIMES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn helper_transport_key(
     display: &str,
     xauth: Option<&Path>,
@@ -3109,6 +3128,7 @@ fn helper_transport_key(
     )
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 impl AiWorkspaceHelperClient {
     fn new(stdin: ChildStdin, stdout: ChildStdout) -> Arc<Self> {
         let pending = Arc::new(Mutex::new(BTreeMap::new()));
@@ -3178,6 +3198,7 @@ impl AiWorkspaceHelperClient {
     }
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn start_helper_reader(
     stdout: ChildStdout,
     pending: Arc<Mutex<BTreeMap<u64, mpsc::Sender<AiWorkspaceHelperReply>>>>,
@@ -3298,6 +3319,7 @@ fn stop_helper_runtime(mut runtime: AiWorkspaceHelperRuntime) {
     let _ = runtime.child.wait();
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn start_persistent_helper(
     app: &AppHandle,
     display: &str,
@@ -3323,10 +3345,12 @@ fn start_persistent_helper(
     Ok(AiWorkspaceHelperRuntime { child, client })
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn helper_operation_safe_to_retry(operation: &str) -> bool {
     matches!(operation, "ping" | "frame" | "inspect")
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn helper_transport_error(error: &str) -> bool {
     [
         "Persistent AI Workspace helper response registry is unavailable.",
@@ -3341,6 +3365,7 @@ fn helper_transport_error(error: &str) -> bool {
     .any(|prefix| error.starts_with(prefix))
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn ensure_runtime_helper(
     app: &AppHandle,
     display: &str,
@@ -3395,6 +3420,7 @@ fn ensure_runtime_helper(
     Ok((key, client))
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn restart_runtime_helper(
     app: &AppHandle,
     key: &str,
@@ -3435,6 +3461,7 @@ fn restart_runtime_helper(
     Ok(client)
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn stop_helpers_for_display(display: &str) {
     let removed = helper_runtimes()
         .lock()
@@ -3468,6 +3495,7 @@ fn stop_all_helpers() {
     }
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn helper_request(
     app: &AppHandle,
     display: &str,
@@ -3501,6 +3529,7 @@ fn helper_request(
     }
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn helper_request_observation(
     app: &AppHandle,
     display: &str,
@@ -3667,6 +3696,7 @@ fn build_gnome_terminal_private_server_command(
     Ok(command)
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn build_gnome_terminal_legacy_command(
     application: &LaunchApplication,
     target_path: &Path,
@@ -3707,6 +3737,7 @@ fn build_application_command(
     Ok(command)
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn build_gnome_terminal_clean_shell_command(
     application: &LaunchApplication,
     target_path: &Path,
@@ -4278,6 +4309,7 @@ fn configure_application_command(
     }
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn isolated_window_count(
     app: &AppHandle,
     display: &str,
@@ -4297,6 +4329,7 @@ fn isolated_window_count(
     .ok_or_else(|| "AI Workspace could not read the isolated window count.".to_string())
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn application_window_count(
     app: &AppHandle,
     display: &str,
@@ -4830,6 +4863,7 @@ fn native_runtime_application_window_alive(
     native_window_liveness_from_count(windows)
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
 fn runtime_application_alive(
     app: &AppHandle,
     display: &str,
@@ -5201,6 +5235,7 @@ fn wait_for_native_app_window(
     ))
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn inspect_for_application_pid(
     app: &AppHandle,
     display: &str,
@@ -5614,6 +5649,7 @@ fn spawn_runtime_application(
 // session bus and the window manager have started must always tear down all
 // three services. This covers profile, task-overlay, command-building and
 // containment errors that occur *before* an app subprocess even exists.
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn complete_initial_ai_workspace_setup<T>(
     result: Result<T, String>,
     wm: &mut Child,
@@ -5652,6 +5688,7 @@ fn bounded_startup_stderr(child: &mut Child) -> String {
     text.trim().replace(['\r', '\n'], " ")
 }
 
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 fn wait_for_display(app: &AppHandle, display: &str, xauth: &Path) -> Result<(), String> {
     for _ in 0..40 {
         if helper_request_once(
@@ -6237,6 +6274,7 @@ impl AiWorkspaceState {
         Ok(status)
     }
 
+    #[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
     pub(crate) fn start_with_app_session_id(
         &self,
         app: &AppHandle,
@@ -7109,6 +7147,7 @@ impl AiWorkspaceState {
         Ok(gui_pid)
     }
 
+    #[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
     pub(crate) fn inspect_app_session(
         &self,
         app: &AppHandle,
@@ -7226,6 +7265,7 @@ impl AiWorkspaceState {
         })
     }
 
+    #[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
     pub(crate) fn frame_app_session(
         &self,
         app: &AppHandle,
@@ -7403,6 +7443,7 @@ impl AiWorkspaceState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
     pub(crate) fn action_app_session(
         &self,
         app: &AppHandle,
@@ -7588,6 +7629,7 @@ impl AiWorkspaceState {
         }
     }
 
+    #[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
     pub(crate) fn sequence_app_session(
         &self,
         app: &AppHandle,
@@ -7792,6 +7834,7 @@ impl AiWorkspaceState {
         }
     }
 
+    #[cfg_attr(any(windows, target_os = "macos"), allow(clippy::needless_return))]
     pub(crate) fn recording_target_app_session(
         &self,
         app: &AppHandle,
@@ -11745,7 +11788,10 @@ for line in sys.stdin:
                     reason = "Native hard-exit fixture intentionally hands the live task-scoped GTK process to a new Tauri AppHandle; the parent fixture guard cleans it up"
                 )]
                 let application = super::spawn_group(&mut cmd).unwrap();
-                let deadline = Instant::now() + Duration::from_secs(15);
+                // Shared CI runners may be compiling other platform jobs at
+                // the same time. Preserve every readiness requirement while
+                // leaving room for a cold GTK and accessibility helper startup.
+                let deadline = Instant::now() + Duration::from_secs(30);
                 loop {
                     let output = Command::new("/usr/bin/xwininfo")
                         .args(["-root", "-tree"])
@@ -11753,17 +11799,19 @@ for line in sys.stdin:
                         .env("XAUTHORITY", &authority)
                         .output()
                         .unwrap();
-                    if String::from_utf8_lossy(&output.stdout).contains("RepoTunnelLiveRecovery")
-                        && fs::read_to_string(view.root().join("src/editor.rs")).unwrap()
-                            == "private-live-edit"
-                        && super::isolated_window_count(handle, &nested, &authority, Some(&address))
-                            .is_ok_and(|count| count > 0)
-                    {
+                    let window_visible =
+                        String::from_utf8_lossy(&output.stdout).contains("RepoTunnelLiveRecovery");
+                    let private_edit_ready = fs::read_to_string(view.root().join("src/editor.rs"))
+                        .is_ok_and(|content| content == "private-live-edit");
+                    let owned_windows_ready =
+                        super::isolated_window_count(handle, &nested, &authority, Some(&address))
+                            .is_ok_and(|count| count > 0);
+                    if window_visible && private_edit_ready && owned_windows_ready {
                         break;
                     }
                     assert!(
                         super::process_exists(application.id()) && Instant::now() < deadline,
-                        "production task-scoped GTK fixture was not ready"
+                        "production task-scoped GTK fixture not ready: window_visible={window_visible}, private_edit_ready={private_edit_ready}, owned_windows_ready={owned_windows_ready}"
                     );
                     thread::sleep(Duration::from_millis(100));
                 }

@@ -1824,11 +1824,13 @@ mod windows_task_acl_tests {
 
 #[cfg(test)]
 mod macos_task_profile_tests {
+    #[cfg(unix)]
+    use super::macos_validate_task_scope_aliases;
     use super::{
         macos_allow_profile_user_tool_roots, macos_allow_user_tool_roots, macos_gui_bundle_root,
         macos_profile_path_literal, macos_source_project_disjoint_from_read_roots,
-        macos_task_scope_profile_rules, macos_validate_task_scope_aliases,
-        macos_verified_gui_bundle_root, validate_macos_source_gui_read_grants,
+        macos_task_scope_profile_rules, macos_verified_gui_bundle_root,
+        validate_macos_source_gui_read_grants,
     };
     use std::path::{Path, PathBuf};
 
@@ -2597,6 +2599,8 @@ mod platform {
         roots.into_iter().collect()
     }
 
+    // Keep native read and write scopes independent and explicit.
+    #[allow(clippy::too_many_arguments)]
     fn sandbox_profile(
         program: &Path,
         writable_root: &Path,

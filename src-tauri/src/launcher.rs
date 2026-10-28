@@ -856,7 +856,7 @@ fn macos_catalog_executable_with_lookup(
 fn find_catalog_executable(application: &CatalogApplication) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        return macos_catalog_executable_with_lookup(application.executables, find_executable);
+        macos_catalog_executable_with_lookup(application.executables, find_executable)
     }
     #[cfg(not(target_os = "macos"))]
     let found = application

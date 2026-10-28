@@ -2019,6 +2019,7 @@ fn recording_max_seconds(value: Option<u32>) -> Result<u32, String> {
     Ok(seconds)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct AiWorkspaceCapture<'a> {
     display: &'a str,
     xauth_path: &'a Path,

@@ -879,6 +879,8 @@ impl SourceMutationPrivateView {
         root
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn bind_mounts(&self, workspace_root: &Path) -> Vec<(PathBuf, PathBuf)> {
         self.mounts
             .iter()
@@ -2578,7 +2580,7 @@ fn task_source_metadata_is_alias(metadata: &fs::Metadata) -> bool {
         use std::os::windows::fs::MetadataExt;
         // Windows junctions and other reparse points may not be reported as
         // Rust symlinks. Never traverse or reconcile through any of them.
-        return metadata.file_attributes() & 0x0000_0400 != 0;
+        metadata.file_attributes() & 0x0000_0400 != 0
     }
     #[cfg(not(windows))]
     {

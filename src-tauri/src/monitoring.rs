@@ -1223,7 +1223,7 @@ fn read_windows_listener_table(family: u32) -> Option<Vec<u8>> {
         return None;
     }
     for _ in 0..3 {
-        if bytes < 4 || bytes > MAX_TABLE_BYTES {
+        if !(4..=MAX_TABLE_BYTES).contains(&bytes) {
             return None;
         }
         // IP Helper writes DWORD-based native table headers and rows.

@@ -2,9 +2,11 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
-    process::Command as StdCommand,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(target_os = "linux")]
+use std::process::Command as StdCommand;
 
 use rmcp::{
     model::{CallToolRequestParams, CallToolResult, Tool},
@@ -368,6 +370,8 @@ fn release_identity(release: &CapabilityRelease) -> TargetIdentity {
 }
 
 fn make_managed_executable(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

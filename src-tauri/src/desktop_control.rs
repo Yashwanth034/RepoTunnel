@@ -1821,6 +1821,7 @@ for line in sys.stdin:
         let _ = child.wait();
     }
 
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     #[test]
     fn persistent_helper_retries_only_read_only_observations() {
         for operation in ["ping", "list", "inspect", "screenshot"] {
@@ -1838,6 +1839,7 @@ for line in sys.stdin:
         }
     }
 
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     #[test]
     fn persistent_helper_transport_errors_are_distinct_from_operation_errors() {
         assert!(helper_transport_error(

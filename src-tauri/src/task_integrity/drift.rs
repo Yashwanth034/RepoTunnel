@@ -1877,12 +1877,14 @@ mod native_adapter_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::TaskWatchTarget;
     use super::{
         apply_task_watch_disposition, classify_task_watch_event, coalesce_raw_watch_events,
         correlate_task_watch_events_with_registry, reconcile_task_state, task_watch_roots,
         validate_task_watch_binding, DriftEventClassification, RawWatchEvent, RawWatchEventKind,
         TaskMutationCorrelationRegistry, TaskWatchBinding, TaskWatchEvent, TaskWatchEventKind,
-        TaskWatchEventOrigin, TaskWatchRegistry, TaskWatchTarget,
+        TaskWatchEventOrigin, TaskWatchRegistry,
     };
     #[cfg(target_os = "linux")]
     use super::{spawn_linux_watch_worker, LinuxTaskWatcher};

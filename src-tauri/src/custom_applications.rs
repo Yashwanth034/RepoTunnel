@@ -275,11 +275,11 @@ fn executable_identity(path: &Path) -> Result<String, String> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        return Ok(format!(
+        Ok(format!(
             "windows:{}:{}",
             metadata.creation_time(),
             metadata.file_size()
-        ));
+        ))
     }
 
     #[cfg(not(any(unix, windows)))]

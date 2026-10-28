@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -182,7 +182,7 @@ fn sync_parent_directory(path: &Path, label: &str) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Could not resolve {label} directory."))?;
-    File::open(parent)
+    std::fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("Could not sync {label} directory: {error}"))
 }
