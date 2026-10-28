@@ -8,7 +8,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Mutex, OnceLock, Weak,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -65,7 +65,8 @@ const BROWSER_FASTPATH: &str = include_str!("../resources/browser_fastpath.cjs")
 
 static BROWSER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static HISTORY_LOCK: Mutex<()> = Mutex::new(());
-static BROWSER_HELPER_RESTART_LOCK: Mutex<()> = Mutex::new(());
+static BROWSER_HELPER_RESTART_LOCKS: OnceLock<Mutex<HashMap<String, Weak<Mutex<()>>>>> =
+    OnceLock::new();
 static BROWSER_PROFILE_CLONE_LOCK: Mutex<()> = Mutex::new(());
 static BROWSER_RUNTIMES: OnceLock<Mutex<HashMap<String, Arc<Mutex<BrowserRuntime>>>>> =
     OnceLock::new();
@@ -1847,12 +1848,30 @@ fn stop_helper_child(mut child: Child) {
     let _ = child.wait();
 }
 
+/// Coordinate replacement only among callers sharing the same runtime.
+/// A slow helper startup in one approved project must not block unrelated
+/// projects. Weak entries prevent abandoned project keys accumulating.
+fn browser_helper_restart_lock(workspace_id: &str) -> Result<Arc<Mutex<()>>, String> {
+    let registry = BROWSER_HELPER_RESTART_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = registry
+        .lock()
+        .map_err(|_| "Browser helper restart coordination is unavailable.".to_string())?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(workspace_id).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(workspace_id.to_string(), Arc::downgrade(&lock));
+    Ok(lock)
+}
+
 fn restart_runtime_helper(
     app: &AppHandle,
     workspace_id: &str,
     expected_client: &Arc<BrowserHelperClient>,
 ) -> Result<Arc<BrowserHelperClient>, String> {
-    let _restart_guard = BROWSER_HELPER_RESTART_LOCK
+    let restart_lock = browser_helper_restart_lock(workspace_id)?;
+    let _restart_guard = restart_lock
         .lock()
         .map_err(|_| "Browser helper restart coordination is unavailable.".to_string())?;
 
@@ -2340,25 +2359,36 @@ fn remove_runtime_everywhere(handle: &Arc<Mutex<BrowserRuntime>>) -> Vec<String>
     removed
 }
 
-fn ping_runtime(app: &AppHandle, workspace_id: &str) -> Option<BrowserRuntimeSnapshot> {
-    if run_runtime_helper_json(app, workspace_id, "ping", &[]).is_ok() {
-        return runtime_snapshot(workspace_id);
-    }
+fn owned_browser_exited(child: &mut Child) -> std::io::Result<bool> {
+    child.try_wait().map(|status| status.is_some())
+}
 
+/// A status/preflight read must not turn a transient CDP helper failure into
+/// termination of a still-live browser. Check the owned Chrome process without
+/// talking to the helper; actual commands use ensure_runtime_helper(), which
+/// reconnects a failed helper without replaying ambiguous mutations.
+fn ping_runtime(_app: &AppHandle, workspace_id: &str) -> Option<BrowserRuntimeSnapshot> {
     let handle = runtimes()
         .lock()
         .ok()
-        .and_then(|guard| guard.get(workspace_id).cloned());
-    if let Some(handle) = handle {
+        .and_then(|guard| guard.get(workspace_id).cloned())?;
+    let browser_exited = {
+        let mut runtime = handle.lock().ok()?;
+        match owned_browser_exited(&mut runtime.chrome_child) {
+            Ok(exited) => exited,
+            // A process-query error is not evidence that Chrome exited.
+            Err(_) => return None,
+        }
+    };
+    if browser_exited {
         let removed = remove_runtime_everywhere(&handle);
         stop_runtime_value(handle);
         for workspace_id in removed {
             semantic::forget_surface(&workspace_id, SemanticSurface::Browser);
         }
-    } else {
-        semantic::forget_surface(workspace_id, SemanticSurface::Browser);
+        return None;
     }
-    None
+    runtime_snapshot(workspace_id)
 }
 
 fn runtime_keys_for_workspace(workspace_id: &str) -> Vec<String> {
@@ -4800,6 +4830,33 @@ pub(crate) fn stop_all_activity() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_helper_restarts_are_serialized_per_runtime_not_across_projects() {
+        let first = browser_helper_restart_lock("test-runtime-A").unwrap();
+        let same = browser_helper_restart_lock("test-runtime-A").unwrap();
+        let other = browser_helper_restart_lock("test-runtime-B").unwrap();
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &other));
+        let _guard = first.lock().unwrap();
+        assert!(
+            same.try_lock().is_err(),
+            "same runtime must serialize restarts"
+        );
+        assert!(other.try_lock().is_ok(), "unrelated project must not wait");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_status_liveness_does_not_require_cdp_helper_response() {
+        let mut owned_child = Command::new("/bin/sh")
+            .args(["-c", "sleep 0.2"])
+            .spawn()
+            .expect("spawn local process fixture");
+        assert!(!owned_browser_exited(&mut owned_child).unwrap());
+        owned_child.wait().unwrap();
+        assert!(owned_browser_exited(&mut owned_child).unwrap());
+    }
 
     #[test]
     fn website_viewport_rejects_bad_dimensions_and_supports_reset() {
