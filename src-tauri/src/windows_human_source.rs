@@ -320,7 +320,7 @@ fn opened_source(
     source: &str,
     size: u64,
 ) -> Result<File, String> {
-    let path = super::temp_file_path(workspace, task_id, source, false, true)?;
+    let path = crate::temp_workspace::temp_file_path(workspace, task_id, source, false, true)?;
     let metadata = fs::symlink_metadata(&path)
         .map_err(|_| "Approved Windows staged source disappeared.".to_string())?;
     if !metadata.is_file()

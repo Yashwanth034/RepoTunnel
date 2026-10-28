@@ -14,7 +14,7 @@ use std::{
 
 #[cfg(unix)]
 use std::os::unix::{fs::OpenOptionsExt, process::CommandExt};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -5381,7 +5381,10 @@ fn spawn_runtime_application(
         )?,
     );
 
+    #[cfg(not(target_os = "macos"))]
     let mut application_child = spawn_group(&mut app_cmd)?;
+    #[cfg(target_os = "macos")]
+    let application_child = spawn_group(&mut app_cmd)?;
     #[cfg(not(any(windows, target_os = "macos")))]
     if window_lifecycle_application {
         if let Err(error) = wait_for_application_window(
@@ -8300,6 +8303,8 @@ mod tests {
         models::LaunchApplication,
         semantic::{self, SemanticNodeDraft, SemanticSnapshotInput, SemanticSurface},
     };
+    #[cfg(any(windows, target_os = "macos"))]
+    use std::process::Command;
 
     #[cfg(target_os = "linux")]
     use super::build_gnome_terminal_legacy_command;

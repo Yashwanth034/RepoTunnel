@@ -1467,15 +1467,15 @@ mod tests {
     // between its seed and assertion.
     static PERMISSION_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    use super::DesktopHelperClient;
     use super::{
         clear_permission_store_cache_for_tests, desktop_document_identity,
-        helper_operation_safe_to_retry, helper_transport_error, load_store_cached_unlocked,
-        persist_store_and_update_cache, prepare_semantic_sequence, protected_application,
-        replace_store_cache, semantic_backend_id, semantic_drafts_from_inspection,
-        DesktopSemanticSequenceStep, PermissionStore, GLOBAL_PERMISSION, STORE_LOCK,
+        load_store_cached_unlocked, persist_store_and_update_cache, prepare_semantic_sequence,
+        protected_application, replace_store_cache, semantic_backend_id,
+        semantic_drafts_from_inspection, DesktopSemanticSequenceStep, PermissionStore,
+        GLOBAL_PERMISSION, STORE_LOCK,
     };
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    use super::{helper_operation_safe_to_retry, helper_transport_error, DesktopHelperClient};
     use crate::semantic::{self, SemanticNodeDraft, SemanticSnapshotInput};
 
     #[test]

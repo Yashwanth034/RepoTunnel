@@ -1105,7 +1105,7 @@ mod runtime {
 
 #[cfg(target_os = "macos")]
 pub(crate) use runtime::{
-    action, capture_window_png, inspect, list, scroll, semantic_sequence,
+    action, capture_window_png, inspect, list, owned_window_count, scroll, semantic_sequence,
     semantic_sequence_with_guard,
 };
 

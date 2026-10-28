@@ -258,7 +258,7 @@ fn configure_one_shot_command(
         &runtime_root,
         &env,
         crate::platform_sandbox::NetworkPolicy::Deny,
-        &[workspace_root, tool_root],
+        &[workspace_root.clone(), tool_root],
         &[],
     )
 }

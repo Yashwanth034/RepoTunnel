@@ -611,7 +611,7 @@ pub(crate) fn prepare_subdirectory(
     Ok((path, combined))
 }
 
-fn temp_file_path(
+pub(crate) fn temp_file_path(
     workspace: &Workspace,
     task_id: &str,
     relative_path: &str,

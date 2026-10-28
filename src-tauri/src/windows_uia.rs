@@ -250,9 +250,9 @@ mod runtime {
 
     use super::{
         element_signature, parse_application_pid, parse_signed_backend_id,
-        role_from_control_type_id, signed_backend_id, MAX_CHILDREN_PER_NODE, MAX_DEPTH, MAX_NODES,
-        MAX_SEQUENCE_STEPS, MAX_SEQUENCE_TEXT_BYTES, MAX_TEXT, MAX_TOTAL_WAIT_MS, MAX_TYPE_BYTES,
-        MAX_WAIT_MS,
+        role_from_control_type_id, signed_backend_id, windows_semantic_text_edit_allowed,
+        MAX_CHILDREN_PER_NODE, MAX_DEPTH, MAX_NODES, MAX_SEQUENCE_STEPS, MAX_SEQUENCE_TEXT_BYTES,
+        MAX_TEXT, MAX_TOTAL_WAIT_MS, MAX_TYPE_BYTES, MAX_WAIT_MS,
     };
 
     #[derive(Clone, Debug)]
@@ -486,12 +486,7 @@ mod runtime {
             .map_err(|error| uia_error("Could not read Windows UIA root", error))?;
         let children = walker
             .get_children_build_cache(&root, cache)
-            .map_err(|error| {
-                uia_error(
-                    "Could not inspect Windows app-owned top-level windows",
-                    error,
-                )
-            })?;
+            .ok_or_else(|| "Could not inspect Windows app-owned top-level windows.".to_string())?;
         Ok(children
             .into_iter()
             .filter(|element| element.get_cached_process_id().ok() == Some(pid))
@@ -563,8 +558,8 @@ mod runtime {
             return;
         }
         let children = match walker.get_children_build_cache(element, cache) {
-            Ok(children) => children,
-            Err(_) => {
+            Some(children) => children,
+            None => {
                 // A failed child enumeration does not mean no children.
                 // Mark the snapshot incomplete so coordinate hit-testing
                 // cannot click through unobserved sensitive controls.
@@ -1355,7 +1350,8 @@ mod runtime {
 
 #[cfg(windows)]
 pub(crate) use runtime::{
-    action, inspect, list, scroll, semantic_sequence, semantic_sequence_with_guard,
+    action, capture_window_png, inspect, list, owned_window_count, scroll, semantic_sequence,
+    semantic_sequence_with_guard,
 };
 
 #[cfg(test)]

@@ -393,7 +393,7 @@ mod native {
             else {
                 continue;
             };
-            let Some(number) = (unsafe { number(dictionary, kCGWindowNumber) })
+            let Some(window_number) = (unsafe { number(dictionary, kCGWindowNumber) })
                 .and_then(|value| u32::try_from(value).ok())
             else {
                 continue;
@@ -437,7 +437,7 @@ mod native {
                 .collect::<Vec<_>>()
                 .join(" ");
             result.push(WindowCandidate {
-                number,
+                number: window_number,
                 owner_pid,
                 layer,
                 title,

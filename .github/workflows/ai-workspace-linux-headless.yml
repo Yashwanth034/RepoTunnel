@@ -25,6 +25,31 @@ jobs:
             xvfb xserver-xephyr xauth python3-xlib python3-pil \
             metacity zenity bubblewrap dbus-daemon
 
+      - name: Enable distro-scoped Bubblewrap user namespaces for isolated GUI tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 may block unprivileged bwrap even on otherwise
+          # supported runners. Use the distro's restrictive per-binary
+          # AppArmor profile, NOT a system-wide userns sysctl relaxation.
+          if /usr/bin/bwrap --ro-bind / / -- /usr/bin/true; then
+            echo "Unprivileged Bubblewrap is already permitted."
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends apparmor-profiles apparmor-utils
+          source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          target=/etc/apparmor.d/bwrap-userns-restrict
+          test -f "$source" || {
+            echo "STOP: Distribution-restricted Bubblewrap AppArmor profile is unavailable." >&2
+            exit 1
+          }
+          sudo install -m 0644 "$source" "$target"
+          sudo apparmor_parser -r "$target"
+          # The exact unprivileged mount isolation used by the native tests
+          # must now work; otherwise preserve the failure rather than fall
+          # back to an unrestricted host process.
+          /usr/bin/bwrap --ro-bind / / -- /usr/bin/true
+
       - name: Validate mocked semantic-owner protections
         run: /usr/bin/python3 -m unittest -q src-tauri/resources/ai_workspace/test_ai_workspace_security.py
 
@@ -51,6 +76,31 @@ jobs:
             librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
             patchelf wget xvfb xserver-xephyr xauth bubblewrap \
             metacity zenity dbus-daemon x11-utils
+
+      - name: Enable distro-scoped Bubblewrap user namespaces for isolated GUI tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 may block unprivileged bwrap even on otherwise
+          # supported runners. Use the distro's restrictive per-binary
+          # AppArmor profile, NOT a system-wide userns sysctl relaxation.
+          if /usr/bin/bwrap --ro-bind / / -- /usr/bin/true; then
+            echo "Unprivileged Bubblewrap is already permitted."
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends apparmor-profiles apparmor-utils
+          source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          target=/etc/apparmor.d/bwrap-userns-restrict
+          test -f "$source" || {
+            echo "STOP: Distribution-restricted Bubblewrap AppArmor profile is unavailable." >&2
+            exit 1
+          }
+          sudo install -m 0644 "$source" "$target"
+          sudo apparmor_parser -r "$target"
+          # The exact unprivileged mount isolation used by the native tests
+          # must now work; otherwise preserve the failure rather than fall
+          # back to an unrestricted host process.
+          /usr/bin/bwrap --ro-bind / / -- /usr/bin/true
 
       - name: Node 22
         uses: actions/setup-node@v6

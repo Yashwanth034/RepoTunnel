@@ -1280,7 +1280,7 @@ fn configure_sandboxed_rea_program(
         &read_roots,
         &denied_paths,
     )?;
-    Ok(TokioCommand::from_std(command))
+    Ok(TokioCommand::from(command))
 }
 
 #[cfg(all(not(target_os = "linux"), test))]

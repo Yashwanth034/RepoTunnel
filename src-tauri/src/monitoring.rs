@@ -1141,7 +1141,8 @@ fn macos_port_listeners(pids: &[u32]) -> Vec<MonitoringPortListener> {
     if !succeeded
         || output
             .metadata()
-            .is_err_or(|metadata| metadata.len() > MAX_OUTPUT_BYTES)
+            .map(|metadata| metadata.len() > MAX_OUTPUT_BYTES)
+            .unwrap_or(true)
         || output.seek(SeekFrom::Start(0)).is_err()
     {
         return Vec::new();

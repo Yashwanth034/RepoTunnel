@@ -3190,7 +3190,7 @@ mod platform {
     pub(super) fn native_gui_child_handoff_path_for_command(command: &Command) -> Option<PathBuf> {
         let encoded = command
             .get_envs()
-            .find(|(key, _)| key == OsStr::new(HELPER_ENV))?
+            .find(|(key, _)| *key == OsStr::new(HELPER_ENV))?
             .1?
             .to_str()?;
         let bytes = BASE64.decode(encoded).ok()?;
@@ -4039,6 +4039,7 @@ mod platform {
                 read_roots,
                 denied_paths,
                 None,
+                false,
             );
         }
         configure(
@@ -4614,7 +4615,7 @@ mod platform {
                     .to_string_lossy()
                     .into_owned(),
             };
-            run_helper(config)
+            run_helper(config, false)
         };
 
         let permitted = run("echo generated>generated\\artifact.txt")
