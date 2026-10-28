@@ -9,7 +9,6 @@ import type {
 } from "../types";
 import type { AppView, IconName } from "./AppSidebar";
 import { NavIcon } from "./AppSidebar";
-import HomeChat from "./HomeChat";
 
 type HomeWorkspaceProps = {
   gateway: GatewayStatus;
@@ -74,18 +73,12 @@ function HomeWorkspace({
   connection,
   publicTunnel,
   workspaces,
-  selectedWorkspace,
-  modelHub,
-  currentFile,
-  selection,
-  errors,
   gatewayBusy,
   adding,
   checkpointBusy,
   safetyBusy,
   aiAccessBusy,
   aiAccessPaused,
-  onModelHubChange,
   onToggleGateway,
   onAddProject,
   onCreateProject,
@@ -108,17 +101,9 @@ function HomeWorkspace({
   return (
     <div className="home-workspace home-workspace-chat">
       <section className="home-center-stage">
-        <div className="home-center-content home-chat-center-content">
-          <HomeChat
-            workspace={selectedWorkspace}
-            modelHub={modelHub}
-            currentFile={currentFile}
-            selection={selection}
-            errors={errors}
-            onModelHubChange={onModelHubChange}
-          />
+        <div className="home-chat-empty-brand home-home-brand" aria-hidden="true">
+          <span>RepoTunnel</span>
         </div>
-
       </section>
 
       <aside className="home-right-rail">

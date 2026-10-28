@@ -24,6 +24,7 @@ use url::Url;
 
 use crate::{
     access::{resolve_workspace_path, AccessOperation},
+    browser_transaction::{self, BrowserTransactionPlan, BrowserTransactionStep},
     gmail_access,
     models::{
         BrowserActionKind, BrowserActionOutcome, BrowserActionRecord, BrowserActionStatus,
@@ -43,6 +44,8 @@ use crate::{
 
 const BROWSER_HISTORY_FILE: &str = "browser-history.json";
 const BROWSER_HELPER_RELATIVE: &str = "browser/browser_bridge.cjs";
+const BROWSER_TRANSACTION_RUNTIME_RELATIVE: &str = "browser/browser_transaction_runtime.cjs";
+const BROWSER_FASTPATH_RELATIVE: &str = "browser/browser_fastpath.cjs";
 const MAX_CONTEXT_HEADERS: usize = 32;
 const MAX_CONTEXT_HEADER_NAME: usize = 128;
 const MAX_CONTEXT_HEADER_VALUE: usize = 2048;
@@ -56,6 +59,9 @@ const MAX_BROWSER_SEQUENCE_WAIT_MS: u64 = 2_000;
 const MAX_BROWSER_SEQUENCE_TOTAL_WAIT_MS: u64 = 10_000;
 const MAX_DIAGNOSTIC_ENTRIES: usize = 200;
 const BROWSER_HELPER: &str = include_str!("../resources/browser_bridge.cjs");
+const BROWSER_TRANSACTION_RUNTIME: &str =
+    include_str!("../resources/browser_transaction_runtime.cjs");
+const BROWSER_FASTPATH: &str = include_str!("../resources/browser_fastpath.cjs");
 
 static BROWSER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static HISTORY_LOCK: Mutex<()> = Mutex::new(());
@@ -79,8 +85,9 @@ struct BrowserMutationState {
 }
 
 enum BrowserMutationHelperOutcome {
-    Applied,
+    Applied(Value),
     Ambiguous { transport_error: String },
+    Failed { error: String },
 }
 
 struct BrowserHelperClient {
@@ -259,6 +266,9 @@ enum StoredBrowserRequest {
         sequence_id: String,
         steps: Vec<BrowserSemanticSequenceStep>,
     },
+    Transaction {
+        plan: BrowserTransactionPlan,
+    },
     Scroll {
         tab_id: String,
         delta_x: i32,
@@ -275,6 +285,8 @@ struct StoredBrowserAction {
     record: BrowserActionRecord,
     request: Option<StoredBrowserRequest>,
     owner_id: Option<String>,
+    #[serde(default)]
+    task_binding: Option<crate::models::ChangeTaskBinding>,
 }
 
 #[derive(Clone, Copy)]
@@ -371,11 +383,121 @@ fn new_id(prefix: &str) -> String {
     )
 }
 
-fn find_executable(name: &str) -> Option<PathBuf> {
-    let path_value = env::var_os("PATH")?;
-    env::split_paths(&path_value)
-        .map(|directory| directory.join(name))
-        .find(|candidate| candidate.is_file())
+// Search the normal PATH first, then OS-standard install locations. Desktop
+// applications are often absent from PATH on Windows and macOS.
+fn executable_names_for(os: &str, name: &str) -> Vec<String> {
+    let mut names = vec![name.to_string()];
+    if os == "windows" && !name.to_ascii_lowercase().ends_with(".exe") {
+        names.push(format!("{name}.exe"));
+    }
+    names
+}
+
+fn installed_executable_candidates(
+    os: &str,
+    name: &str,
+    home: Option<&Path>,
+    program_files: Option<&Path>,
+    program_files_x86: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let (windows_relative, macos_bundle) = match name {
+        "google-chrome" | "google-chrome-stable" | "chrome" => (
+            Some("Google/Chrome/Application/chrome.exe"),
+            Some("Google Chrome.app/Contents/MacOS/Google Chrome"),
+        ),
+        "chromium" | "chromium-browser" => (
+            Some("Chromium/Application/chrome.exe"),
+            Some("Chromium.app/Contents/MacOS/Chromium"),
+        ),
+        "brave" | "brave-browser" => (
+            Some("BraveSoftware/Brave-Browser/Application/brave.exe"),
+            Some("Brave Browser.app/Contents/MacOS/Brave Browser"),
+        ),
+        "microsoft-edge" | "microsoft-edge-stable" | "msedge" => (
+            Some("Microsoft/Edge/Application/msedge.exe"),
+            Some("Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ),
+        _ => (None, None),
+    };
+    match os {
+        "windows" => {
+            if let Some(relative) = windows_relative {
+                for base in [program_files, program_files_x86, local_app_data]
+                    .into_iter()
+                    .flatten()
+                {
+                    candidates.push(base.join(relative));
+                }
+            } else if name == "node" || name == "node.exe" {
+                for base in [program_files, program_files_x86].into_iter().flatten() {
+                    candidates.push(base.join("nodejs/node.exe"));
+                }
+            }
+        }
+        "macos" => {
+            if let Some(bundle) = macos_bundle {
+                candidates.push(PathBuf::from("/Applications").join(bundle));
+                if let Some(home) = home {
+                    candidates.push(home.join("Applications").join(bundle));
+                }
+            } else if name == "node" || name == "nodejs" {
+                candidates.push(PathBuf::from("/opt/homebrew/bin/node"));
+                candidates.push(PathBuf::from("/usr/local/bin/node"));
+            }
+        }
+        _ => {}
+    }
+    candidates
+}
+
+// Inject paths in tests instead of mutating the process-wide PATH or HOME.
+#[allow(clippy::too_many_arguments)]
+fn resolve_installed_executable(
+    os: &str,
+    name: &str,
+    search_path: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+    program_files: Option<&Path>,
+    program_files_x86: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Option<PathBuf> {
+    let names = executable_names_for(os, name);
+    if let Some(path_value) = search_path {
+        for directory in env::split_paths(path_value) {
+            for candidate_name in &names {
+                let candidate = directory.join(candidate_name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    installed_executable_candidates(
+        os,
+        name,
+        home,
+        program_files,
+        program_files_x86,
+        local_app_data,
+    )
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+pub(crate) fn find_executable(name: &str) -> Option<PathBuf> {
+    resolve_installed_executable(
+        env::consts::OS,
+        name,
+        env::var_os("PATH").as_deref(),
+        env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+            .as_deref()
+            .map(Path::new),
+        env::var_os("ProgramFiles").as_deref().map(Path::new),
+        env::var_os("ProgramFiles(x86)").as_deref().map(Path::new),
+        env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+    )
 }
 
 fn automation_node() -> Result<PathBuf, String> {
@@ -383,7 +505,7 @@ fn automation_node() -> Result<PathBuf, String> {
         return Ok(node.clone());
     }
     let node = find_executable("node").ok_or_else(|| {
-        "RepoTunnel browser automation requires Node.js with built-in WebSocket support on PATH.".to_string()
+        "RepoTunnel browser automation requires Node.js with built-in WebSocket support. Install Node.js or make it available in a supported install location.".to_string()
     })?;
     let supported = Command::new(&node)
         .arg("--experimental-websocket")
@@ -403,24 +525,60 @@ fn automation_node() -> Result<PathBuf, String> {
     Ok(node)
 }
 
+fn write_browser_helper_resource(path: &Path, contents: &str, label: &str) -> Result<(), String> {
+    let needs_write = fs::read_to_string(path)
+        .map(|existing| existing != contents)
+        .unwrap_or(true);
+    if needs_write {
+        fs::write(path, contents)
+            .map_err(|error| format!("Could not install RepoTunnel {label}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn install_browser_helper_resources_at(directory: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory).map_err(|error| {
+        format!("Could not create RepoTunnel browser helper directory: {error}")
+    })?;
+    let bridge = directory.join("browser_bridge.cjs");
+    let transaction_runtime = directory.join("browser_transaction_runtime.cjs");
+    let fastpath = directory.join("browser_fastpath.cjs");
+    write_browser_helper_resource(&bridge, BROWSER_HELPER, "browser helper")?;
+    write_browser_helper_resource(&fastpath, BROWSER_FASTPATH, "browser fast-path helper")?;
+    write_browser_helper_resource(
+        &transaction_runtime,
+        BROWSER_TRANSACTION_RUNTIME,
+        "browser transaction runtime",
+    )?;
+    Ok(bridge)
+}
+
 fn helper_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let path = app
+    let bridge = app
         .path()
         .resolve(BROWSER_HELPER_RELATIVE, BaseDirectory::AppData)
         .map_err(|error| format!("Could not resolve RepoTunnel browser helper path: {error}"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!("Could not create RepoTunnel browser helper directory: {error}")
+    let transaction_runtime = app
+        .path()
+        .resolve(BROWSER_TRANSACTION_RUNTIME_RELATIVE, BaseDirectory::AppData)
+        .map_err(|error| {
+            format!("Could not resolve RepoTunnel browser transaction runtime path: {error}")
         })?;
+    let fastpath = app
+        .path()
+        .resolve(BROWSER_FASTPATH_RELATIVE, BaseDirectory::AppData)
+        .map_err(|error| {
+            format!("Could not resolve RepoTunnel browser fast-path helper: {error}")
+        })?;
+    let directory = bridge
+        .parent()
+        .ok_or_else(|| "RepoTunnel browser helper path has no parent directory.".to_string())?;
+    if transaction_runtime.parent() != Some(directory) || fastpath.parent() != Some(directory) {
+        return Err(
+            "RepoTunnel browser helper resources resolved to different directories.".to_string(),
+        );
     }
-    let needs_write = fs::read_to_string(&path)
-        .map(|contents| contents != BROWSER_HELPER)
-        .unwrap_or(true);
-    if needs_write {
-        fs::write(&path, BROWSER_HELPER)
-            .map_err(|error| format!("Could not install RepoTunnel browser helper: {error}"))?;
-    }
-    Ok(path)
+    install_browser_helper_resources_at(directory)
 }
 
 fn history_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1406,6 +1564,37 @@ fn prune_files(directory: &Path, keep: usize) {
     }
 }
 
+// Keep the existing 50-screenshot retention count independent of private
+// provenance sidecars. Remove paired metadata whenever a PNG expires.
+fn prune_screenshots(directory: &Path, keep: usize) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut pngs = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("png") {
+                return None;
+            }
+            let metadata = fs::symlink_metadata(&path).ok()?;
+            if !metadata.file_type().is_file() {
+                return None;
+            }
+            Some((metadata.modified().ok()?, path))
+        })
+        .collect::<Vec<_>>();
+    pngs.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, png) in pngs.into_iter().skip(keep) {
+        let provenance = png.with_extension("capture.json");
+        let _ = fs::remove_file(&png);
+        let _ = fs::remove_file(&provenance);
+        if let Some(file) = provenance.file_name().and_then(|name| name.to_str()) {
+            let _ = fs::remove_file(provenance.with_file_name(format!(".{file}.previous")));
+        }
+    }
+}
+
 fn screenshot_path(
     app: &AppHandle,
     workspace_id: &str,
@@ -1630,6 +1819,7 @@ fn helper_operation_safe_to_retry(operation: &str) -> bool {
             | "screenshot"
             | "mutation-state"
             | "semantic-sequence-cancel"
+            | "transaction-cancel"
             | "apply-context"
             | "configure-downloads"
             | "reset-downloads"
@@ -1856,7 +2046,7 @@ fn run_runtime_helper_mutation_json(
 ) -> Result<BrowserMutationHelperOutcome, String> {
     let client = ensure_runtime_helper(app, workspace_id)?;
     match client.request(operation, args) {
-        Ok(_) => Ok(BrowserMutationHelperOutcome::Applied),
+        Ok(value) => Ok(BrowserMutationHelperOutcome::Applied(value)),
         Err(error) if helper_transport_error(&error) => {
             let transport_error = match restart_runtime_helper(app, workspace_id, &client) {
                 Ok(_) => error,
@@ -1866,7 +2056,7 @@ fn run_runtime_helper_mutation_json(
             };
             Ok(BrowserMutationHelperOutcome::Ambiguous { transport_error })
         }
-        Err(error) => Err(error),
+        Err(error) => Ok(BrowserMutationHelperOutcome::Failed { error }),
     }
 }
 
@@ -1885,25 +2075,33 @@ fn observe_browser_mutation_state(
         .map_err(|error| format!("Could not decode browser mutation state: {error}"))
 }
 
-fn execute_receipted_browser_mutation(
+fn execute_receipted_browser_mutation_with_result(
     app: &AppHandle,
     workspace_id: &str,
     tab_id: &str,
     operation: &str,
     args: &[String],
-) -> Result<BrowserMutationReceipt, String> {
+) -> Result<(BrowserMutationReceipt, Option<Value>, Option<String>), String> {
     let mutation_id = new_id("browser-mutation");
     let before = observe_browser_mutation_state(app, workspace_id, tab_id)?;
     let outcome = run_runtime_helper_mutation_json(app, workspace_id, operation, args)?;
     let after = observe_browser_mutation_state(app, workspace_id, tab_id).ok();
 
-    let (completion, transport_error) = match outcome {
-        BrowserMutationHelperOutcome::Applied => (BrowserMutationCompletion::Applied, None),
-        BrowserMutationHelperOutcome::Ambiguous { transport_error } => {
-            (BrowserMutationCompletion::Ambiguous, Some(transport_error))
+    let (completion, transport_error, helper_result, helper_error) = match outcome {
+        BrowserMutationHelperOutcome::Applied(value) => {
+            (BrowserMutationCompletion::Applied, None, Some(value), None)
+        }
+        BrowserMutationHelperOutcome::Ambiguous { transport_error } => (
+            BrowserMutationCompletion::Ambiguous,
+            Some(transport_error),
+            None,
+            None,
+        ),
+        BrowserMutationHelperOutcome::Failed { error } => {
+            (BrowserMutationCompletion::Failed, None, None, Some(error))
         }
     };
-    let helper_acknowledged = completion == BrowserMutationCompletion::Applied;
+    let helper_acknowledged = completion != BrowserMutationCompletion::Ambiguous;
     let document_changed = after.as_ref().is_some_and(|after| {
         before.url != after.url
             || match (
@@ -1915,19 +2113,126 @@ fn execute_receipted_browser_mutation(
             }
     });
 
-    Ok(BrowserMutationReceipt {
-        id: mutation_id,
-        operation: operation.to_string(),
-        tab_id: tab_id.to_string(),
-        completion,
-        helper_acknowledged,
-        before_url: redact_browser_url(&before.url),
-        after_url: after.as_ref().map(|state| redact_browser_url(&state.url)),
-        before_document_generation: before.document_generation,
-        after_document_generation: after.and_then(|state| state.document_generation),
-        document_changed,
-        transport_error,
-    })
+    Ok((
+        BrowserMutationReceipt {
+            id: mutation_id,
+            operation: operation.to_string(),
+            tab_id: tab_id.to_string(),
+            completion,
+            helper_acknowledged,
+            before_url: redact_browser_url(&before.url),
+            after_url: after.as_ref().map(|state| redact_browser_url(&state.url)),
+            before_document_generation: before.document_generation,
+            after_document_generation: after.and_then(|state| state.document_generation),
+            document_changed,
+            transport_error,
+        },
+        helper_result,
+        helper_error,
+    ))
+}
+
+fn execute_receipted_browser_mutation(
+    app: &AppHandle,
+    workspace_id: &str,
+    tab_id: &str,
+    operation: &str,
+    args: &[String],
+) -> Result<BrowserMutationReceipt, String> {
+    let (receipt, _, helper_error) =
+        execute_receipted_browser_mutation_with_result(app, workspace_id, tab_id, operation, args)?;
+    if let Some(error) = helper_error {
+        Err(error)
+    } else {
+        Ok(receipt)
+    }
+}
+
+fn persisted_transaction_result(result: Option<Value>) -> Option<Value> {
+    let source = result?.as_object()?.clone();
+    let mut safe = serde_json::Map::new();
+
+    for key in [
+        "ok",
+        "transactionId",
+        "completedSteps",
+        "totalSteps",
+        "finalDocumentIdentity",
+        "documentChanged",
+    ] {
+        if let Some(value) = source.get(key) {
+            safe.insert(key.to_string(), value.clone());
+        }
+    }
+
+    if let Some(url) = source.get("finalUrl").and_then(Value::as_str) {
+        let redacted = Url::parse(url)
+            .map(|mut parsed| {
+                parsed.set_query(None);
+                parsed.set_fragment(None);
+                parsed.to_string()
+            })
+            .unwrap_or_else(|_| secret_guard::redact_text(url));
+        safe.insert("finalUrl".to_string(), Value::String(redacted));
+    }
+
+    if let Some(steps) = source.get("steps").and_then(Value::as_array) {
+        let mut safe_steps = Vec::with_capacity(steps.len().min(64));
+        for step in steps.iter().take(64) {
+            let Some(step) = step.as_object() else {
+                continue;
+            };
+            let mut safe_step = serde_json::Map::new();
+            for key in ["step", "operation", "elapsedMs"] {
+                if let Some(value) = step.get(key) {
+                    safe_step.insert(key.to_string(), value.clone());
+                }
+            }
+            if let Some(result) = step.get("result").and_then(Value::as_object) {
+                let mut safe_result = serde_json::Map::new();
+                for key in [
+                    "operation",
+                    "verified",
+                    "alias",
+                    "tag",
+                    "id",
+                    "name",
+                    "role",
+                    "characterCount",
+                    "checked",
+                    "condition",
+                    "timeoutMs",
+                ] {
+                    if let Some(value) = result.get(key) {
+                        safe_result.insert(key.to_string(), value.clone());
+                    }
+                }
+                if !safe_result.is_empty() {
+                    safe_step.insert("result".to_string(), Value::Object(safe_result));
+                }
+            }
+            safe_steps.push(Value::Object(safe_step));
+        }
+        safe.insert("steps".to_string(), Value::Array(safe_steps));
+    }
+
+    if let Some(timings) = source.get("timings").and_then(Value::as_object) {
+        let mut safe_timings = serde_json::Map::new();
+        for key in ["repoTunnelInternalMs", "externalMcpRoundTripIncluded"] {
+            if let Some(value) = timings.get(key) {
+                safe_timings.insert(key.to_string(), value.clone());
+            }
+        }
+        if !safe_timings.is_empty() {
+            safe.insert("timings".to_string(), Value::Object(safe_timings));
+        }
+    }
+
+    Some(Value::Object(safe))
+}
+
+fn apply_transaction_result(record: &mut BrowserActionRecord, result: Option<Value>) {
+    record.transaction_result = persisted_transaction_result(result);
 }
 
 fn apply_mutation_receipt(
@@ -2611,11 +2916,47 @@ fn clear_visual_selection(workspace_id: &str) {
     }
 }
 
+fn transaction_execution_plan(
+    workspace: &BrowserScope,
+    plan: &BrowserTransactionPlan,
+) -> Result<BrowserTransactionPlan, String> {
+    let mut execution = plan.clone();
+    for step in &mut execution.steps {
+        let BrowserTransactionStep::UploadFile {
+            workspace_relative_path,
+            ..
+        } = step
+        else {
+            continue;
+        };
+        let path = resolve_workspace_path(
+            workspace,
+            workspace_relative_path,
+            AccessOperation::Read,
+            true,
+        )?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| format!("Could not inspect transaction upload file: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(
+                "Browser transaction upload requires a regular non-symlink project file."
+                    .to_string(),
+            );
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve transaction upload file: {error}"))?;
+        *workspace_relative_path = canonical.to_string_lossy().into_owned();
+    }
+    Ok(execution)
+}
+
 fn execute_request(
     app: &AppHandle,
     workspace: &BrowserScope,
     request: &StoredBrowserRequest,
     mutation_receipt: &mut Option<BrowserMutationReceipt>,
+    transaction_result: &mut Option<Value>,
 ) -> Result<(), String> {
     let runtime_key = workspace.runtime_key();
     match request {
@@ -2841,6 +3182,35 @@ fn execute_request(
                 Err(error) => Err(error),
             }
         }
+        StoredBrowserRequest::Transaction { plan } => {
+            clear_visual_selection(runtime_key);
+            ensure_tab_owned(runtime_key, &plan.tab_id)?;
+            let validated = browser_transaction::validate_transaction_plan(plan.clone())?;
+            let execution = transaction_execution_plan(workspace, &validated)?;
+            let encoded = serde_json::to_string(&execution)
+                .map_err(|error| format!("Could not encode browser transaction: {error}"))?;
+            let result = execute_receipted_browser_mutation_with_result(
+                app,
+                runtime_key,
+                &validated.tab_id,
+                "transaction",
+                &[encoded],
+            );
+            semantic::invalidate_target(runtime_key, SemanticSurface::Browser, &validated.tab_id);
+            set_active_tab(runtime_key, Some(validated.tab_id.clone()));
+            match result {
+                Ok((receipt, helper_result, helper_error)) => {
+                    *mutation_receipt = Some(receipt);
+                    *transaction_result = helper_result;
+                    if let Some(error) = helper_error {
+                        Err(error)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
         StoredBrowserRequest::Scroll {
             tab_id,
             delta_x,
@@ -2943,6 +3313,11 @@ fn request_summary(request: &StoredBrowserRequest) -> (BrowserActionKind, String
                 "semantic snapshot {snapshot_id}; sequence {sequence_id}"
             )),
         ),
+        StoredBrowserRequest::Transaction { plan } => (
+            BrowserActionKind::Sequence,
+            browser_transaction::history_summary(plan),
+            None,
+        ),
         StoredBrowserRequest::Scroll {
             tab_id,
             delta_x,
@@ -2983,13 +3358,16 @@ fn request_action(
             updated_at: timestamp,
             error: None,
             mutation_receipt: None,
+            transaction_result: None,
         },
         request: Some(request),
         owner_id: workspace.owner_id().map(str::to_string),
+        task_binding: None,
     };
 
     let mut navigation_receipt = None;
     let mut mutation_receipt = None;
+    let mut transaction_result = None;
     if automatic {
         let request = stored.request.as_ref().expect("browser request exists");
         let result = match request {
@@ -3017,13 +3395,21 @@ fn request_action(
                     navigation_receipt = Some(receipt);
                 })
             }
-            _ => execute_request(app, workspace, request, &mut mutation_receipt),
+            _ => execute_request(
+                app,
+                workspace,
+                request,
+                &mut mutation_receipt,
+                &mut transaction_result,
+            ),
         };
 
         if let Err(error) = result {
             stored.record.status = BrowserActionStatus::Failed;
             stored.record.error = Some(error.clone());
             stored.record.updated_at = now_millis();
+            apply_mutation_receipt(&mut stored.record, mutation_receipt);
+            apply_transaction_result(&mut stored.record, transaction_result.clone());
             stored.request = None;
             with_history(app, |records| {
                 records.push(stored.clone());
@@ -3032,6 +3418,7 @@ fn request_action(
             return Err(error);
         }
         apply_mutation_receipt(&mut stored.record, mutation_receipt);
+        apply_transaction_result(&mut stored.record, transaction_result.clone());
         stored.request = None;
     }
 
@@ -3044,6 +3431,7 @@ fn request_action(
         queued: !automatic,
         action: record,
         navigation_receipt,
+        transaction_result,
     })
 }
 
@@ -3284,6 +3672,30 @@ pub(crate) fn cancel_semantic_sequence(
     )
 }
 
+pub(crate) fn request_transaction(
+    app: &AppHandle,
+    workspace: &BrowserScope,
+    plan: BrowserTransactionPlan,
+) -> Result<BrowserActionOutcome, String> {
+    let plan = browser_transaction::validate_transaction_plan(plan)?;
+    validate_tab_id(&plan.tab_id)?;
+    request_action(app, workspace, StoredBrowserRequest::Transaction { plan })
+}
+
+pub(crate) fn cancel_transaction(
+    app: &AppHandle,
+    workspace: &BrowserScope,
+    transaction_id: &str,
+) -> Result<Value, String> {
+    let transaction_id = browser_transaction::validate_transaction_id(transaction_id)?;
+    run_runtime_helper_json(
+        app,
+        workspace.runtime_key(),
+        "transaction-cancel",
+        std::slice::from_ref(&transaction_id),
+    )
+}
+
 pub(crate) fn request_scroll(
     app: &AppHandle,
     workspace: &BrowserScope,
@@ -3509,6 +3921,51 @@ pub(crate) fn get_visual_selection(
         .cloned())
 }
 
+fn viewport_dimensions(
+    width: Option<u32>,
+    height: Option<u32>,
+    clear: bool,
+) -> Result<(u32, u32), String> {
+    if clear {
+        return Ok((0, 0));
+    }
+    let width = width.ok_or("Viewport width is required unless clear=true.")?;
+    let height = height.ok_or("Viewport height is required unless clear=true.")?;
+    if !(320..=2560).contains(&width) || !(480..=1600).contains(&height) {
+        return Err(
+            "Viewport dimensions must be width 320..2560, height 480..1600 CSS pixels.".into(),
+        );
+    }
+    Ok((width, height))
+}
+
+/// Set a reproducible CSS viewport for genuine responsive site screenshots.
+/// Only the MCP gateway may call this after checking ownership of the tab.
+pub(crate) fn set_viewport(
+    app: &AppHandle,
+    workspace: &BrowserScope,
+    tab_id: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    clear: bool,
+) -> Result<serde_json::Value, String> {
+    let tab_id = validate_tab_id(tab_id)?;
+    let (width, height) = viewport_dimensions(width, height, clear)?;
+    let _runtime = ping_runtime(app, workspace.runtime_key())
+        .ok_or("Start the RepoTunnel browser session first.")?;
+    run_runtime_helper_json(
+        app,
+        workspace.runtime_key(),
+        "set-viewport",
+        &[
+            tab_id,
+            width.to_string(),
+            height.to_string(),
+            clear.to_string(),
+        ],
+    )
+}
+
 pub(crate) fn screenshot(
     app: &AppHandle,
     workspace: &BrowserScope,
@@ -3563,8 +4020,25 @@ pub(crate) fn screenshot(
     let size_bytes = fs::metadata(&path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
+    // Record only whether the tab required Google identity access, never the
+    // tab URL. A later comparison must honor permission revocation even if
+    // the tab has since navigated to a non-Google page.
+    let requires_google_access = list_tabs(app, workspace)?
+        .into_iter()
+        .find(|tab| tab.id == tab_id)
+        .map(|tab| crate::gmail_access::is_google_identity_url(&tab.url))
+        .ok_or_else(|| "Captured tab ownership is no longer verifiable.".to_string())?;
+    crate::visual_regression::register(
+        app,
+        &workspace.id,
+        workspace.runtime_key(),
+        &tab_id,
+        full_page,
+        requires_google_access,
+        &screenshot_id,
+    )?;
     if let Some(parent) = path.parent() {
-        prune_files(parent, 50);
+        prune_screenshots(parent, 50);
     }
     Ok(BrowserScreenshot {
         id: screenshot_id,
@@ -3575,6 +4049,15 @@ pub(crate) fn screenshot(
         size_bytes,
         full_page,
     })
+}
+
+pub(crate) fn compare_screenshots(
+    app: &AppHandle,
+    scope: &BrowserScope,
+    tab_id: &str,
+    options: &crate::visual_regression::CompareOptions,
+) -> Result<crate::visual_regression::Comparison, String> {
+    crate::visual_regression::compare(app, &scope.id, scope.runtime_key(), tab_id, options)
 }
 
 fn valid_download_guid(guid: &str) -> bool {
@@ -4113,15 +4596,55 @@ pub(crate) fn list_history(
     Ok(records)
 }
 
-pub(crate) fn get_action(app: &AppHandle, action_id: &str) -> Result<BrowserActionRecord, String> {
+pub(crate) fn get_action_with_task_binding(
+    app: &AppHandle,
+    action_id: &str,
+) -> Result<
+    (
+        BrowserActionRecord,
+        Option<crate::models::ChangeTaskBinding>,
+    ),
+    String,
+> {
     let _guard = HISTORY_LOCK
         .lock()
         .map_err(|_| "Browser history is unavailable.".to_string())?;
     load_history_unlocked(app)?
         .into_iter()
         .find(|entry| entry.record.id == action_id)
-        .map(|entry| entry.record)
+        .map(|entry| (entry.record, entry.task_binding))
         .ok_or_else(|| "Browser action was not found.".to_string())
+}
+
+pub(crate) fn get_action(app: &AppHandle, action_id: &str) -> Result<BrowserActionRecord, String> {
+    get_action_with_task_binding(app, action_id).map(|(record, _)| record)
+}
+
+pub(crate) fn bind_action_to_task(
+    app: &AppHandle,
+    action_id: &str,
+    task_binding: Option<crate::models::ChangeTaskBinding>,
+) -> Result<(), String> {
+    let Some(task_binding) = task_binding else {
+        return Ok(());
+    };
+    with_history(app, |records| {
+        let entry = records
+            .iter_mut()
+            .find(|entry| entry.record.id == action_id)
+            .ok_or_else(|| "Browser action was not found.".to_string())?;
+        if let Some(existing) = entry.task_binding.as_ref() {
+            if existing != &task_binding {
+                return Err(
+                    "Browser action is already bound to a different Task Integrity authority."
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        entry.task_binding = Some(task_binding);
+        Ok(())
+    })
 }
 
 pub(crate) fn approve_action(
@@ -4155,7 +4678,14 @@ pub(crate) fn approve_action(
 
     let scope = BrowserScope::new(workspace, owner_id.as_deref());
     let mut mutation_receipt = None;
-    let result = execute_request(app, &scope, &request, &mut mutation_receipt);
+    let mut transaction_result = None;
+    let result = execute_request(
+        app,
+        &scope,
+        &request,
+        &mut mutation_receipt,
+        &mut transaction_result,
+    );
     with_history(app, |records| {
         let entry = records
             .iter_mut()
@@ -4174,6 +4704,7 @@ pub(crate) fn approve_action(
             }
         }
         apply_mutation_receipt(&mut entry.record, mutation_receipt.clone());
+        apply_transaction_result(&mut entry.record, transaction_result.clone());
         Ok(entry.record.clone())
     })
 }
@@ -4270,6 +4801,57 @@ pub(crate) fn stop_all_activity() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn website_viewport_rejects_bad_dimensions_and_supports_reset() {
+        assert_eq!(
+            viewport_dimensions(Some(390), Some(844), false).unwrap(),
+            (390, 844)
+        );
+        assert_eq!(
+            viewport_dimensions(Some(768), Some(1024), false).unwrap(),
+            (768, 1024)
+        );
+        assert_eq!(
+            viewport_dimensions(Some(1440), Some(900), false).unwrap(),
+            (1440, 900)
+        );
+        assert_eq!(viewport_dimensions(None, None, true).unwrap(), (0, 0));
+        assert!(viewport_dimensions(None, Some(844), false).is_err());
+        assert!(viewport_dimensions(Some(0), Some(900), false).is_err());
+        assert!(viewport_dimensions(Some(390), Some(200), false).is_err());
+        assert!(viewport_dimensions(Some(u32::MAX), Some(900), false).is_err());
+    }
+
+    #[test]
+    fn screenshot_retention_counts_png_captures_not_private_provenance_files() {
+        let temp = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            let id = format!("screenshot-{i}");
+            fs::write(temp.path().join(format!("{id}.png")), b"png fixture").unwrap();
+            fs::write(
+                temp.path().join(format!("{id}.capture.json")),
+                b"provenance",
+            )
+            .unwrap();
+        }
+        prune_screenshots(temp.path(), 3);
+        for i in 0..3 {
+            assert!(temp.path().join(format!("screenshot-{i}.png")).exists());
+            assert!(temp
+                .path()
+                .join(format!("screenshot-{i}.capture.json"))
+                .exists());
+        }
+        prune_screenshots(temp.path(), 0);
+        for i in 0..3 {
+            assert!(!temp.path().join(format!("screenshot-{i}.png")).exists());
+            assert!(!temp
+                .path()
+                .join(format!("screenshot-{i}.capture.json"))
+                .exists());
+        }
+    }
+
     fn target(backend_id: &str, actions: &[&str], sensitive: bool) -> SemanticRefTarget {
         SemanticRefTarget {
             snapshot_id: "semantic-test-1".to_string(),
@@ -4284,6 +4866,155 @@ mod tests {
             actions: actions.iter().map(|value| (*value).to_string()).collect(),
             sensitive,
         }
+    }
+
+    #[test]
+    fn browser_discovery_includes_windows_executables_and_standard_locations() {
+        assert_eq!(
+            executable_names_for("windows", "node"),
+            vec!["node", "node.exe"]
+        );
+        assert_eq!(
+            executable_names_for("windows", "chrome.exe"),
+            vec!["chrome.exe"]
+        );
+        let files = Path::new("C:/Program Files");
+        let local = Path::new("C:/Users/Test/AppData/Local");
+        let chrome = installed_executable_candidates(
+            "windows",
+            "google-chrome",
+            None,
+            Some(files),
+            None,
+            Some(local),
+        );
+        assert!(chrome.contains(&files.join("Google/Chrome/Application/chrome.exe")));
+        assert!(chrome.contains(&local.join("Google/Chrome/Application/chrome.exe")));
+        let edge = installed_executable_candidates(
+            "windows",
+            "microsoft-edge-stable",
+            None,
+            Some(files),
+            None,
+            None,
+        );
+        assert!(edge.contains(&files.join("Microsoft/Edge/Application/msedge.exe")));
+        let node =
+            installed_executable_candidates("windows", "node", None, Some(files), None, None);
+        assert_eq!(node, vec![files.join("nodejs/node.exe")]);
+    }
+
+    #[test]
+    fn browser_discovery_includes_macos_application_bundles() {
+        let home = Path::new("/Users/test");
+        let chrome =
+            installed_executable_candidates("macos", "google-chrome", Some(home), None, None, None);
+        assert!(chrome.contains(&PathBuf::from(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )));
+        assert!(chrome
+            .contains(&home.join("Applications/Google Chrome.app/Contents/MacOS/Google Chrome")));
+        let brave =
+            installed_executable_candidates("macos", "brave-browser", None, None, None, None);
+        assert!(brave.contains(&PathBuf::from(
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+        )));
+        let node = installed_executable_candidates("macos", "node", None, None, None, None);
+        assert!(node.contains(&PathBuf::from("/opt/homebrew/bin/node")));
+    }
+
+    #[test]
+    fn browser_discovery_uses_real_windows_fallback_files_and_path_priority() {
+        let temp = tempfile::tempdir().expect("create isolated browser discovery fixture");
+        let programs = temp.path().join("Program Files");
+        let installed = programs.join("Google/Chrome/Application/chrome.exe");
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        fs::write(&installed, b"fake test executable").unwrap();
+        assert_eq!(
+            resolve_installed_executable(
+                "windows",
+                "google-chrome",
+                None,
+                None,
+                Some(&programs),
+                None,
+                None
+            ),
+            Some(installed.clone())
+        );
+
+        let path_dir = temp.path().join("PATH");
+        fs::create_dir_all(&path_dir).unwrap();
+        let path_node = path_dir.join("node.exe");
+        fs::write(&path_node, b"fake test executable").unwrap();
+        assert_eq!(
+            resolve_installed_executable(
+                "windows",
+                "node",
+                Some(path_dir.as_os_str()),
+                None,
+                Some(&programs),
+                None,
+                None
+            ),
+            Some(path_node)
+        );
+
+        fs::remove_file(&installed).unwrap();
+        assert_eq!(
+            resolve_installed_executable(
+                "windows",
+                "google-chrome",
+                None,
+                None,
+                Some(&programs),
+                None,
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn browser_discovery_uses_real_linux_path_without_windows_suffix() {
+        let temp = tempfile::tempdir().unwrap();
+        let node = temp.path().join("node");
+        let node_exe = temp.path().join("node.exe");
+        fs::write(&node_exe, b"fake Windows node").unwrap();
+        assert_eq!(
+            resolve_installed_executable(
+                "linux",
+                "node",
+                Some(temp.path().as_os_str()),
+                None,
+                None,
+                None,
+                None
+            ),
+            None
+        );
+        fs::write(&node, b"fake Linux node").unwrap();
+        assert_eq!(
+            resolve_installed_executable(
+                "linux",
+                "node",
+                Some(temp.path().as_os_str()),
+                None,
+                None,
+                None,
+                None
+            ),
+            Some(node)
+        );
+    }
+
+    #[test]
+    fn browser_discovery_does_not_invent_linux_install_locations() {
+        assert_eq!(executable_names_for("linux", "node"), vec!["node"]);
+        assert!(
+            installed_executable_candidates("linux", "google-chrome", None, None, None, None)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4419,6 +5150,7 @@ mod tests {
             "screenshot",
             "mutation-state",
             "semantic-sequence-cancel",
+            "transaction-cancel",
             "apply-context",
             "configure-downloads",
             "reset-downloads",
@@ -4440,6 +5172,7 @@ mod tests {
             "semantic-click",
             "semantic-type",
             "semantic-sequence",
+            "transaction",
             "scroll",
             "reload",
             "cancel-download",
@@ -4450,6 +5183,40 @@ mod tests {
                 "{operation} must never be replayed automatically"
             );
         }
+    }
+
+    #[test]
+    fn browser_helper_resources_are_installed_together_and_refreshed() {
+        let temp = tempfile::tempdir().expect("temp browser helper root");
+        let bridge = install_browser_helper_resources_at(temp.path()).expect("install helpers");
+        let runtime = temp.path().join("browser_transaction_runtime.cjs");
+        let fastpath = temp.path().join("browser_fastpath.cjs");
+
+        assert_eq!(bridge, temp.path().join("browser_bridge.cjs"));
+        assert_eq!(
+            fs::read_to_string(&bridge).expect("bridge source"),
+            BROWSER_HELPER
+        );
+        assert_eq!(
+            fs::read_to_string(&runtime).expect("runtime source"),
+            BROWSER_TRANSACTION_RUNTIME
+        );
+        assert_eq!(
+            fs::read_to_string(&fastpath).expect("fast-path source"),
+            BROWSER_FASTPATH
+        );
+
+        fs::write(&runtime, "stale runtime").expect("corrupt runtime");
+        fs::write(&fastpath, "stale fast-path").expect("corrupt fast-path");
+        install_browser_helper_resources_at(temp.path()).expect("refresh helpers");
+        assert_eq!(
+            fs::read_to_string(&runtime).expect("refreshed runtime source"),
+            BROWSER_TRANSACTION_RUNTIME
+        );
+        assert_eq!(
+            fs::read_to_string(&fastpath).expect("refreshed fast-path source"),
+            BROWSER_FASTPATH
+        );
     }
 
     #[test]
@@ -4466,6 +5233,7 @@ mod tests {
             updated_at: 1,
             error: None,
             mutation_receipt: None,
+            transaction_result: None,
         };
         let receipt = BrowserMutationReceipt {
             id: "browser-mutation-test".to_string(),
@@ -4497,6 +5265,44 @@ mod tests {
     }
 
     #[test]
+    fn failed_mutation_receipt_keeps_action_failed_and_acknowledged() {
+        let mut record = BrowserActionRecord {
+            id: "browser-action-failed-transaction".to_string(),
+            workspace_id: "workspace-test".to_string(),
+            workspace_name: "Test".to_string(),
+            kind: BrowserActionKind::Sequence,
+            target: "tab-1 · 2 transaction steps · transaction tx-failed".to_string(),
+            detail: None,
+            status: BrowserActionStatus::Failed,
+            created_at: 1,
+            updated_at: 1,
+            error: Some("POSTCONDITION_FAILED [completedSteps=1; failedStep=2]".to_string()),
+            mutation_receipt: None,
+            transaction_result: None,
+        };
+        let receipt = BrowserMutationReceipt {
+            id: "browser-mutation-failed".to_string(),
+            operation: "transaction".to_string(),
+            tab_id: "tab-1".to_string(),
+            completion: BrowserMutationCompletion::Failed,
+            helper_acknowledged: true,
+            before_url: "https://example.com/form".to_string(),
+            after_url: Some("https://example.com/form".to_string()),
+            before_document_generation: Some("loader".to_string()),
+            after_document_generation: Some("loader".to_string()),
+            document_changed: false,
+            transport_error: None,
+        };
+
+        apply_mutation_receipt(&mut record, Some(receipt));
+
+        assert_eq!(record.status, BrowserActionStatus::Failed);
+        let stored = record.mutation_receipt.expect("failed receipt");
+        assert_eq!(stored.completion, BrowserMutationCompletion::Failed);
+        assert!(stored.helper_acknowledged);
+    }
+
+    #[test]
     fn applied_mutation_receipt_keeps_action_applied() {
         let mut record = BrowserActionRecord {
             id: "browser-action-test".to_string(),
@@ -4510,6 +5316,7 @@ mod tests {
             updated_at: 1,
             error: None,
             mutation_receipt: None,
+            transaction_result: None,
         };
         let receipt = BrowserMutationReceipt {
             id: "browser-mutation-test".to_string(),
@@ -4536,6 +5343,46 @@ mod tests {
     }
 
     #[test]
+    fn transaction_result_is_persisted_safely_on_browser_action_record() {
+        let mut record = BrowserActionRecord {
+            id: "browser-action-transaction".to_string(),
+            workspace_id: "workspace-test".to_string(),
+            workspace_name: "Test".to_string(),
+            kind: BrowserActionKind::Sequence,
+            target: "tab-1 · 1 transaction step · transaction tx-1".to_string(),
+            detail: None,
+            status: BrowserActionStatus::Applied,
+            created_at: 1,
+            updated_at: 1,
+            error: None,
+            mutation_receipt: None,
+            transaction_result: None,
+        };
+        let secret = "review-secret";
+        apply_transaction_result(
+            &mut record,
+            Some(json!({
+                "ok": true,
+                "transactionId": "tx-1",
+                "completedSteps": 1,
+                "totalSteps": 1,
+                "steps": [{"step": 1, "operation": "fill", "result": {"verified": true, "unexpectedValue": secret}}],
+                "finalUrl": format!("https://example.test/next?token={secret}")
+            })),
+        );
+
+        let stored = record
+            .transaction_result
+            .expect("persisted transaction result");
+        let encoded = serde_json::to_string(&stored).expect("encode transaction result");
+        assert!(!encoded.contains(secret));
+        assert_eq!(
+            stored.get("completedSteps").and_then(Value::as_u64),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn older_browser_history_without_mutation_receipt_still_deserializes() {
         let record: BrowserActionRecord = serde_json::from_value(json!({
             "id": "browser-action-old",
@@ -4551,6 +5398,43 @@ mod tests {
         }))
         .expect("legacy browser record");
         assert!(record.mutation_receipt.is_none());
+        assert!(record.transaction_result.is_none());
+    }
+
+    #[test]
+    fn task12_browser_history_task_binding_is_backward_compatible_and_round_trips() {
+        let legacy: StoredBrowserAction = serde_json::from_value(json!({
+            "record": {
+                "id": "browser-action-old",
+                "workspaceId": "workspace-test",
+                "workspaceName": "Test",
+                "kind": "click",
+                "target": "#old",
+                "detail": "tab-1",
+                "status": "applied",
+                "createdAt": 1,
+                "updatedAt": 1,
+                "error": null
+            },
+            "request": null,
+            "ownerId": null
+        }))
+        .expect("legacy stored browser action");
+        assert!(legacy.task_binding.is_none());
+
+        let binding = crate::models::ChangeTaskBinding {
+            task_id: "task-browser-proof".to_string(),
+            scope_revision: 3,
+            principal_fingerprint: "principal-browser-proof".to_string(),
+        };
+        let stored = StoredBrowserAction {
+            task_binding: Some(binding.clone()),
+            ..legacy
+        };
+        let encoded = serde_json::to_value(&stored).expect("encode stored browser action");
+        let decoded: StoredBrowserAction =
+            serde_json::from_value(encoded).expect("decode stored browser action");
+        assert_eq!(decoded.task_binding, Some(binding));
     }
 
     #[test]
@@ -4615,6 +5499,165 @@ mod tests {
         assert!(target.contains("2 semantic steps"));
         let summary = format!("{target} {}", detail.unwrap_or_default());
         assert!(!summary.contains("private sequence text"));
+    }
+
+    #[test]
+    fn browser_transaction_history_summary_never_exposes_supplied_text() {
+        use crate::browser_transaction::{
+            BrowserLocator, BrowserTarget, BrowserTransactionPlan, BrowserTransactionStep,
+        };
+
+        let secret = "private transaction form value";
+        let plan = BrowserTransactionPlan {
+            transaction_id: "transaction-test-1".to_string(),
+            tab_id: "tab-1".to_string(),
+            steps: vec![BrowserTransactionStep::Fill {
+                target: BrowserTarget::Locator(BrowserLocator {
+                    css: None,
+                    id: None,
+                    name: Some("description".to_string()),
+                    label: None,
+                    aria_label: None,
+                    placeholder: None,
+                    role: None,
+                    query: None,
+                }),
+                text: secret.to_string(),
+                clear_first: true,
+            }],
+        };
+        let request = StoredBrowserRequest::Transaction { plan };
+
+        let (kind, target, detail) = request_summary(&request);
+        assert_eq!(kind, BrowserActionKind::Sequence);
+        assert!(target.contains("tab-1"));
+        assert!(target.contains("1 transaction step"));
+        assert!(target.contains("transaction-test-1"));
+        assert!(detail.is_none());
+        let summary = format!("{target} {}", detail.unwrap_or_default());
+        assert!(!summary.contains(secret));
+    }
+
+    #[test]
+    fn persisted_browser_transaction_result_is_safe_and_keeps_step_metadata() {
+        let secret = "super-secret-form-value";
+        let stored = persisted_transaction_result(Some(json!({
+            "ok": true,
+            "transactionId": "transaction-review-1",
+            "completedSteps": 1,
+            "totalSteps": 1,
+            "steps": [{
+                "step": 1,
+                "operation": "fill",
+                "elapsedMs": 4,
+                "result": {
+                    "operation": "text",
+                    "verified": true,
+                    "characterCount": 23,
+                    "unexpectedValue": secret
+                }
+            }],
+            "finalUrl": format!("https://example.test/done?token={secret}"),
+            "finalDocumentIdentity": "frame-1:loader-2",
+            "documentChanged": true,
+            "timings": {
+                "repoTunnelInternalMs": 12,
+                "externalMcpRoundTripIncluded": false
+            },
+            "unexpectedTopLevel": secret
+        })))
+        .expect("safe persisted transaction result");
+
+        let encoded = serde_json::to_string(&stored).expect("encode persisted transaction result");
+        assert!(!encoded.contains(secret));
+        assert_eq!(
+            stored.get("completedSteps").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            stored.pointer("/steps/0/operation").and_then(Value::as_str),
+            Some("fill")
+        );
+        assert_eq!(
+            stored
+                .pointer("/steps/0/result/characterCount")
+                .and_then(Value::as_u64),
+            Some(23)
+        );
+        assert_eq!(
+            stored.get("finalUrl").and_then(Value::as_str),
+            Some("https://example.test/done")
+        );
+        assert!(stored.get("unexpectedTopLevel").is_none());
+        assert!(stored.pointer("/steps/0/result/unexpectedValue").is_none());
+    }
+
+    #[test]
+    fn browser_transaction_execution_copy_resolves_upload_paths_only_transiently() {
+        use crate::browser_transaction::{
+            BrowserLocator, BrowserTarget, BrowserTransactionPlan, BrowserTransactionStep,
+        };
+
+        let temp = tempfile::tempdir().expect("transaction upload workspace");
+        let upload = temp.path().join("upload.txt");
+        fs::write(&upload, "hello").expect("upload fixture");
+        let workspace = Workspace {
+            id: "workspace-upload-test".to_string(),
+            name: "Upload Test".to_string(),
+            path: temp.path().to_string_lossy().into_owned(),
+            added_at: 0,
+            access_mode: Default::default(),
+            change_policy: Default::default(),
+            command_policy: Default::default(),
+        };
+        let scope = BrowserScope::new(&workspace, None);
+        let plan = BrowserTransactionPlan {
+            transaction_id: "transaction-upload-1".to_string(),
+            tab_id: "tab-1".to_string(),
+            steps: vec![BrowserTransactionStep::UploadFile {
+                target: BrowserTarget::Locator(BrowserLocator {
+                    css: Some("input[type=file]".to_string()),
+                    id: None,
+                    name: None,
+                    label: None,
+                    aria_label: None,
+                    placeholder: None,
+                    role: None,
+                    query: None,
+                }),
+                workspace_relative_path: "upload.txt".to_string(),
+            }],
+        };
+
+        let execution = transaction_execution_plan(&scope, &plan).expect("execution plan");
+        match &plan.steps[0] {
+            BrowserTransactionStep::UploadFile {
+                workspace_relative_path,
+                ..
+            } => assert_eq!(workspace_relative_path, "upload.txt"),
+            _ => panic!("source plan changed shape"),
+        }
+        match &execution.steps[0] {
+            BrowserTransactionStep::UploadFile {
+                workspace_relative_path,
+                ..
+            } => assert_eq!(
+                Path::new(workspace_relative_path),
+                upload.canonicalize().unwrap()
+            ),
+            _ => panic!("execution plan changed shape"),
+        }
+    }
+
+    #[test]
+    fn legacy_stored_browser_request_without_transaction_still_deserializes() {
+        let request: StoredBrowserRequest = serde_json::from_value(json!({
+            "kind": "click",
+            "tab_id": "tab-1",
+            "selector": "#legacy"
+        }))
+        .expect("legacy stored click request");
+        assert!(matches!(request, StoredBrowserRequest::Click { .. }));
     }
 
     #[test]

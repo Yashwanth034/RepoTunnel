@@ -39,6 +39,20 @@ struct TeamClientBinding {
     workspace_id: String,
     agent_id: String,
     last_seen_at: u64,
+    revoked: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TeamMutationAuthorization {
+    pub(crate) session_id: String,
+    pub(crate) session_revision: u64,
+    pub(crate) workspace_id: String,
+    pub(crate) agent_id: String,
+    pub(crate) task_id: String,
+    pub(crate) paths: Vec<String>,
+    /// Fences pre-disconnect, in-flight mutations without invalidating
+    /// ordinary Team task ownership or review state.
+    pub(crate) binding_revocation: u64,
 }
 
 fn team_lock() -> &'static Mutex<()> {
@@ -50,7 +64,12 @@ fn client_bindings() -> &'static Mutex<BTreeMap<String, TeamClientBinding>> {
 }
 
 fn prune_client_bindings(bindings: &mut BTreeMap<String, TeamClientBinding>, now: u64) {
-    bindings.retain(|_, binding| now.saturating_sub(binding.last_seen_at) <= CLIENT_BINDING_TTL_MS);
+    // A manually disconnected client must not silently regain its role
+    // after the ordinary inactivity TTL. Keep bounded revocation tombstones
+    // for the lifetime of this running RepoTunnel server.
+    bindings.retain(|_, binding| {
+        binding.revoked || now.saturating_sub(binding.last_seen_at) <= CLIENT_BINDING_TTL_MS
+    });
     if bindings.len() > MAX_CLIENT_BINDINGS {
         let mut oldest = bindings
             .iter()
@@ -68,6 +87,24 @@ fn prune_client_bindings(bindings: &mut BTreeMap<String, TeamClientBinding>, now
 
 fn client_binding_is_recent(now: u64, last_seen_at: u64) -> bool {
     now.saturating_sub(last_seen_at) <= CLIENT_BINDING_EXCLUSIVE_MS
+}
+
+/// One MCP transport should never silently occupy both seats in the SAME
+/// Team. Normal same-role reconnect and cross-Team reuse stay unchanged.
+fn check_client_role_reuse(
+    binding: Option<&TeamClientBinding>,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    if let Some(existing) = binding {
+        if existing.revoked {
+            return Err("This AI connection was manually disconnected by the RepoTunnel owner. Open a new AI chat/connection to resume this existing Team role.".into());
+        }
+        if existing.session_id == session_id && existing.agent_id != agent_id {
+            return Err("This MCP connection already belongs to the other Team engineer. Use a separate AI chat for the disconnected agent role.".into());
+        }
+    }
+    Ok(())
 }
 
 fn now_millis() -> u64 {
@@ -239,6 +276,9 @@ fn prune_expired(session: &mut TeamSession, now: u64) -> bool {
         // not joined the current persistent Team or for a Team that is no longer actively working.
         let keep_attached = session.phase != TeamPhase::Complete && all_agents_joined(session);
         for agent in &mut session.agents {
+            if agent.manually_disconnected {
+                continue;
+            }
             if keep_attached && agent.joined_at.is_some() {
                 if agent.status == TeamAgentStatus::Offline {
                     agent.status = TeamAgentStatus::Idle;
@@ -345,6 +385,9 @@ fn joined_agent_mut<'a>(
     if agent.joined_at.is_none() {
         return Err("That agent has not joined the Team Mode session yet.".to_string());
     }
+    if agent.manually_disconnected {
+        return Err("This Team role was manually disconnected. Rebind from a new AI chat before making Team changes.".into());
+    }
     Ok(agent)
 }
 
@@ -356,6 +399,9 @@ fn joined_agent<'a>(session: &'a TeamSession, agent_id: &str) -> Result<&'a Team
         .ok_or_else(|| "That agent is not part of this Team Mode session.".to_string())?;
     if agent.joined_at.is_none() {
         return Err("That agent has not joined the Team Mode session yet.".to_string());
+    }
+    if agent.manually_disconnected {
+        return Err("This Team role was manually disconnected. Rebind from a new AI chat before making Team changes.".into());
     }
     Ok(agent)
 }
@@ -604,6 +650,8 @@ pub(crate) fn create_session(
         joined_at: None,
         last_seen_at: None,
         current_task_id: None,
+        manually_disconnected: false,
+        binding_revocation: 0,
         resume_checkpoint: None,
     };
     let agent_b = TeamAgent {
@@ -615,6 +663,8 @@ pub(crate) fn create_session(
         joined_at: None,
         last_seen_at: None,
         current_task_id: None,
+        manually_disconnected: false,
+        binding_revocation: 0,
         resume_checkpoint: None,
     };
     let criterion_checks = success_criteria
@@ -784,6 +834,93 @@ pub(crate) fn latest_snapshot_for_workspace(
         .transpose()
 }
 
+/// Desktop-only emergency recovery of one agent binding. Does not release
+/// claims or modify task/review ownership, shared messages, planning or the
+/// automatic handoff flow. Keep joined_at so a new chat resumes the same ID.
+fn mark_agent_manually_disconnected(
+    session: &mut TeamSession,
+    agent_id: &str,
+    now: u64,
+) -> Result<bool, String> {
+    if !matches!(
+        session.status,
+        TeamSessionStatus::Active | TeamSessionStatus::Paused
+    ) {
+        return Err("Only an existing active or paused Team can disconnect an AI.".into());
+    }
+    let agent = session
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == agent_id && agent.joined_at.is_some())
+        .ok_or("Only an already-joined Team agent can be disconnected.")?;
+    if agent.manually_disconnected {
+        return Ok(false);
+    }
+    agent.manually_disconnected = true;
+    agent.binding_revocation = agent.binding_revocation.saturating_add(1);
+    agent.status = TeamAgentStatus::Offline;
+    agent.last_seen_at = None;
+    agent.client_label = None;
+    // Preserve joined_at, current_task_id, resume_checkpoint and all claims.
+    session.updated_at = now;
+    session.revision = session.revision.saturating_add(1);
+    Ok(true)
+}
+
+fn revoke_agent_client_bindings(
+    bindings: &mut BTreeMap<String, TeamClientBinding>,
+    session_id: &str,
+    agent_id: &str,
+    now: u64,
+) -> usize {
+    let mut revoked = 0;
+    for binding in bindings.values_mut() {
+        if binding.session_id == session_id && binding.agent_id == agent_id {
+            if !binding.revoked {
+                revoked += 1;
+            }
+            binding.revoked = true;
+            binding.last_seen_at = now;
+        }
+    }
+    revoked
+}
+
+/// Called only from a local Tauri user action, not exposed as an MCP tool.
+/// The existing Team is retained, while old transport keys become invalid.
+pub(crate) fn disconnect_agent_client(
+    app: &AppHandle,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<TeamSnapshot, String> {
+    let _guard = team_lock()
+        .lock()
+        .map_err(|_| "Team Mode storage is temporarily unavailable.")?;
+    let mut sessions = load_sessions(app)?;
+    let index = sessions
+        .iter()
+        .position(|session| session.id == session_id)
+        .ok_or("That Team Mode session no longer exists.")?;
+    let now = now_millis();
+    let mut bindings = client_bindings()
+        .lock()
+        .map_err(|_| "Team client bindings are temporarily unavailable.")?;
+    let changed = mark_agent_manually_disconnected(&mut sessions[index], agent_id, now)?;
+    if changed {
+        // Never revoke the previous AI unless saving the new Team state
+        // succeeded; either all persistence is accepted or no change occurs.
+        save_sessions(app, &sessions)?;
+        revoke_agent_client_bindings(&mut bindings, session_id, agent_id, now);
+    }
+    let snapshot = snapshot_from_session(sessions[index].clone(), None)?;
+    drop(bindings);
+    drop(_guard);
+    if changed {
+        emit_updated(app, session_id);
+    }
+    Ok(snapshot)
+}
+
 pub(crate) fn bind_client(
     app: &AppHandle,
     client_key: &str,
@@ -797,6 +934,7 @@ pub(crate) fn bind_client(
         .map_err(|_| "Team Mode client identity map is temporarily unavailable.".to_string())?;
     prune_client_bindings(&mut bindings, now);
     let normalized_key = bounded(client_key, 240);
+    check_client_role_reuse(bindings.get(&normalized_key), session_id, agent_id)?;
     let stable_mcp_session = normalized_key.starts_with("mcp-session:");
     if stable_mcp_session {
         let conflicting = bindings
@@ -804,6 +942,7 @@ pub(crate) fn bind_client(
             .find(|(key, binding)| {
                 key.as_str() != normalized_key.as_str()
                     && key.starts_with("mcp-session:")
+                    && !binding.revoked
                     && binding.session_id == session_id
                     && binding.agent_id == agent_id
             })
@@ -829,6 +968,7 @@ pub(crate) fn bind_client(
     if !stable_mcp_session {
         bindings.retain(|key, binding| {
             !(key.starts_with("request:")
+                && !binding.revoked
                 && binding.session_id == session_id
                 && binding.agent_id == agent_id)
         });
@@ -840,9 +980,194 @@ pub(crate) fn bind_client(
             workspace_id: snapshot.session.workspace_id,
             agent_id: agent_id.to_string(),
             last_seen_at: now,
+            revoked: false,
         },
     );
     Ok(())
+}
+
+/// Read-only lookup for optional directed Team messages. Unlike the legacy
+/// workspace-level projection, keep the specific session to prevent a
+/// connection bound to Team X from reading Team Y in the same workspace.
+/// Existing Team ownership and client-binding behavior is unchanged.
+pub(crate) fn bound_team_identity_for_client(
+    workspace_id: &str,
+    client_key: &str,
+) -> Result<Option<(String, String)>, String> {
+    let now = now_millis();
+    let mut bindings = client_bindings()
+        .lock()
+        .map_err(|_| "Team Mode client identity map is temporarily unavailable.".to_string())?;
+    prune_client_bindings(&mut bindings, now);
+    Ok(bindings
+        .get(client_key)
+        .filter(|binding| binding.workspace_id == workspace_id && !binding.revoked)
+        .map(|binding| (binding.session_id.clone(), binding.agent_id.clone())))
+}
+
+pub(crate) fn bound_agent_id_for_client(
+    workspace_id: &str,
+    client_key: &str,
+) -> Result<Option<String>, String> {
+    let now = now_millis();
+    let mut bindings = client_bindings()
+        .lock()
+        .map_err(|_| "Team Mode client identity map is temporarily unavailable.".to_string())?;
+    prune_client_bindings(&mut bindings, now);
+    Ok(bindings
+        .get(client_key)
+        .filter(|binding| binding.workspace_id == workspace_id && !binding.revoked)
+        .map(|binding| binding.agent_id.clone()))
+}
+
+fn project_mutation_authorization(
+    session: &TeamSession,
+    binding: Option<&TeamClientBinding>,
+    paths: &[String],
+    now: u64,
+) -> Result<TeamMutationAuthorization, String> {
+    if session.status == TeamSessionStatus::Paused {
+        return Err("This project's Team Mode session is paused. Resume the team locally before its connected agents modify project files.".to_string());
+    }
+    if session.phase == TeamPhase::Complete {
+        return Err("The previous Team work request is complete, but the persistent A/B Team is still active. Register the new human request in the same Team before modifying project files.".to_string());
+    }
+
+    let binding = binding
+        .filter(|binding| {
+            !binding.revoked && binding.workspace_id == session.workspace_id && binding.session_id == session.id
+        })
+        .ok_or_else(|| {
+            "This project has an active Team Mode session. Join one of the assigned team roles before modifying files so RepoTunnel can enforce task ownership and path claims."
+                .to_string()
+        })?;
+    let caller_agent = session
+        .agents
+        .iter()
+        .find(|agent| agent.id == binding.agent_id && agent.joined_at.is_some())
+        .ok_or_else(|| {
+            "This project has an active Team Mode session, but the bound engineer has not joined the active Team request. Join before modifying files."
+                .to_string()
+        })?;
+    if caller_agent.manually_disconnected {
+        return Err("This Team engineer was manually disconnected; a new AI chat must rebind before file edits.".into());
+    }
+    let task_id = caller_agent.current_task_id.as_deref().ok_or_else(|| {
+        "Team Mode blocked this file edit because you do not currently own an active implementation task. Claim one distinct task first."
+            .to_string()
+    })?;
+    let task = session
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .ok_or_else(|| "Your Team Mode current task no longer exists.".to_string())?;
+    if task.owner_agent_id.as_deref() != Some(caller_agent.id.as_str())
+        || task.status != TeamTaskStatus::InProgress
+    {
+        return Err(
+            "Team Mode blocked this file edit because your current task is not an in-progress task owned by you."
+                .to_string(),
+        );
+    }
+
+    let mut normalized_paths = Vec::with_capacity(paths.len());
+    for raw_path in paths {
+        let requested = normalize_team_path(raw_path)?;
+        if let Some(conflict) = session.locks.iter().find(|lock| {
+            lock.expires_at > now
+                && paths_overlap(&lock.path, &requested)
+                && lock.agent_id != caller_agent.id
+        }) {
+            let owner = session
+                .agents
+                .iter()
+                .find(|agent| agent.id == conflict.agent_id)
+                .map(|agent| agent.name.as_str())
+                .unwrap_or("the other agent");
+            return Err(format!(
+                "Team Mode blocked this edit: {owner} currently claims '{}', which overlaps '{}'.",
+                conflict.path, requested
+            ));
+        }
+        let owns_path = session.locks.iter().any(|lock| {
+            lock.expires_at > now
+                && lock.agent_id == caller_agent.id
+                && lock.task_id.as_deref() == Some(task_id)
+                && paths_overlap(&lock.path, &requested)
+        });
+        if !owns_path {
+            return Err(format!(
+                "Team Mode blocked this edit: '{}' is not claimed for your current task '{}'.",
+                requested, task.title
+            ));
+        }
+        normalized_paths.push(requested);
+    }
+
+    Ok(TeamMutationAuthorization {
+        session_id: session.id.clone(),
+        session_revision: session.revision,
+        workspace_id: session.workspace_id.clone(),
+        agent_id: caller_agent.id.clone(),
+        task_id: task_id.to_string(),
+        paths: normalized_paths,
+        binding_revocation: caller_agent.binding_revocation,
+    })
+}
+
+fn revalidate_project_mutation_authorization(
+    session: &TeamSession,
+    authorization: &TeamMutationAuthorization,
+    now: u64,
+) -> Result<(), String> {
+    if session.id != authorization.session_id || session.workspace_id != authorization.workspace_id
+    {
+        return Err(
+            "Team Mode mutation authorization belongs to a different Team session or project."
+                .to_string(),
+        );
+    }
+    let binding = TeamClientBinding {
+        session_id: authorization.session_id.clone(),
+        workspace_id: authorization.workspace_id.clone(),
+        agent_id: authorization.agent_id.clone(),
+        last_seen_at: now,
+        revoked: false,
+    };
+    let current =
+        project_mutation_authorization(session, Some(&binding), &authorization.paths, now)?;
+    if current.binding_revocation != authorization.binding_revocation
+        || current.agent_id != authorization.agent_id
+        || current.task_id != authorization.task_id
+        || current.paths != authorization.paths
+    {
+        return Err(
+            "Team Mode mutation authorization changed after preflight; request the mutation again under the current ownership and path claims."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn revalidate_mutation_authorization(
+    app: &AppHandle,
+    authorization: &TeamMutationAuthorization,
+) -> Result<(), String> {
+    let _guard = team_lock()
+        .lock()
+        .map_err(|_| "Team Mode storage is temporarily unavailable.".to_string())?;
+    let sessions = load_sessions(app)?;
+    let session = sessions
+        .iter()
+        .find(|session| {
+            session.id == authorization.session_id
+                && session.workspace_id == authorization.workspace_id
+        })
+        .ok_or_else(|| {
+            "Team Mode mutation authorization can no longer be matched to its Team session."
+                .to_string()
+        })?;
+    revalidate_project_mutation_authorization(session, authorization, now_millis())
 }
 
 pub(crate) fn assert_paths_available(
@@ -850,9 +1175,9 @@ pub(crate) fn assert_paths_available(
     workspace_id: &str,
     paths: &[String],
     client_key: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<TeamMutationAuthorization>, String> {
     if paths.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let _guard = team_lock()
@@ -883,7 +1208,7 @@ pub(crate) fn assert_paths_available(
         })
         .max_by_key(|session| session.updated_at)
     else {
-        return Ok(());
+        return Ok(None);
     };
 
     let binding = if let Some(client_key) = client_key {
@@ -891,90 +1216,18 @@ pub(crate) fn assert_paths_available(
             .lock()
             .map_err(|_| "Team Mode client identity map is temporarily unavailable.".to_string())?;
         prune_client_bindings(&mut bindings, now);
-        bindings.get_mut(client_key).map(|binding| {
-            binding.last_seen_at = now;
-            binding.clone()
-        })
+        bindings
+            .get_mut(client_key)
+            .filter(|binding| !binding.revoked)
+            .map(|binding| {
+                binding.last_seen_at = now;
+                binding.clone()
+            })
     } else {
         None
     };
 
-    let caller_agent_id = binding
-        .as_ref()
-        .filter(|binding| binding.workspace_id == workspace_id && binding.session_id == session.id)
-        .and_then(|binding| {
-            session
-                .agents
-                .iter()
-                .find(|agent| agent.id == binding.agent_id && agent.joined_at.is_some())
-                .map(|_| binding.agent_id.as_str())
-        });
-
-    let caller_agent_id = caller_agent_id.ok_or_else(|| {
-        "This project has an active Team Mode session. Before modifying files through MCP, join one of the assigned team roles with team_status/team_action so RepoTunnel can enforce task ownership and path claims.".to_string()
-    })?;
-    if session.status == TeamSessionStatus::Paused {
-        return Err("This project's Team Mode session is paused. Resume the team locally before its connected agents modify project files.".to_string());
-    }
-    if session.phase == TeamPhase::Complete {
-        return Err("The previous Team work request is complete, but the persistent A/B Team is still active. If the human just asked you for a new feature/fix/improvement in this AI chat, first register it in the SAME Team with team_action post_message, message_kind=decision, and a message beginning exactly 'USER REQUEST:' followed by the human request. Do not create a new Team or ask for kickoff again.".to_string());
-    }
-
-    let caller_agent = session
-        .agents
-        .iter()
-        .find(|agent| agent.id == caller_agent_id)
-        .ok_or_else(|| "The bound Team Mode agent no longer exists.".to_string())?;
-    let task_id = caller_agent.current_task_id.as_deref().ok_or_else(|| {
-        "Team Mode blocked this file edit because you do not currently own an active implementation task. Claim one distinct task first; reviewers/supporting agents should inspect, test, discuss, or request/receive a handoff instead of duplicating the owner's implementation.".to_string()
-    })?;
-    let task = session
-        .tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .ok_or_else(|| {
-            "Your Team Mode current task no longer exists. Refresh team_status before editing."
-                .to_string()
-        })?;
-    if task.owner_agent_id.as_deref() != Some(caller_agent_id)
-        || task.status != TeamTaskStatus::InProgress
-    {
-        return Err("Team Mode blocked this file edit because your current task is not an in-progress task owned by you. Refresh team_status and coordinate ownership before editing.".to_string());
-    }
-
-    for requested in paths {
-        let requested = normalize_team_path(requested)?;
-        if let Some(conflict) = session.locks.iter().find(|lock| {
-            lock.expires_at > now
-                && paths_overlap(&lock.path, &requested)
-                && lock.agent_id.as_str() != caller_agent_id
-        }) {
-            let owner = session
-                .agents
-                .iter()
-                .find(|agent| agent.id == conflict.agent_id)
-                .map(|agent| agent.name.as_str())
-                .unwrap_or("the other agent");
-            return Err(format!(
-                "Team Mode blocked this edit: {owner} currently claims '{}'. Check team_status, coordinate a handoff if ownership should change, and do not duplicate that implementation while editing '{}'.",
-                conflict.path, requested
-            ));
-        }
-        let owns_path = session.locks.iter().any(|lock| {
-            lock.expires_at > now
-                && lock.agent_id == caller_agent_id
-                && lock.task_id.as_deref() == Some(task_id)
-                && paths_overlap(&lock.path, &requested)
-        });
-        if !owns_path {
-            return Err(format!(
-                "Team Mode blocked this edit: '{}' is not claimed for your current task '{}'. Use team_action lock_paths with this task_id (or claim_task with paths) before editing. This prevents the two AIs from implementing the same area independently.",
-                requested, task.title
-            ));
-        }
-    }
-
-    Ok(())
+    project_mutation_authorization(session, binding.as_ref(), paths, now).map(Some)
 }
 
 pub(crate) fn assert_browser_mutation_available(
@@ -1019,7 +1272,11 @@ pub(crate) fn assert_browser_mutation_available(
     prune_client_bindings(&mut bindings, now);
     let binding = bindings
         .get_mut(client_key)
-        .filter(|binding| binding.workspace_id == workspace_id && binding.session_id == session.id)
+        .filter(|binding| {
+            !binding.revoked
+                && binding.workspace_id == workspace_id
+                && binding.session_id == session.id
+        })
         .ok_or_else(|| {
             "Call team_status with your Team agent_id before using interactive browser actions."
                 .to_string()
@@ -1073,6 +1330,7 @@ pub(crate) fn join_agent(
             agent.joined_at.get_or_insert(now);
             agent.last_seen_at = Some(now);
             agent.status = TeamAgentStatus::Active;
+            agent.manually_disconnected = false;
             if let Some(label) = requested_label {
                 agent.client_label = Some(label);
             }
@@ -1096,6 +1354,7 @@ pub(crate) fn heartbeat(
     app: &AppHandle,
     session_id: &str,
     agent_id: &str,
+    client_key: Option<&str>,
 ) -> Result<TeamSnapshot, String> {
     let _guard = team_lock()
         .lock()
@@ -1107,8 +1366,39 @@ pub(crate) fn heartbeat(
         .ok_or_else(|| "That Team Mode session no longer exists.".to_string())?;
     let now = now_millis();
     let mut meaningful_change = prune_expired(&mut sessions[index], now);
+    let manually_disconnected = sessions[index]
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .is_some_and(|agent| agent.manually_disconnected);
+    if manually_disconnected {
+        let key = client_key.ok_or(
+            "A new bound MCP session is required to resume a manually disconnected Team AI.",
+        )?;
+        let bindings = client_bindings()
+            .lock()
+            .map_err(|_| "Team client identity map is temporarily unavailable.")?;
+        let bound = bindings.get(key).is_some_and(|binding| {
+            !binding.revoked
+                && binding.session_id == session_id
+                && binding.agent_id == agent_id
+                && binding.workspace_id == sessions[index].workspace_id
+        });
+        if !bound {
+            return Err(
+                "The old Team AI connection is disconnected. Rejoin using a new bound AI chat."
+                    .into(),
+            );
+        }
+    }
     {
-        let agent = joined_agent_mut(&mut sessions[index], agent_id)?;
+        // A fresh, properly bound client may revive the manually disconnected
+        // role. Ordinary team mutations still fail while it is disconnected.
+        let agent = sessions[index]
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == agent_id && agent.joined_at.is_some())
+            .ok_or("That agent has not joined this Team session.")?;
         if matches!(
             agent.status,
             TeamAgentStatus::Offline | TeamAgentStatus::Idle
@@ -1117,6 +1407,10 @@ pub(crate) fn heartbeat(
             meaningful_change = true;
         }
         agent.last_seen_at = Some(now);
+        if agent.manually_disconnected {
+            agent.manually_disconnected = false;
+            meaningful_change = true;
+        }
     }
     if meaningful_change {
         sessions[index].updated_at = now;
@@ -2539,11 +2833,164 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        client_binding_is_recent, normalize_team_path, paths_overlap, prune_client_bindings,
-        prune_expired, TeamClientBinding, CLIENT_BINDING_TTL_MS, DEFAULT_LOCK_TTL_SECONDS,
-        MAX_CLIENT_BINDINGS, MAX_LOCK_TTL_SECONDS,
+        client_binding_is_recent, normalize_team_path, paths_overlap,
+        project_mutation_authorization, prune_client_bindings, prune_expired, TeamClientBinding,
+        CLIENT_BINDING_TTL_MS, DEFAULT_LOCK_TTL_SECONDS, MAX_CLIENT_BINDINGS, MAX_LOCK_TTL_SECONDS,
     };
-    use crate::models::{TeamAgent, TeamAgentStatus, TeamPhase, TeamSession, TeamSessionStatus};
+    use crate::models::{
+        TeamAgent, TeamAgentStatus, TeamLock, TeamPhase, TeamSession, TeamSessionStatus, TeamTask,
+        TeamTaskStatus,
+    };
+
+    #[test]
+    fn manual_disconnect_preserves_task_claims_checkpoint_and_team_work() {
+        let now = 25_000;
+        let mut session = task10_session(now);
+        session.locks.push(TeamLock {
+            id: "lock-a".into(),
+            path: "src".into(),
+            agent_id: "agent-a".into(),
+            task_id: Some("task-a".into()),
+            created_at: 10,
+            expires_at: now + 10_000,
+        });
+        let before_task = serde_json::to_value(&session.tasks).unwrap();
+        let before_locks = serde_json::to_value(&session.locks).unwrap();
+        let before_messages = serde_json::to_value(&session.messages).unwrap();
+        let old_auth = project_mutation_authorization(
+            &session,
+            Some(&task10_binding(now)),
+            &["src/file.rs".into()],
+            now,
+        )
+        .expect("old connection has a valid path claim");
+        assert_eq!(old_auth.binding_revocation, 0);
+
+        assert!(super::mark_agent_manually_disconnected(&mut session, "agent-a", now + 1).unwrap());
+        assert!(session.agents[0].manually_disconnected);
+        assert_eq!(session.agents[0].status, TeamAgentStatus::Offline);
+        assert_eq!(session.agents[0].joined_at, Some(1));
+        assert_eq!(session.agents[0].current_task_id.as_deref(), Some("task-a"));
+        assert_eq!(
+            session.agents[0].resume_checkpoint.as_deref(),
+            Some("persisted checkpoint")
+        );
+        assert_eq!(session.agents[0].binding_revocation, 1);
+        assert_eq!(serde_json::to_value(&session.tasks).unwrap(), before_task);
+        assert_eq!(serde_json::to_value(&session.locks).unwrap(), before_locks);
+        assert_eq!(
+            serde_json::to_value(&session.messages).unwrap(),
+            before_messages
+        );
+        assert!(
+            !super::mark_agent_manually_disconnected(&mut session, "agent-a", now + 2).unwrap()
+        );
+        assert!(
+            super::revalidate_project_mutation_authorization(&session, &old_auth, now + 3).is_err()
+        );
+        assert!(super::joined_agent(&session, "agent-a").is_err());
+        assert!(super::joined_agent_mut(&mut session, "agent-a").is_err());
+        assert!(project_mutation_authorization(
+            &session,
+            Some(&task10_binding(now + 3)),
+            &["src/file.rs".into()],
+            now + 3
+        )
+        .is_err());
+        assert!(!super::prune_expired(&mut session, now + 10));
+        assert_eq!(session.agents[0].status, TeamAgentStatus::Offline);
+        // Simulate successful new-chat Team binding + authorized heartbeat.
+        session.agents[0].manually_disconnected = false;
+        session.agents[0].status = TeamAgentStatus::Active;
+        assert!(
+            super::revalidate_project_mutation_authorization(&session, &old_auth, now + 4).is_err(),
+            "old authorization must remain fenced AFTER the new chat joins"
+        );
+        let new_auth = project_mutation_authorization(
+            &session,
+            Some(&task10_binding(now + 4)),
+            &["src/file.rs".into()],
+            now + 4,
+        )
+        .expect("a new connection retains the same claimed task");
+        assert_eq!(new_auth.binding_revocation, 1);
+        assert!(
+            super::revalidate_project_mutation_authorization(&session, &new_auth, now + 5).is_ok()
+        );
+        assert!(super::mark_agent_manually_disconnected(&mut session, "outside", now).is_err());
+    }
+
+    #[test]
+    fn manual_disconnect_revokes_only_selected_client_binding() {
+        let mut bindings = BTreeMap::new();
+        for (key, session, agent) in [
+            ("old-ai-a", "team-task10", "agent-a"),
+            ("existing-ai-b", "team-task10", "agent-b"),
+            ("other-team-ai", "team-other", "agent-a"),
+        ] {
+            bindings.insert(
+                key.to_string(),
+                TeamClientBinding {
+                    session_id: session.into(),
+                    workspace_id: "workspace-task10".into(),
+                    agent_id: agent.into(),
+                    last_seen_at: 100,
+                    revoked: false,
+                },
+            );
+        }
+        assert_eq!(
+            super::revoke_agent_client_bindings(&mut bindings, "team-task10", "agent-a", 200),
+            1
+        );
+        assert!(bindings["old-ai-a"].revoked);
+        assert!(!bindings["existing-ai-b"].revoked);
+        assert!(!bindings["other-team-ai"].revoked);
+        assert_eq!(
+            super::revoke_agent_client_bindings(&mut bindings, "team-task10", "agent-a", 201),
+            0
+        );
+        assert_eq!(bindings.len(), 3);
+        super::prune_client_bindings(&mut bindings, super::CLIENT_BINDING_TTL_MS + 999);
+        assert!(
+            bindings.contains_key("old-ai-a"),
+            "manual revocation must survive the normal idle TTL"
+        );
+        assert_eq!(bindings.len(), 1, "normal idle bindings still expire");
+    }
+
+    #[test]
+    fn one_mcp_connection_cannot_take_both_roles_after_manual_disconnect() {
+        let normal = task10_binding(100);
+        assert!(super::check_client_role_reuse(Some(&normal), "team-task10", "agent-a").is_ok());
+        assert!(super::check_client_role_reuse(Some(&normal), "team-task10", "agent-b").is_err());
+        assert!(
+            super::check_client_role_reuse(Some(&normal), "team-new", "agent-b").is_ok(),
+            "normal reuse in a different Team must remain possible"
+        );
+        assert!(
+            super::check_client_role_reuse(None, "team-task10", "agent-a").is_ok(),
+            "new distinct MCP connection must be able to join"
+        );
+        let mut revoked = normal;
+        revoked.revoked = true;
+        assert!(
+            super::check_client_role_reuse(Some(&revoked), "team-task10", "agent-a").is_err(),
+            "revoked client must not regain even its previous role"
+        );
+    }
+
+    #[test]
+    fn legacy_agent_without_manual_flag_deserializes_normally() {
+        let old = serde_json::json!({
+            "id":"agent-a","name":"Engineer A","role":"Engineer","clientLabel":null,
+            "status":"active","joinedAt":1,"lastSeenAt":9,
+            "currentTaskId":null,
+        });
+        let agent: TeamAgent = serde_json::from_value(old).unwrap();
+        assert!(!agent.manually_disconnected);
+        assert_eq!(agent.binding_revocation, 0);
+    }
 
     #[test]
     fn team_lock_paths_are_workspace_relative() {
@@ -2570,8 +3017,212 @@ mod tests {
             joined_at: Some(1),
             last_seen_at: Some(last_seen_at),
             current_task_id: None,
+            manually_disconnected: false,
+            binding_revocation: 0,
             resume_checkpoint: Some("persisted checkpoint".to_string()),
         }
+    }
+
+    fn task10_session(now: u64) -> TeamSession {
+        let mut owner = joined_agent("agent-a", now);
+        owner.current_task_id = Some("task-a".to_string());
+        TeamSession {
+            id: "team-task10".to_string(),
+            workspace_id: "workspace-task10".to_string(),
+            workspace_name: "Task 10".to_string(),
+            goal: "Converge ownership".to_string(),
+            success_criteria: Vec::new(),
+            criterion_checks: Vec::new(),
+            status: TeamSessionStatus::Active,
+            phase: TeamPhase::Executing,
+            agents: vec![owner, joined_agent("agent-b", now)],
+            tasks: vec![TeamTask {
+                id: "task-a".to_string(),
+                title: "Owner work".to_string(),
+                description: "Owned implementation".to_string(),
+                status: TeamTaskStatus::InProgress,
+                priority: 3,
+                owner_agent_id: Some("agent-a".to_string()),
+                reviewer_agent_id: None,
+                contributor_agent_ids: Vec::new(),
+                depends_on: Vec::new(),
+                result: None,
+                blocked_reason: None,
+                created_by_agent_id: Some("agent-a".to_string()),
+                cycle_number: 1,
+                created_at: 1,
+                updated_at: now,
+            }],
+            messages: Vec::new(),
+            locks: Vec::new(),
+            revision: 7,
+            cycle_number: 1,
+            current_request: Some("Converge ownership".to_string()),
+            completed_cycles: Vec::new(),
+            persistent_team: true,
+            created_at: 1,
+            updated_at: now,
+            completed_at: None,
+            completion_summary: None,
+        }
+    }
+
+    fn task10_binding(now: u64) -> TeamClientBinding {
+        TeamClientBinding {
+            session_id: "team-task10".to_string(),
+            workspace_id: "workspace-task10".to_string(),
+            agent_id: "agent-a".to_string(),
+            last_seen_at: now,
+            revoked: false,
+        }
+    }
+
+    #[test]
+    fn task10_team_projection_requires_joined_owner_and_active_claim() {
+        let now = 10_000;
+        let mut session = task10_session(now);
+        let binding = task10_binding(now);
+        let paths = vec!["src/task10.rs".to_string()];
+
+        session.agents[0].joined_at = None;
+        assert!(
+            project_mutation_authorization(&session, Some(&binding), &paths, now)
+                .expect_err("active but unjoined caller must fail closed")
+                .contains("join")
+        );
+        session.agents[0].joined_at = Some(1);
+
+        assert!(
+            project_mutation_authorization(&session, Some(&binding), &paths, now)
+                .expect_err("owned task without a path claim must fail closed")
+                .contains("not claimed")
+        );
+
+        session.locks.push(TeamLock {
+            id: "lock-a".to_string(),
+            path: "src".to_string(),
+            agent_id: "agent-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            created_at: 1,
+            expires_at: now + 1_000,
+        });
+        let projection = project_mutation_authorization(&session, Some(&binding), &paths, now)
+            .expect("matching owner claim should authorize");
+        assert_eq!(projection.session_id, "team-task10");
+        assert_eq!(projection.session_revision, 7);
+        assert_eq!(projection.agent_id, "agent-a");
+        assert_eq!(projection.task_id, "task-a");
+        assert_eq!(projection.paths, paths);
+    }
+
+    #[test]
+    fn task10_team_projection_rejects_other_agent_conflict_and_expired_claim() {
+        let now = 20_000;
+        let mut session = task10_session(now);
+        let binding = task10_binding(now);
+        let paths = vec!["src/task10.rs".to_string()];
+        session.locks.push(TeamLock {
+            id: "lock-a-expired".to_string(),
+            path: "src".to_string(),
+            agent_id: "agent-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            created_at: 1,
+            expires_at: now,
+        });
+        assert!(
+            project_mutation_authorization(&session, Some(&binding), &paths, now)
+                .expect_err("expired owner claim must not authorize")
+                .contains("not claimed")
+        );
+
+        session.locks.push(TeamLock {
+            id: "lock-b".to_string(),
+            path: "src/task10.rs".to_string(),
+            agent_id: "agent-b".to_string(),
+            task_id: Some("task-b".to_string()),
+            created_at: 1,
+            expires_at: now + 1_000,
+        });
+        assert!(
+            project_mutation_authorization(&session, Some(&binding), &paths, now)
+                .expect_err("other-agent overlapping claim must win")
+                .contains("currently claims")
+        );
+    }
+
+    #[test]
+    fn task10_team_projection_revalidation_rejects_stale_claim_or_owner_change() {
+        let now = 25_000;
+        let mut session = task10_session(now);
+        let binding = task10_binding(now);
+        let paths = vec!["src/task10.rs".to_string()];
+        session.locks.push(TeamLock {
+            id: "lock-a".to_string(),
+            path: "src".to_string(),
+            agent_id: "agent-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            created_at: 1,
+            expires_at: now + 1_000,
+        });
+        let authorization = project_mutation_authorization(&session, Some(&binding), &paths, now)
+            .expect("initial team claim should authorize");
+
+        super::revalidate_project_mutation_authorization(&session, &authorization, now + 10)
+            .expect("unchanged effective ownership should remain valid");
+
+        session.revision += 1;
+        super::revalidate_project_mutation_authorization(&session, &authorization, now + 20)
+            .expect("unrelated session revision changes must not create a second lock epoch");
+
+        session.locks[0].expires_at = now + 20;
+        assert!(super::revalidate_project_mutation_authorization(
+            &session,
+            &authorization,
+            now + 20,
+        )
+        .expect_err("expired claim must invalidate the earlier projection")
+        .contains("not claimed"));
+
+        session.locks[0].expires_at = now + 1_000;
+        session.tasks[0].owner_agent_id = Some("agent-b".to_string());
+        assert!(super::revalidate_project_mutation_authorization(
+            &session,
+            &authorization,
+            now + 30,
+        )
+        .expect_err("owner transfer must invalidate the earlier projection")
+        .contains("not an in-progress task owned by you"));
+    }
+
+    #[test]
+    fn task10_team_projection_rejects_paused_and_completed_requests() {
+        let now = 30_000;
+        let binding = task10_binding(now);
+        let paths = vec!["src/task10.rs".to_string()];
+        let mut session = task10_session(now);
+        session.locks.push(TeamLock {
+            id: "lock-a".to_string(),
+            path: "src".to_string(),
+            agent_id: "agent-a".to_string(),
+            task_id: Some("task-a".to_string()),
+            created_at: 1,
+            expires_at: now + 1_000,
+        });
+
+        session.status = TeamSessionStatus::Paused;
+        assert!(
+            project_mutation_authorization(&session, Some(&binding), &paths, now)
+                .expect_err("paused Team must block mutation")
+                .contains("paused")
+        );
+
+        session.status = TeamSessionStatus::Active;
+        session.phase = TeamPhase::Complete;
+        assert!(
+            project_mutation_authorization(&session, Some(&binding), &paths, now)
+                .expect_err("completed Team request must block mutation")
+                .contains("complete")
+        );
     }
 
     #[test]
@@ -2628,6 +3279,7 @@ mod tests {
                 workspace_id: "workspace".to_string(),
                 agent_id: "a".to_string(),
                 last_seen_at: 1,
+                revoked: false,
             },
         );
         for index in 0..(MAX_CLIENT_BINDINGS + 20) {
@@ -2638,6 +3290,7 @@ mod tests {
                     workspace_id: "workspace".to_string(),
                     agent_id: "a".to_string(),
                     last_seen_at: now - index as u64,
+                    revoked: false,
                 },
             );
         }

@@ -3,7 +3,7 @@ use std::{
     future::IntoFuture,
     net::{IpAddr, Ipv6Addr, SocketAddrV6, TcpListener as StdTcpListener},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex, OnceLock,
@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::mcp_flight_recorder as flight;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
@@ -29,8 +30,10 @@ pub(crate) const HTTPS_LISTEN_PORT: u16 = 43183;
 pub(crate) const HTTP_CHALLENGE_PORT: u16 = 43184;
 const DIRECT_ROOT: &str = "direct-https";
 const RENEW_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const RENEW_PROCESS_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const PUBLIC_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 const TOOL_PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
+const TOOL_VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug)]
 pub(crate) struct ToolAvailability {
@@ -45,6 +48,7 @@ static TOOL_PROBE_CACHE: OnceLock<Mutex<Option<(Instant, ToolAvailability)>>> = 
 struct ProxyState {
     client: reqwest::Client,
     gateway_port: u16,
+    app: AppHandle,
 }
 
 #[derive(Clone)]
@@ -161,12 +165,29 @@ fn self_signed_certificate_paths(app: &AppHandle, host: &str) -> Result<Certific
     })
 }
 
+// External tool discovery is used by UI/status and renewal paths. Bound even
+// broken executables that never exit or fill a pipe before terminating.
+fn timed_probe_output(mut command: Command, timeout: Duration) -> Option<std::process::Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(30)),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 pub(crate) fn openssl_available() -> bool {
-    Command::new("openssl")
-        .arg("version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    let mut command = Command::new("openssl");
+    command.arg("version");
+    timed_probe_output(command, TOOL_VERSION_TIMEOUT).is_some_and(|output| output.status.success())
 }
 
 fn ensure_self_signed_certificate(
@@ -246,6 +267,9 @@ fn proxy_owned_forwarded_header(name: &HeaderName) -> bool {
 }
 
 async fn proxy_request(State(state): State<ProxyState>, request: Request<Body>) -> Response<Body> {
+    let started = Instant::now();
+    let route = flight::route(request.uri().path());
+    let method = flight::method(request.method().as_str());
     let (parts, body) = request.into_parts();
     let path_and_query = parts
         .uri
@@ -280,6 +304,15 @@ async fn proxy_request(State(state): State<ProxyState>, request: Request<Body>) 
     {
         Ok(response) => response,
         Err(error) => {
+            flight::record(
+                &state.app,
+                flight::Surface::DirectHttps,
+                route,
+                method,
+                flight::Stage::UpstreamConnect,
+                StatusCode::BAD_GATEWAY.as_u16(),
+                started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            );
             let mut response = Response::new(Body::from(format!(
                 "RepoTunnel Direct HTTPS could not reach the local MCP gateway: {error}"
             )));
@@ -289,6 +322,15 @@ async fn proxy_request(State(state): State<ProxyState>, request: Request<Body>) 
     };
 
     let status = upstream.status();
+    flight::record(
+        &state.app,
+        flight::Surface::DirectHttps,
+        route,
+        method,
+        flight::Stage::ResponseHeaders,
+        status.as_u16(),
+        started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+    );
     let headers = upstream.headers().clone();
     let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
     *response.status_mut() = status;
@@ -423,16 +465,15 @@ fn parse_certbot_version(output: &std::process::Output) -> Option<(u64, u64, u64
 }
 
 fn system_certbot_version_tuple() -> Option<(u64, u64, u64, String)> {
-    let output = Command::new("certbot").arg("--version").output().ok()?;
-    parse_certbot_version(&output)
+    let mut command = Command::new("certbot");
+    command.arg("--version");
+    parse_certbot_version(&timed_probe_output(command, TOOL_VERSION_TIMEOUT)?)
 }
 
 fn pipx_available() -> bool {
-    Command::new("pipx")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    let mut command = Command::new("pipx");
+    command.arg("--version");
+    timed_probe_output(command, TOOL_VERSION_TIMEOUT).is_some_and(|output| output.status.success())
 }
 
 fn supported_version(version: &(u64, u64, u64, String)) -> bool {
@@ -498,8 +539,8 @@ pub(crate) fn certbot_supports_ip_certificates() -> bool {
         || pipx_available()
 }
 
-fn run_certbot_renew(app: &AppHandle) -> Result<bool, String> {
-    if !certbot_supports_ip_certificates() {
+fn run_certbot_renew(app: &AppHandle, cancelled: &AtomicBool) -> Result<bool, String> {
+    if cancelled.load(Ordering::SeqCst) || !certbot_supports_ip_certificates() {
         return Ok(false);
     }
     let config_dir = certbot_config_dir(app)?;
@@ -511,7 +552,13 @@ fn run_certbot_renew(app: &AppHandle) -> Result<bool, String> {
     ensure_private_dir(&config_dir)?;
     ensure_private_dir(&work_dir)?;
     ensure_private_dir(&logs_dir)?;
-    let output = certbot_command()?
+    if cancelled.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+
+    // A certificate utility must never hold an HTTPS listener hostage. Do not
+    // capture unbounded subprocess output, and reap the child on every exit.
+    let mut child = certbot_command()?
         .arg("renew")
         .arg("--quiet")
         .arg("--config-dir")
@@ -520,9 +567,44 @@ fn run_certbot_renew(app: &AppHandle) -> Result<bool, String> {
         .arg(&work_dir)
         .arg("--logs-dir")
         .arg(&logs_dir)
-        .output()
-        .map_err(|error| format!("Could not run Certbot renewal: {error}"))?;
-    Ok(output.status.success())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start Certbot renewal: {error}"))?;
+    wait_for_renewal_child(&mut child, cancelled, RENEW_PROCESS_TIMEOUT)
+}
+
+// The child's process handle stays owned until an exit, cancellation, or
+// deadline is observed. Never detach a potentially hung renewal process.
+fn wait_for_renewal_child(
+    child: &mut std::process::Child,
+    cancelled: &AtomicBool,
+    timeout: Duration,
+) -> Result<bool, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(false);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Certbot renewal exceeded its deadline.".to_string());
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Could not inspect Certbot renewal status: {error}"));
+            }
+        }
+    }
 }
 
 pub(crate) fn provision_certificate(
@@ -670,6 +752,7 @@ pub(crate) fn spawn(
     let proxy_state = ProxyState {
         client,
         gateway_port,
+        app: app.clone(),
     };
     let challenge_state = ChallengeState { webroot };
 
@@ -772,9 +855,14 @@ pub(crate) fn spawn(
                 public_probe.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 let mut renewal_check = tokio::time::interval(RENEW_CHECK_INTERVAL);
                 renewal_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let renewal_cancelled = Arc::new(AtomicBool::new(false));
+                let mut renewal_jobs = tokio::task::JoinSet::new();
+                let mut probe_jobs = tokio::task::JoinSet::new();
 
+                // Listener readiness is independent of remote reachability.
+                // The first interval tick starts the probe without delaying the
+                // initial HTTPS accept loop or the startup acknowledgement.
                 worker_local_ready.store(true, Ordering::SeqCst);
-                worker_public_reachable.store(probe_public_health(&worker_public_url), Ordering::SeqCst);
                 let _ = ready_tx.send(Ok(()));
 
                 loop {
@@ -799,20 +887,40 @@ pub(crate) fn spawn(
                             }
                             break;
                         }
-                        _ = public_probe.tick() => {
-                            worker_public_reachable.store(probe_public_health(&worker_public_url), Ordering::SeqCst);
+                        _ = public_probe.tick(), if probe_jobs.is_empty() => {
+                            let probe_url = worker_public_url.clone();
+                            probe_jobs.spawn_blocking(move || probe_public_health(&probe_url));
                         }
-                        _ = renewal_check.tick() => {
-                            if run_certbot_renew(&worker_app).unwrap_or(false) {
-                                if let Ok(paths) = active_certificate_paths(&worker_app, &worker_public_url) {
-                                    if paths.trusted && tls_config.reload_from_pem_file(&paths.cert, &paths.key).await.is_ok() {
-                                        worker_tls_trusted.store(true, Ordering::SeqCst);
+                        Some(result) = probe_jobs.join_next(), if !probe_jobs.is_empty() => {
+                            worker_public_reachable.store(result.unwrap_or(false), Ordering::SeqCst);
+                        }
+                        _ = renewal_check.tick(), if renewal_jobs.is_empty() => {
+                            let app = worker_app.clone();
+                            let cancelled = Arc::clone(&renewal_cancelled);
+                            // Keep the listener and shutdown select loop responsive while
+                            // the native certificate utility performs its bounded work.
+                            renewal_jobs.spawn_blocking(move || {
+                                run_certbot_renew(&app, &cancelled)
+                            });
+                        }
+                        Some(result) = renewal_jobs.join_next(), if !renewal_jobs.is_empty() => {
+                            match result {
+                                Ok(Ok(true)) => {
+                                    if let Ok(paths) = active_certificate_paths(&worker_app, &worker_public_url) {
+                                        if paths.trusted && tls_config.reload_from_pem_file(&paths.cert, &paths.key).await.is_ok() {
+                                            worker_tls_trusted.store(true, Ordering::SeqCst);
+                                        }
                                     }
                                 }
+                                Ok(Err(error)) => eprintln!("Direct HTTPS certificate renewal failed: {error}"),
+                                Ok(Ok(false)) | Err(_) => {}
                             }
                         }
                     }
                 }
+                renewal_cancelled.store(true, Ordering::SeqCst);
+                renewal_jobs.abort_all();
+                probe_jobs.abort_all();
             });
         })
         .map_err(|error| format!("Could not start Direct HTTPS worker: {error}"))?;
@@ -853,6 +961,50 @@ mod tests {
     };
     use axum::http::HeaderName;
     use std::net::IpAddr;
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_version_probe_times_out_instead_of_hanging() {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("5");
+        let start = std::time::Instant::now();
+        assert!(
+            super::timed_probe_output(command, std::time::Duration::from_millis(40),).is_none()
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_and_deadline_reap_renewal_children() {
+        use std::sync::atomic::AtomicBool;
+
+        let mut cancelled_child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert!(!super::wait_for_renewal_child(
+            &mut cancelled_child,
+            &cancelled,
+            std::time::Duration::from_secs(2),
+        )
+        .unwrap());
+        assert!(cancelled_child.try_wait().unwrap().is_some());
+
+        let mut expired_child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
+        let running = AtomicBool::new(false);
+        assert!(super::wait_for_renewal_child(
+            &mut expired_child,
+            &running,
+            std::time::Duration::from_millis(30),
+        )
+        .is_err());
+        assert!(expired_child.try_wait().unwrap().is_some());
+    }
 
     #[test]
     fn direct_proxy_never_trusts_client_forwarded_headers() {

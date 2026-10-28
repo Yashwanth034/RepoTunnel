@@ -1,6 +1,6 @@
 [package]
 name = "repotunnel"
-version = "0.4.1"
+version = "0.4.2"
 description = "Secure local workspace gateway for AI tools"
 edition = "2021"
 
@@ -14,39 +14,55 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
-rmcp = { version = "3.1.2", features = ["schemars", "server", "transport-streamable-http-server"] }
+rmcp = { version = "3.1.2", features = ["client", "schemars", "server", "transport-child-process", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
 ngrok = "0.19"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "stream", "rustls-tls"] }
-zip = { version = "4", default-features = false, features = ["deflate"] }
+# RMCP 3.x uses reqwest 0.13; keep the native HTTP client type matched to
+# that transport without changing RepoTunnel's existing 0.12 HTTP callers.
+reqwest_rmcp = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 socket2 = "0.6"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
+sigstore-tuf = { version = "=0.14.0", default-features = false, features = ["fetch", "rustls"] }
+jiff = "0.2"
 schemars = "1.2.2"
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "time"] }
 getrandom = "0.4.3"
 sha2 = "0.11.0"
+ring = "0.17.14"
 base64 = "0.23.1"
+png = "=0.17.16"
 subtle = "2.6.1"
 libc = "0.2"
 resvg = "0.47.0"
 bzip2 = "0.6.1"
 tar = "0.4.44"
-rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+flate2 = "1"
+tempfile = "3"
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 
 # Reqwest 0.13 switched its Rustls path to the platform certificate verifier.
 # On Linux RepoTunnel uses native-tls for updater traffic so update checks use the
 # same system OpenSSL/CA trust path that normal system HTTPS tools rely on.
 [target.'cfg(target_os = "linux")'.dependencies]
-tauri-plugin-updater = { version = "=2.11.0", default-features = false, features = ["native-tls", "zip"] }
+tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = ["native-tls"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-tauri-plugin-updater = "=2.11.0"
+tauri-plugin-updater = { version = "=2.12.0", default-features = false, features = ["rustls-tls", "system-proxy"] }
+
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+# Native Windows ReadDirectoryChangesW and macOS FSEvents monitoring wakeups.
+notify = "8.2"
 
 [dev-dependencies]
-tempfile = "3"
+# Compile and exercise the shared native event adapter in Linux tests too.
+notify = "8.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 axuielement = { version = "0.9.1", default-features = false }
@@ -56,8 +72,11 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 uiautomation = { version = "0.25.1", default-features = false, features = ["control", "input"] }
 windows-sys = { version = "0.61.2", features = [
   "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Networking_WinSock",
   "Win32_Security",
   "Win32_Security_Isolation",
+  "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_JobObjects",
   "Win32_System_Threading",

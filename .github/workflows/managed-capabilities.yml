@@ -1,0 +1,284 @@
+name: Managed capabilities
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_breaking:
+        description: Allow reviewed major REA/Node compatibility transitions
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: managed-capabilities
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: Discover compatible upstream candidates
+    runs-on: ubuntu-24.04
+    outputs:
+      ast_grep_version: ${{ steps.discover.outputs.ast_grep_version }}
+      rea_version: ${{ steps.discover.outputs.rea_version }}
+      rea_node_version: ${{ steps.discover.outputs.rea_node_version }}
+      rea_node_range: ${{ steps.discover.outputs.rea_node_range }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js for publisher tests
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.19.0"
+
+      - name: Test managed-capability producer and publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd scripts/managed-capabilities
+          python3 -m unittest -v test_build_candidate.py test_discover_candidates.py test_smoke_candidate.py
+          node --test index.node-test.mjs
+
+      - name: Discover latest compatible versions
+        id: discover
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/managed-capabilities/discover_candidates.py \
+            --output discovery.json \
+            --github-output "$GITHUB_OUTPUT"
+          cat discovery.json
+
+      - name: Upload discovery record
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-capability-discovery
+          path: discovery.json
+          if-no-files-found: error
+
+  validate:
+    name: Validate ${{ matrix.os }} ${{ matrix.arch }}
+    needs: discover
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            os: linux
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            os: linux
+            arch: aarch64
+          - runner: windows-latest
+            os: windows
+            arch: x86_64
+          - runner: windows-11-arm
+            os: windows
+            arch: aarch64
+          - runner: macos-15-intel
+            os: macos
+            arch: x86_64
+          - runner: macos-15
+            os: macos
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up REA-compatible producer Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ needs.discover.outputs.rea_node_version }}
+
+      - name: Verify producer Node identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node --version | sed 's/^v//')" = "${{ needs.discover.outputs.rea_node_version }}"
+          npm --version
+
+      - name: Build verified candidate archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/managed-capabilities/build_candidate.py \
+            --capability rea-node \
+            --version "${{ needs.discover.outputs.rea_node_version }}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --output-dir managed-out/rea-node
+          python3 scripts/managed-capabilities/build_candidate.py \
+            --capability ast-grep \
+            --version "${{ needs.discover.outputs.ast_grep_version }}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --output-dir managed-out/ast-grep
+          python3 scripts/managed-capabilities/build_candidate.py \
+            --capability rea \
+            --version "${{ needs.discover.outputs.rea_version }}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --output-dir managed-out/rea
+
+      - name: Smoke managed Node and ast-grep
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/managed-capabilities/smoke_candidate.py \
+            --capability rea-node \
+            --os "${{ matrix.os }}" \
+            --version "${{ needs.discover.outputs.rea_node_version }}" \
+            --content-root managed-out/rea-node/content
+          python3 scripts/managed-capabilities/smoke_candidate.py \
+            --capability ast-grep \
+            --os "${{ matrix.os }}" \
+            --version "${{ needs.discover.outputs.ast_grep_version }}" \
+            --content-root managed-out/ast-grep/content
+
+      - name: Smoke REA MCP with the packaged Node runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            NODE_PATH="managed-out/rea-node/content/node.exe"
+          else
+            NODE_PATH="managed-out/rea-node/content/bin/node"
+          fi
+          node scripts/managed-capabilities/rea-smoke.mjs \
+            --node "$NODE_PATH" \
+            --package-root managed-out/rea/content/package \
+            --version "${{ needs.discover.outputs.rea_version }}"
+
+      - name: Derive trusted release metadata from exact built bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p managed-publication
+          node scripts/managed-capabilities/emit-release.mjs \
+            --capability rea-node \
+            --version "${{ needs.discover.outputs.rea_node_version }}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --artifact "managed-out/rea-node/rea-node-${{ needs.discover.outputs.rea_node_version }}-${{ matrix.os }}-${{ matrix.arch }}.zip" \
+            --content-root managed-out/rea-node/content \
+            --output "managed-publication/release-rea-node-${{ matrix.os }}-${{ matrix.arch }}.json"
+          node scripts/managed-capabilities/emit-release.mjs \
+            --capability ast-grep \
+            --version "${{ needs.discover.outputs.ast_grep_version }}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --artifact "managed-out/ast-grep/ast-grep-${{ needs.discover.outputs.ast_grep_version }}-${{ matrix.os }}-${{ matrix.arch }}.zip" \
+            --content-root managed-out/ast-grep/content \
+            --output "managed-publication/release-ast-grep-${{ matrix.os }}-${{ matrix.arch }}.json"
+          node scripts/managed-capabilities/emit-release.mjs \
+            --capability rea \
+            --version "${{ needs.discover.outputs.rea_version }}" \
+            --os "${{ matrix.os }}" \
+            --arch "${{ matrix.arch }}" \
+            --artifact "managed-out/rea/rea-${{ needs.discover.outputs.rea_version }}-${{ matrix.os }}-${{ matrix.arch }}.zip" \
+            --content-root managed-out/rea/content \
+            --output "managed-publication/release-rea-${{ matrix.os }}-${{ matrix.arch }}.json"
+          cp managed-out/rea-node/*.zip managed-publication/
+          cp managed-out/ast-grep/*.zip managed-publication/
+          cp managed-out/rea/*.zip managed-publication/
+
+      - name: Upload validated platform candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-capabilities-${{ matrix.os }}-${{ matrix.arch }}
+          path: managed-publication/*
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    name: Assemble monotonic publication candidate
+    needs: [discover, validate]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22.19.0"
+
+      - name: Download validated platform candidates
+        uses: actions/download-artifact@v5
+        with:
+          pattern: managed-capabilities-*
+          path: managed-publication
+          merge-multiple: true
+
+      - name: Fetch currently published index when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/managed-capabilities/tuf/capabilities/index.json"
+          if curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "$URL" -o previous-index.json; then
+            echo "Using current published capability index for monotonicity checks."
+          else
+            rm -f previous-index.json
+            echo "No current published capability index exists yet."
+          fi
+
+      - name: Build monotonic capability index
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p managed-tuf-targets/capabilities
+          ARGS=(
+            --candidate-dir managed-publication
+            --output managed-tuf-targets/capabilities/index.json
+          )
+          if [ -f previous-index.json ]; then
+            ARGS+=(--previous previous-index.json)
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.allow_breaking }}" = "true" ]; then
+            ARGS+=(--allow-breaking)
+          fi
+          node scripts/managed-capabilities/assemble-index.mjs "${ARGS[@]}"
+          cat managed-tuf-targets/capabilities/index.json
+
+      - name: Add publication manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp managed-tuf-targets/capabilities/index.json managed-publication/capability-index.json
+          node scripts/managed-capabilities/verify-publication.mjs \
+            --index managed-publication/capability-index.json \
+            --bundle-dir managed-publication
+          sha256sum managed-publication/* > managed-publication/SHA256SUMS.txt
+          cat > managed-publication/README.txt <<'EOF'
+          These artifacts passed RepoTunnel's native platform candidate validation.
+          They are NOT trusted by RepoTunnel until capabilities/index.json is added to the
+          separately provisioned TUF-on-CI repository and the resulting metadata is signed
+          by the dedicated managed-capability signing identities.
+          EOF
+
+      - name: Upload signing-event handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-capability-signing-handoff
+          path: |
+            managed-publication/*
+            managed-tuf-targets/capabilities/index.json
+          if-no-files-found: error
+          retention-days: 30

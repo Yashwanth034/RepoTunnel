@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,7 +16,7 @@ use crate::{
         ManagedProcessStatus, TerminalCommandOutcome, TerminalCommandRecord, TerminalCommandStatus,
         Workspace,
     },
-    storage, terminal, versioning,
+    recovery_store, storage, terminal, versioning,
 };
 
 const ACTIVITY_HISTORY_FILE: &str = "activity-history.json";
@@ -53,41 +52,24 @@ fn path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Could not resolve RepoTunnel activity storage: {error}"))
 }
 
+fn load_path(path: &Path) -> Result<Vec<ActivityGroup>, String> {
+    Ok(
+        recovery_store::load_json::<Vec<ActivityGroup>>(path, "AI activity history")?
+            .value
+            .unwrap_or_default(),
+    )
+}
+
 fn load(app: &AppHandle) -> Result<Vec<ActivityGroup>, String> {
-    let path = path(app)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("Could not read AI activity history: {error}"))?;
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    serde_json::from_str(&text)
-        .map_err(|error| format!("Saved AI activity history is invalid: {error}"))
+    load_path(&path(app)?)
+}
+
+fn save_path(path: &Path, groups: &[ActivityGroup]) -> Result<(), String> {
+    recovery_store::save_json(path, &groups.to_vec(), "AI activity history")
 }
 
 fn save(app: &AppHandle, groups: &[ActivityGroup]) -> Result<(), String> {
-    let path = path(app)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Could not resolve RepoTunnel activity storage directory.".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not prepare AI activity storage: {error}"))?;
-    let text = serde_json::to_string_pretty(groups)
-        .map_err(|error| format!("Could not serialize AI activity history: {error}"))?;
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(ACTIVITY_HISTORY_FILE);
-    let temporary = parent.join(format!(".{file_name}.{}.tmp", new_id("save")));
-    fs::write(&temporary, text)
-        .map_err(|error| format!("Could not stage AI activity history: {error}"))?;
-    if let Err(error) = fs::rename(&temporary, &path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(format!("Could not save AI activity history: {error}"));
-    }
-    Ok(())
+    save_path(&path(app)?, groups)
 }
 
 fn group_has_inflight(group: &ActivityGroup) -> bool {
@@ -913,10 +895,96 @@ pub(crate) fn sync_git(app: &AppHandle, record: &GitActionRecord) {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::reconcile_process_event;
     use crate::models::{
-        ActivityEvent, ActivityKind, ActivityStatus, ManagedProcessRecord, ManagedProcessStatus,
+        ActivityEvent, ActivityGroup, ActivityKind, ActivityStatus, ManagedProcessRecord,
+        ManagedProcessStatus,
     };
+
+    fn temp_store(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-activity-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn previous_path(path: &Path) -> PathBuf {
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        path.with_file_name(format!(".{file_name}.previous"))
+    }
+
+    fn activity_group(id: &str, updated_at: u64) -> ActivityGroup {
+        ActivityGroup {
+            id: id.to_string(),
+            workspace_id: "workspace-1".to_string(),
+            workspace_name: "RepoTunnel".to_string(),
+            trace_group_id: None,
+            summary: id.to_string(),
+            version_ids: Vec::new(),
+            events: Vec::new(),
+            created_at: updated_at,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn activity_history_recovers_previous_good_copy() {
+        let root = temp_store("previous-good");
+        let path = root.join("activity-history.json");
+        let first = vec![activity_group("first", 1)];
+        let second = vec![activity_group("second", 2)];
+
+        super::save_path(&path, &first).expect("save first activity history");
+        super::save_path(&path, &second).expect("save second activity history");
+        fs::write(&path, b"{truncated").expect("corrupt primary");
+
+        let recovered = super::load_path(&path).expect("recover previous-good activity history");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, "first");
+        assert!(previous_path(&path).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activity_history_corrupt_primary_and_previous_still_returns_direct_api_error() {
+        let root = temp_store("double-corrupt");
+        let path = root.join("activity-history.json");
+        fs::write(&path, b"{bad-primary").unwrap();
+        fs::write(previous_path(&path), b"{bad-previous").unwrap();
+
+        let error = super::load_path(&path).expect_err("both activity copies must fail");
+        assert!(error.contains("AI activity history"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activity_history_symlink_store_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_store("symlink");
+        let path = root.join("activity-history.json");
+        let outside = root.join("outside.json");
+        fs::write(&outside, b"[]").unwrap();
+        symlink(&outside, &path).unwrap();
+
+        let error = super::save_path(&path, &[activity_group("safe", 1)])
+            .expect_err("symlink activity store must be rejected");
+        assert!(error.contains("symbolic link"));
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn process_reconciliation_preserves_factual_timestamp() {

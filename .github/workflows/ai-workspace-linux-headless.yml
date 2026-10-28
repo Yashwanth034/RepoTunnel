@@ -1,0 +1,83 @@
+name: AI Workspace Linux off-screen acceptance
+
+# Tests the real nested X11 helper without starting RepoTunnel, an IDE,
+# or any of the CI runner's desktop applications.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nested-x11:
+    name: Nested Xvfb + Xephyr helper acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install isolated-display test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xserver-xephyr xauth python3-xlib python3-pil \
+            metacity zenity bubblewrap dbus-daemon
+
+      - name: Validate mocked semantic-owner protections
+        run: /usr/bin/python3 -m unittest -q src-tauri/resources/ai_workspace/test_ai_workspace_security.py
+
+      - name: Exercise the real off-screen nested X11 display
+        run: /usr/bin/python3 scripts/test-ai-workspace-headless.py
+
+  native-rust-sandbox:
+    name: Native Rust task-scoped GUI acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux Tauri and isolated GUI test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl file libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+            patchelf wget xvfb xserver-xephyr xauth bubblewrap \
+            metacity zenity dbus-daemon x11-utils
+
+      - name: Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Rust 1.97.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache Rust compilation
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Prepare frontend assets for Tauri build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Real sandbox private overlay isolation
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib task9_scoped_application_runtime_writes_only_private_overlay -- --ignored --test-threads=1
+
+      - name: Production Rust launcher with real isolated GTK, X11 and D-Bus
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib task9_real_gui_uses_production_scoped_application_wrapper -- --ignored --test-threads=1
+
+      - name: Real Tauri live task GUI and crash-restart private source recovery
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib task9_real_tauri_apphandle_preserves_task_overlay_and_unreadable_recovery_across_process_exit -- --ignored --test-threads=1

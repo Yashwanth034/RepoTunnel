@@ -333,6 +333,22 @@ pub(crate) fn list_presets(workspace: &Workspace) -> Result<Vec<CommandPreset>, 
         .collect())
 }
 
+fn resolve_program_file(candidate: &Path, program: &str) -> Result<PathBuf, String> {
+    #[cfg(target_os = "linux")]
+    {
+        // Resolve user PATH shims before mounting the executable into bwrap.
+        // An unresolved target fails closed rather than escaping the mounted
+        // toolchain via a symlink in the command's executable path.
+        fs::canonicalize(candidate)
+            .map_err(|error| format!("Could not resolve command '{program}' in PATH: {error}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = program;
+        Ok(candidate.to_path_buf())
+    }
+}
+
 fn find_program(program: &str) -> Result<PathBuf, String> {
     let path_value = env::var_os("PATH").unwrap_or_default();
     #[cfg(windows)]
@@ -361,7 +377,12 @@ fn find_program(program: &str) -> Result<PathBuf, String> {
                 directory.join(format!("{program}{extension}"))
             };
             if candidate.is_file() {
-                return Ok(candidate);
+                // PATH may contain a shim or symlink (for example
+                // ~/.local/bin/npm -> a Node version-manager installation).
+                // Bubblewrap cannot execute the shim if its target lies
+                // outside the mounted tool directory. Resolve the executable
+                // first, then mount only its actual tool installation.
+                return resolve_program_file(&candidate, program);
             }
         }
     }
@@ -615,21 +636,40 @@ fn tool_mount_root(executable: &Path, program: &str) -> PathBuf {
 }
 
 #[cfg(target_os = "linux")]
-fn safe_path_environment(program_path: &Path) -> String {
-    let mut paths = vec![
-        program_path
-            .parent()
-            .unwrap_or_else(|| Path::new("/usr/bin"))
-            .to_path_buf(),
+fn safe_path_environment(program_path: &Path, node_path: Option<&Path>) -> String {
+    let mut paths = vec![program_path
+        .parent()
+        .unwrap_or_else(|| Path::new("/usr/bin"))
+        .to_path_buf()];
+    // npm/pnpm/yarn CLI files commonly live under lib/node_modules while
+    // node itself lives in a sibling bin directory. The CLI's shebang and
+    // npm-run scripts must find the exact same node runtime in the sandbox.
+    if let Some(node) = node_path {
+        let node_bin = node.parent().unwrap_or_else(|| Path::new("/usr/bin"));
+        if !paths.iter().any(|path| path == node_bin) {
+            paths.push(node_bin.to_path_buf());
+        }
+    }
+    paths.extend([
         PathBuf::from("/usr/local/bin"),
         PathBuf::from("/usr/bin"),
         PathBuf::from("/bin"),
-    ];
+    ]);
     paths.dedup();
     env::join_paths(paths)
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn node_needs_separate_mount(node: &Path, program_root: &Path, program_covered: bool) -> bool {
+    let node_covered_by_system = ["/usr", "/bin", "/lib", "/lib64", "/usr/local"]
+        .iter()
+        .any(|base| node.starts_with(Path::new(*base)));
+    // The preset's tool bind can already include a version-manager's node
+    // executable. Do not attempt a nested bind beneath a read-only mount.
+    !node_covered_by_system && (program_covered || !node.starts_with(program_root))
 }
 
 #[cfg(target_os = "linux")]
@@ -809,6 +849,16 @@ fn run_resolved_preset(
         )?;
 
         let program_path = find_program(&preset.program)?;
+        let node_path = if matches!(preset.program.as_str(), "npm" | "pnpm" | "yarn") {
+            Some(find_program("node").map_err(|error| {
+                format!(
+                    "JavaScript command '{}' needs an installed Node.js runtime: {error}",
+                    preset.program
+                )
+            })?)
+        } else {
+            None
+        };
         let mut bwrap_args = vec![
             "--unshare-all".to_string(),
             "--unshare-net".to_string(),
@@ -845,6 +895,17 @@ fn run_resolved_preset(
             push_existing_ro_bind(&mut bwrap_args, &root, root.to_string_lossy().as_ref());
         }
         add_user_toolchain_mounts(&mut bwrap_args, &preset.program);
+        if let Some(node) = node_path.as_ref() {
+            let node_root = tool_mount_root(node, "node");
+            if node_needs_separate_mount(node, &root, covered_by_system) {
+                push_parent_dirs(&mut bwrap_args, &node_root);
+                push_existing_ro_bind(
+                    &mut bwrap_args,
+                    &node_root,
+                    node_root.to_string_lossy().as_ref(),
+                );
+            }
+        }
 
         bwrap_args.push("--dir".into());
         bwrap_args.push("/workspace".into());
@@ -885,7 +946,10 @@ fn run_resolved_preset(
         command
             .args(&bwrap_args)
             .env_clear()
-            .env("PATH", safe_path_environment(&program_path))
+            .env(
+                "PATH",
+                safe_path_environment(&program_path, node_path.as_deref()),
+            )
             .env("HOME", "/tmp/home")
             .env("TMPDIR", "/tmp")
             .env("XDG_CACHE_HOME", "/tmp/cache")
@@ -1362,6 +1426,89 @@ mod tests {
         assert!(!safe_script_name("deploy"));
         assert!(!safe_script_name("publish"));
         assert!(!safe_script_name("dev"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn javascript_preset_mounts_real_tool_and_node_bin_without_home_access() {
+        use std::path::Path;
+
+        // These represent canonical paths after resolving ~/.local/bin
+        // symlinks, not the host user directory itself.
+        let cli =
+            Path::new("/home/tester/.local/share/node/v22/lib/node_modules/npm/bin/npm-cli.js");
+        let node = Path::new("/home/tester/.local/share/node/v22/bin/node");
+        assert_eq!(
+            super::tool_mount_root(cli, "npm"),
+            Path::new("/home/tester/.local/share/node/v22/lib/node_modules/npm")
+        );
+        assert_eq!(
+            super::tool_mount_root(node, "node"),
+            Path::new("/home/tester/.local/share/node/v22/bin")
+        );
+        let path = super::safe_path_environment(cli, Some(node));
+        let segments = std::env::split_paths(&path).collect::<Vec<_>>();
+        assert_eq!(
+            segments.first().map(|p| p.as_path()),
+            Some(Path::new(
+                "/home/tester/.local/share/node/v22/lib/node_modules/npm/bin"
+            ))
+        );
+        assert!(
+            segments.contains(&Path::new("/home/tester/.local/share/node/v22/bin").to_path_buf())
+        );
+        assert!(!segments.contains(&Path::new("/home/tester").to_path_buf()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn javascript_runtime_mount_selection_avoids_nested_bind_targets() {
+        use std::path::Path;
+
+        let installation = Path::new("/home/tester/.nvm/versions/node/v22");
+        let same_install_node = Path::new("/home/tester/.nvm/versions/node/v22/bin/node");
+        assert!(!super::node_needs_separate_mount(
+            same_install_node,
+            installation,
+            false,
+        ));
+        let sibling_node = Path::new("/home/tester/.local/opt/node/bin/node");
+        let npm_package = Path::new("/home/tester/.local/lib/node_modules/npm");
+        assert!(super::node_needs_separate_mount(
+            sibling_node,
+            npm_package,
+            false
+        ));
+        assert!(!super::node_needs_separate_mount(
+            Path::new("/usr/bin/node"),
+            npm_package,
+            false,
+        ));
+        assert!(super::node_needs_separate_mount(
+            same_install_node,
+            Path::new("/usr/lib/node_modules/npm"),
+            true,
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symlinked_tool_paths_resolve_to_the_actual_executable() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("node-install").join("bin").join("npm");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
+        let shim = dir.path().join("shims").join("npm");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        symlink(&real, &shim).unwrap();
+        assert!(shim.is_file());
+        let resolved = super::resolve_program_file(&shim, "npm").unwrap();
+        assert_eq!(resolved, real);
+        assert_eq!(
+            super::tool_mount_root(&resolved, "npm"),
+            real.parent().unwrap().parent().unwrap()
+        );
     }
 
     #[test]

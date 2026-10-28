@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RepoTunnel Browser Transaction Fixture</title>
+</head>
+<body>
+  <form id="fixture-form">
+    <label for="tool-name">Tool Name</label>
+    <input id="tool-name" name="toolName" type="text">
+
+    <label for="website">Website</label>
+    <input id="website" name="website" type="url">
+
+    <label for="description">Description</label>
+    <textarea id="description" name="description"></textarea>
+
+    <label for="category">Category</label>
+    <select id="category" name="category">
+      <option value="">Choose</option>
+      <option value="developer-tools">Developer Tools</option>
+      <option value="productivity">Productivity</option>
+    </select>
+
+    <label><input id="featured" name="featured" type="checkbox"> Featured</label>
+
+    <fieldset>
+      <legend>Pricing</legend>
+      <label><input id="pricing-free" name="pricing" type="radio" value="free"> Free</label>
+      <label><input id="pricing-paid" name="pricing" type="radio" value="paid"> Paid</label>
+    </fieldset>
+
+    <label for="disabled-field">Disabled</label>
+    <input id="disabled-field" name="disabledField" type="text" disabled>
+
+    <label for="account-password">Password</label>
+    <input id="account-password" name="accountPassword" type="password">
+
+    <div id="dynamic-slot">
+      <label for="dynamic-field">Dynamic Field</label>
+      <input id="dynamic-field" name="dynamicField" type="text">
+    </div>
+
+    <button id="replace-dynamic" type="button">Replace Dynamic Field</button>
+    <button id="noop-button" type="button">Mark Clicked</button>
+    <button id="submit-button" type="submit">Submit</button>
+  </form>
+
+  <output id="submit-count">0</output>
+  <output id="click-count">0</output>
+
+  <script>
+    window.fixtureSubmitCount = 0;
+    window.fixtureClickCount = 0;
+
+    document.getElementById('fixture-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      window.fixtureSubmitCount += 1;
+      document.getElementById('submit-count').textContent = String(window.fixtureSubmitCount);
+    });
+
+    document.getElementById('noop-button').addEventListener('click', () => {
+      window.fixtureClickCount += 1;
+      document.getElementById('click-count').textContent = String(window.fixtureClickCount);
+    });
+
+    document.getElementById('replace-dynamic').addEventListener('click', () => {
+      document.getElementById('dynamic-slot').innerHTML = [
+        '<label for="dynamic-field">Dynamic Field</label>',
+        '<input id="dynamic-field" name="dynamicField" type="text" data-generation="replacement">'
+      ].join('');
+    });
+  </script>
+</body>
+</html>

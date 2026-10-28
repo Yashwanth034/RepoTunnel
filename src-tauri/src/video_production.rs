@@ -11,11 +11,17 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(target_os = "linux")]
-use std::process::Stdio;
-
+#[cfg(any(windows, target_os = "macos"))]
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use std::process::Stdio;
+#[cfg(any(windows, target_os = "macos"))]
+use std::sync::{atomic::AtomicBool, Arc};
+#[cfg(any(windows, target_os = "macos"))]
+use std::thread::JoinHandle;
 use tauri::AppHandle;
+#[cfg(any(windows, target_os = "macos"))]
+use tauri::Manager;
 
 use crate::{
     access::{resolve_workspace_path, AccessOperation},
@@ -31,6 +37,9 @@ const SCHEMA_VERSION: u32 = 1;
 static PROJECT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static RECORDING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_RECORDING: OnceLock<Mutex<Option<ActiveRecording>>> = OnceLock::new();
+// Serialize startup through active-recording publication so two requests
+// cannot both launch an encoder before either sees the other's recording.
+static RECORDING_START_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 const PROJECT_DIRECTORIES: &[&str] = &[
     "script",
@@ -277,6 +286,12 @@ struct ActiveRecording {
     workspace: Workspace,
     status: VideoRecordingStatus,
     child: Child,
+    #[cfg(any(windows, target_os = "macos"))]
+    native_stop: Option<Arc<AtomicBool>>,
+    #[cfg(any(windows, target_os = "macos"))]
+    native_worker: Option<JoinHandle<()>>,
+    #[cfg(any(windows, target_os = "macos"))]
+    native_error: Option<Arc<Mutex<Option<String>>>>,
 }
 
 fn recording_state() -> &'static Mutex<Option<ActiveRecording>> {
@@ -2068,9 +2083,12 @@ fn build_ai_workspace_capture_command(
     Ok(command)
 }
 
-#[cfg(not(target_os = "linux"))]
+// Native recording consumes individually signed, window-only PNG frames
+// through stdin. Never use gdigrab, avfoundation screen capture or host-wide
+// desktop input devices: they could expose unrelated personal applications.
+#[cfg(any(windows, target_os = "macos"))]
 fn build_ai_workspace_capture_command(
-    _ffmpeg: &Path,
+    ffmpeg: &Path,
     capture: &AiWorkspaceCapture<'_>,
 ) -> Result<Command, String> {
     let _ = (
@@ -2078,16 +2096,232 @@ fn build_ai_workspace_capture_command(
         capture.xauth_path,
         capture.x,
         capture.y,
-        capture.width,
-        capture.height,
-        capture.fps,
         capture.max_seconds,
-        capture.output,
     );
-    Err(
-        "AI Workspace recording is currently available on Linux; Windows/macOS recording adapters are not yet validated."
-            .to_string(),
-    )
+    let mut command = Command::new(ffmpeg);
+    command
+        .args([
+            "-hide_banner",
+            "-nostats",
+            "-loglevel",
+            "warning",
+            "-y",
+            "-f",
+            "image2pipe",
+            "-framerate",
+            &capture.fps.to_string(),
+            // Accessibility capture may run slower than nominal FPS.
+            // Use frame arrival time so a ten-second recording does not
+            // play back as one compressed second after slow PNG captures.
+            "-use_wallclock_as_timestamps",
+            "1",
+            "-vcodec",
+            "png",
+            "-i",
+            "pipe:0",
+            // The owned-frame worker ends the input stream at the wall-clock
+            // duration. Do not let ffmpeg close pipe:0 early via -t, which
+            // would look like a capture error during a legitimate finish.
+            "-an",
+            "-vf",
+            "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "vfr",
+        ])
+        .arg(capture.output);
+    video::configure_background_command(&mut command);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
+// Pure contract shared by native recording and Linux-hosted regressions.
+// Refuse missing/stale signed windows, global-screen images, changing frame
+// dimensions or oversized data before anything enters the encoder pipe.
+#[cfg(any(windows, target_os = "macos", test))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn native_owned_frame_contract(
+    expected_session: &str,
+    actual_session: &str,
+    expected_window: &str,
+    actual_window: &str,
+    mime: &str,
+    width: u32,
+    height: u32,
+    expected_width: u32,
+    expected_height: u32,
+    size_bytes: u64,
+    encoded_len: usize,
+) -> bool {
+    !expected_session.is_empty()
+        && expected_session.len() <= 256
+        && actual_session == expected_session
+        && !expected_window.is_empty()
+        && expected_window.len() <= 256
+        && actual_window == expected_window
+        && mime == "image/png"
+        && width > 0
+        && height > 0
+        && width == expected_width
+        && height == expected_height
+        && (8..=16 * 1024 * 1024).contains(&size_bytes)
+        && (12..=24 * 1024 * 1024).contains(&encoded_len)
+}
+
+// Capture only the currently signed window of this exact app session. Every
+// frame revalidates PID, ownership and window identity through AI Workspace.
+// A failed capture stops the stream: never replace an unavailable frame with
+// a screenshot of the user's active personal desktop.
+#[cfg(any(windows, target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
+fn stream_native_ai_workspace_frames(
+    app: AppHandle,
+    workspace_id: String,
+    app_session_id: String,
+    signed_window: String,
+    signed_session: String,
+    expected_width: u32,
+    expected_height: u32,
+    fps: u32,
+    max_seconds: u32,
+    stop: Arc<AtomicBool>,
+    mut stdin: std::process::ChildStdin,
+) -> Result<(), String> {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let spacing = Duration::from_secs_f64(1.0 / f64::from(fps));
+    let mut next = start;
+    let mut frames = 0u64;
+    loop {
+        if stop.load(Ordering::Acquire)
+            || start.elapsed() >= Duration::from_secs(u64::from(max_seconds))
+        {
+            break;
+        }
+        if !desktop_control::is_enabled(&app, &workspace_id)? {
+            return Err(
+                "Desktop Control permission was revoked; native app-only recording stopped.".into(),
+            );
+        }
+        let state = app.state::<crate::app_state::AppState>();
+        let frame = state.ai_workspace.frame_app_session(
+            &app,
+            &workspace_id,
+            &app_session_id,
+            Some(&signed_window),
+            1280,
+            true,
+        )?;
+        // Stop may have been requested while native accessibility capture
+        // was in flight. Discard that result rather than encoding a frame
+        // after recording permission/session ownership has been revoked.
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        if !desktop_control::is_enabled(&app, &workspace_id)? {
+            return Err(
+                "Desktop Control was revoked during native window capture; frame discarded.".into(),
+            );
+        }
+        if !native_owned_frame_contract(
+            &signed_session,
+            &frame.session_id,
+            &signed_window,
+            &frame.window_id,
+            &frame.mime_type,
+            frame.width,
+            frame.height,
+            expected_width,
+            expected_height,
+            frame.size_bytes,
+            frame.data_base64.len(),
+        ) {
+            return Err(
+                "Native recording frame changed window identity, encoding or dimensions.".into(),
+            );
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(frame.data_base64.as_bytes())
+            .map_err(|error| format!("Could not decode owned window recording frame: {error}"))?;
+        if bytes.len() < 8
+            || bytes[..8] != [137, 80, 78, 71, 13, 10, 26, 10]
+            || bytes.len() as u64 != frame.size_bytes
+        {
+            return Err("Native recording frame is not the verified bounded PNG.".into());
+        }
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
+        if !desktop_control::is_enabled(&app, &workspace_id)? {
+            return Err(
+                "Desktop Control was revoked before writing the native recording frame.".into(),
+            );
+        }
+        stdin.write_all(&bytes).map_err(|error| {
+            format!("Native window recorder could not stream an owned frame: {error}")
+        })?;
+        frames += 1;
+        next += spacing;
+        if let Some(delay) = next.checked_duration_since(Instant::now()) {
+            thread::sleep(delay);
+        }
+    }
+    if frames == 0 {
+        return Err("No authenticated native window frame was recorded.".into());
+    }
+    stdin.flush().map_err(|error| {
+        format!("Could not flush native owned-window recording stream: {error}")
+    })?;
+    Ok(())
+}
+
+// Native capture can block inside accessibility APIs or while writing to a
+// stalled encoder pipe. Never wait indefinitely for its thread during Stop,
+// rollback or app shutdown. The encoder is killed if graceful cancellation
+// does not complete, and the recording is marked failed rather than saved.
+#[cfg(any(windows, target_os = "macos"))]
+fn stop_native_capture_worker(
+    child: &mut Child,
+    stop: Option<&Arc<AtomicBool>>,
+    worker: Option<JoinHandle<()>>,
+) -> Result<(), String> {
+    if let Some(stop) = stop {
+        stop.store(true, Ordering::Release);
+    }
+    let Some(worker) = worker else {
+        return Ok(());
+    };
+    for _ in 0..50 {
+        if worker.is_finished() {
+            return worker
+                .join()
+                .map_err(|_| "Native recorder worker panicked.".to_string());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    // If the worker is blocked on pipe output, closing the encoder can
+    // release it. A blocked native accessibility call is not safe to join.
+    video::terminate_child(child);
+    for _ in 0..50 {
+        if worker.is_finished() {
+            return worker
+                .join()
+                .map_err(|_| "Native recorder worker panicked.".to_string());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err("Native recording worker did not stop within the bounded shutdown window; encoder terminated and the recording is not trusted.".into())
 }
 
 fn graceful_stop_recording(child: &mut Child) {
@@ -2108,10 +2342,59 @@ fn graceful_stop_recording(child: &mut Child) {
 }
 
 fn finish_recording(mut active: ActiveRecording, completion_message: &str) -> VideoRecordingStatus {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let stop_result = stop_native_capture_worker(
+            &mut active.child,
+            active.native_stop.as_ref(),
+            active.native_worker.take(),
+        );
+        if let Err(failure) = stop_result {
+            if let Some(error) = &active.native_error {
+                if let Ok(mut slot) = error.lock() {
+                    *slot = Some(failure);
+                }
+            }
+        }
+    }
     graceful_stop_recording(&mut active.child);
     let now = now_millis().unwrap_or(active.status.started_at);
     active.status.stopped_at = Some(now);
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some(error) = active
+        .native_error
+        .as_ref()
+        .and_then(|state| state.lock().ok())
+        .and_then(|state| state.clone())
+    {
+        active.status.status = "failed".into();
+        active.status.message = format!("Native owned-window recording failed: {error}");
+        let _ = update_project_status(
+            &active.workspace,
+            &active.status.project_id,
+            "failed",
+            Some(&active.status.message),
+        );
+        return active.status;
+    }
 
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let exit = active.child.try_wait().map_err(|error| error.to_string());
+        let encoder_ok = matches!(exit, Ok(Some(code)) if code.success());
+        if !encoder_ok {
+            active.status.status = "failed".into();
+            active.status.message =
+                "Native owned-window encoder did not finish successfully; refusing to mark the recording completed.".into();
+            let _ = update_project_status(
+                &active.workspace,
+                &active.status.project_id,
+                "failed",
+                Some(&active.status.message),
+            );
+            return active.status;
+        }
+    }
     let project = match get_project(&active.workspace, &active.status.project_id) {
         Ok(project) => project,
         Err(error) => {
@@ -2187,7 +2470,21 @@ pub(crate) fn start_ai_workspace_recording(
     height: u32,
     fps: Option<u32>,
     max_seconds: Option<u32>,
+    native_window_id: Option<&str>,
+    native_session_id: Option<&str>,
 ) -> Result<VideoRecordingStatus, String> {
+    #[cfg(target_os = "linux")]
+    let _ = (native_window_id, native_session_id);
+    #[cfg(any(windows, target_os = "macos"))]
+    let native_signed_window = native_window_id
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| "Native recording requires an exact signed owned-window ID.".to_string())?;
+    #[cfg(any(windows, target_os = "macos"))]
+    let native_signed_session = native_session_id
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| {
+            "Native recording requires an exact owned AI Workspace session.".to_string()
+        })?;
     if !desktop_control::is_enabled(app, &workspace.id)? {
         return Err(
             "Video recording requires Desktop Control. Enable it locally in Commands → Applications & links."
@@ -2201,6 +2498,10 @@ pub(crate) fn start_ai_workspace_recording(
     }
     let fps = recording_fps(fps)?;
     let max_seconds = recording_max_seconds(max_seconds)?;
+    let _start_guard = RECORDING_START_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Recording startup coordination is unavailable.".to_string())?;
 
     {
         let guard = recording_state()
@@ -2246,11 +2547,69 @@ pub(crate) fn start_ai_workspace_recording(
     let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start background screen recording: {error}"))?;
+    #[cfg(any(windows, target_os = "macos"))]
+    let (native_stop, native_worker, native_error) = {
+        let stdin = child.stdin.take().ok_or_else(|| {
+            video::terminate_child(&mut child);
+            "Native recording encoder did not accept a window-only frame stream.".to_string()
+        })?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(Mutex::new(None::<String>));
+        let worker_stop = Arc::clone(&stop);
+        let worker_error = Arc::clone(&error);
+        let task_app = app.clone();
+        let task_workspace = workspace.id.clone();
+        let task_session = app_session_id.to_string();
+        let task_window = native_signed_window.to_string();
+        let task_native_session = native_signed_session.to_string();
+        let worker = match thread::Builder::new()
+            .name("repotunnel-owned-window-recorder".into())
+            .spawn(move || {
+                if let Err(failure) = stream_native_ai_workspace_frames(
+                    task_app,
+                    task_workspace,
+                    task_session,
+                    task_window,
+                    task_native_session,
+                    width,
+                    height,
+                    fps,
+                    max_seconds,
+                    worker_stop,
+                    stdin,
+                ) {
+                    if let Ok(mut slot) = worker_error.lock() {
+                        *slot = Some(failure);
+                    }
+                }
+            }) {
+            Ok(worker) => worker,
+            Err(failure) => {
+                video::terminate_child(&mut child);
+                let _ = fs::remove_file(&output);
+                return Err(format!(
+                    "Could not start owned-window recording worker: {failure}"
+                ));
+            }
+        };
+        (Some(stop), Some(worker), Some(error))
+    };
     thread::sleep(Duration::from_millis(220));
-    if let Some(exit) = child
-        .try_wait()
-        .map_err(|error| format!("Could not verify screen recording startup: {error}"))?
-    {
+    let startup_exit = match child.try_wait() {
+        Ok(exit) => exit,
+        Err(error) => {
+            #[cfg(any(windows, target_os = "macos"))]
+            let _ = stop_native_capture_worker(&mut child, native_stop.as_ref(), native_worker);
+            video::terminate_child(&mut child);
+            let _ = fs::remove_file(&output);
+            return Err(format!(
+                "Could not verify screen recording startup: {error}"
+            ));
+        }
+    };
+    if let Some(exit) = startup_exit {
+        #[cfg(any(windows, target_os = "macos"))]
+        let _ = stop_native_capture_worker(&mut child, native_stop.as_ref(), native_worker);
         let _ = fs::remove_file(&output);
         return Err(format!(
             "FFmpeg screen recording exited immediately with status {exit}."
@@ -2270,25 +2629,47 @@ pub(crate) fn start_ai_workspace_recording(
         fps,
         started_at,
         stopped_at: None,
-        message: format!(
-            "Recording isolated AI Workspace at {width}×{height}, {fps} FPS. Camera and microphone are not captured."
-        ),
+        message: if native_window_id.is_some() {
+            format!("Recording only the signed native app window at {width}×{height}, {fps} FPS. Camera, microphone and personal desktop are excluded.")
+        } else {
+            format!("Recording isolated AI Workspace at {width}×{height}, {fps} FPS. Camera and microphone are not captured.")
+        },
     };
 
-    update_project_status(
+    let setup = update_project_status(
         workspace,
         &project.id,
         "recording",
         Some("AI Workspace recording started."),
-    )?;
+    );
+    if let Err(error) = setup {
+        #[cfg(any(windows, target_os = "macos"))]
+        let _ = stop_native_capture_worker(&mut child, native_stop.as_ref(), native_worker);
+        video::terminate_child(&mut child);
+        let _ = fs::remove_file(&output);
+        return Err(error);
+    }
 
-    let mut guard = recording_state()
-        .lock()
-        .map_err(|_| "Video recording state is unavailable.".to_string())?;
+    let mut guard = match recording_state().lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            #[cfg(any(windows, target_os = "macos"))]
+            let _ = stop_native_capture_worker(&mut child, native_stop.as_ref(), native_worker);
+            video::terminate_child(&mut child);
+            let _ = fs::remove_file(&output);
+            return Err("Video recording state is unavailable.".to_string());
+        }
+    };
     *guard = Some(ActiveRecording {
         workspace: workspace.clone(),
         status: status.clone(),
         child,
+        #[cfg(any(windows, target_os = "macos"))]
+        native_stop,
+        #[cfg(any(windows, target_os = "macos"))]
+        native_worker,
+        #[cfg(any(windows, target_os = "macos"))]
+        native_error,
     });
     Ok(status)
 }
@@ -2297,6 +2678,10 @@ pub(crate) fn get_recording_status(
     workspace_id: &str,
     project_id: Option<&str>,
 ) -> Result<Option<VideoRecordingStatus>, String> {
+    let _lifecycle_guard = RECORDING_START_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Recording lifecycle coordination is unavailable.".to_string())?;
     let finished = {
         let mut guard = recording_state()
             .lock()
@@ -2310,12 +2695,20 @@ pub(crate) fn get_recording_status(
         if project_id.is_some_and(|id| active.status.project_id != id) {
             return Ok(None);
         }
-        if active
+        let encoder_exited = active
             .child
             .try_wait()
             .map_err(|error| format!("Could not inspect screen recording: {error}"))?
-            .is_some()
-        {
+            .is_some();
+        #[cfg(any(windows, target_os = "macos"))]
+        let capture_failed = active
+            .native_error
+            .as_ref()
+            .and_then(|error| error.lock().ok())
+            .is_some_and(|error| error.is_some());
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let capture_failed = false;
+        if encoder_exited || capture_failed {
             guard.take()
         } else {
             return Ok(Some(active.status.clone()));
@@ -2334,6 +2727,10 @@ pub(crate) fn stop_recording(
     workspace_id: &str,
     project_id: &str,
 ) -> Result<VideoRecordingStatus, String> {
+    let _lifecycle_guard = RECORDING_START_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Recording lifecycle coordination is unavailable.".to_string())?;
     let active = {
         let mut guard = recording_state()
             .lock()
@@ -2354,7 +2751,111 @@ pub(crate) fn stop_recording(
     ))
 }
 
+// UI, MCP and recovery can stop an AI Workspace app without passing
+// through the Video Project panel. Never leave a window recorder capturing
+// after its exact owned app session has been requested to stop. Global
+// recorder lifecycle serialization prevents Stop racing a new Start.
+fn recording_belongs_to_app(
+    status: &VideoRecordingStatus,
+    workspace_id: &str,
+    app_session_id: &str,
+) -> bool {
+    status.workspace_id == workspace_id && status.app_session_id == app_session_id
+}
+
+pub(crate) fn stop_ai_workspace_app_recording(
+    workspace_id: &str,
+    app_session_id: &str,
+) -> Result<Option<VideoRecordingStatus>, String> {
+    let _lifecycle_guard = RECORDING_START_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Recording lifecycle coordination is unavailable.".to_string())?;
+    let active = {
+        let mut guard = recording_state()
+            .lock()
+            .map_err(|_| "Video recording state is unavailable.".to_string())?;
+        if !guard.as_ref().is_some_and(|active| {
+            recording_belongs_to_app(&active.status, workspace_id, app_session_id)
+        }) {
+            return Ok(None);
+        }
+        guard.take()
+    };
+    Ok(active.map(|active| {
+        finish_recording(
+            active,
+            "Owned app recording stopped with its AI Workspace session.",
+        )
+    }))
+}
+
+fn recording_app_is_orphaned(
+    status: &VideoRecordingStatus,
+    workspace_id: &str,
+    active_app_sessions: &[String],
+) -> bool {
+    status.workspace_id == workspace_id
+        && !active_app_sessions
+            .iter()
+            .any(|session| session == &status.app_session_id)
+}
+
+// Called only after the AI Workspace runtime mutex is released, so a native
+// frame worker blocked on PID verification can stop safely. Losing a
+// nonprimary app must also terminate its recorder even while other apps run.
+pub(crate) fn stop_orphaned_ai_workspace_recording(
+    workspace_id: &str,
+    active_app_sessions: &[String],
+) {
+    let _lifecycle_guard = RECORDING_START_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let active = recording_state().lock().ok().and_then(|mut guard| {
+        if guard.as_ref().is_some_and(|active| {
+            recording_app_is_orphaned(&active.status, workspace_id, active_app_sessions)
+        }) {
+            guard.take()
+        } else {
+            None
+        }
+    });
+    if let Some(active) = active {
+        let _ = finish_recording(active, "Owned AI Workspace app exited; recording stopped.");
+    }
+}
+
+pub(crate) fn stop_ai_workspace_recording_for_workspace(workspace_id: &str) {
+    let _lifecycle_guard = RECORDING_START_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let active = recording_state().lock().ok().and_then(|mut guard| {
+        if guard
+            .as_ref()
+            .is_some_and(|active| active.status.workspace_id == workspace_id)
+        {
+            guard.take()
+        } else {
+            None
+        }
+    });
+    if let Some(active) = active {
+        let _ = finish_recording(
+            active,
+            "App recording stopped because its AI Workspace ended.",
+        );
+    }
+}
+
 pub(crate) fn stop_all_activity() {
+    // Shutdown must still tear down active captures even after a prior
+    // lifecycle panic; acquiring the poisoned mutex's guard is exclusive.
+    let _lifecycle_guard = RECORDING_START_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let active = recording_state()
         .lock()
         .ok()
@@ -2369,6 +2870,143 @@ pub(crate) fn stop_all_activity() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn owned_app_recording_shutdown_matches_only_exact_workspace_and_session() {
+        let status = super::VideoRecordingStatus {
+            id: "rec-1".into(),
+            workspace_id: "workspace-a".into(),
+            project_id: "video-1".into(),
+            app_session_id: "session-a".into(),
+            status: "recording".into(),
+            capture_target: "aiWorkspaceApp".into(),
+            relative_path: "recordings/owned.mp4".into(),
+            width: 640,
+            height: 480,
+            fps: 12,
+            started_at: 1,
+            stopped_at: None,
+            message: String::new(),
+        };
+        assert!(super::recording_belongs_to_app(
+            &status,
+            "workspace-a",
+            "session-a"
+        ));
+        assert!(!super::recording_belongs_to_app(
+            &status,
+            "workspace-b",
+            "session-a"
+        ));
+        assert!(!super::recording_belongs_to_app(
+            &status,
+            "workspace-a",
+            "session-b"
+        ));
+        assert!(!super::recording_belongs_to_app(&status, "workspace-a", ""));
+
+        // A status poll after a nonprimary app crashes must remove only that
+        // app's recorder, never a surviving session or a different project.
+        assert!(super::recording_app_is_orphaned(
+            &status,
+            "workspace-a",
+            &["session-b".to_string()],
+        ));
+        assert!(super::recording_app_is_orphaned(
+            &status,
+            "workspace-a",
+            &[]
+        ));
+        assert!(!super::recording_app_is_orphaned(
+            &status,
+            "workspace-a",
+            &["session-a".to_string()],
+        ));
+        assert!(!super::recording_app_is_orphaned(
+            &status,
+            "workspace-b",
+            &[],
+        ));
+    }
+
+    #[test]
+    fn native_recorder_never_accepts_unowned_or_oversized_window_frames() {
+        let signed = "uia-window-a1b2c3d4e5f6";
+        let accepts = |actual: &str, mime: &str, width, height, bytes, base64_bytes| {
+            super::native_owned_frame_contract(
+                "owned-session-1",
+                "owned-session-1",
+                signed,
+                actual,
+                mime,
+                width,
+                height,
+                640,
+                480,
+                bytes,
+                base64_bytes,
+            )
+        };
+        assert!(accepts(signed, "image/png", 640, 480, 4096, 6000));
+        assert!(
+            !super::native_owned_frame_contract(
+                "owned-session-1",
+                "restarted-session-2",
+                signed,
+                signed,
+                "image/png",
+                640,
+                480,
+                640,
+                480,
+                4096,
+                6000,
+            ),
+            "a replaced AI Workspace session must not inherit the original recording"
+        );
+        assert!(!accepts("", "image/png", 640, 480, 4096, 6000));
+        assert!(!accepts(
+            "uia-window-another",
+            "image/png",
+            640,
+            480,
+            4096,
+            6000
+        ));
+        assert!(!accepts(signed, "image/jpeg", 640, 480, 4096, 6000));
+        assert!(!accepts(signed, "image/png", 800, 480, 4096, 6000));
+        assert!(!accepts(signed, "image/png", 640, 0, 4096, 6000));
+        assert!(!accepts(signed, "image/png", 640, 480, 0, 6000));
+        assert!(!accepts(
+            signed,
+            "image/png",
+            640,
+            480,
+            20 * 1024 * 1024,
+            6000
+        ));
+        assert!(!accepts(
+            signed,
+            "image/png",
+            640,
+            480,
+            4096,
+            30 * 1024 * 1024
+        ));
+        assert!(!super::native_owned_frame_contract(
+            "owned-session-1",
+            "owned-session-1",
+            "",
+            "",
+            "image/png",
+            640,
+            480,
+            640,
+            480,
+            4096,
+            6000,
+        ));
+    }
+
     use std::{
         fs,
         path::PathBuf,

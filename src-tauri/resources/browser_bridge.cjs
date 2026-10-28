@@ -4,6 +4,15 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
+const {
+  createRemoteBrowserTransactionRuntime,
+  browserTransactionPageExpression,
+  formatTransactionError,
+} = require("./browser_transaction_runtime.cjs");
+const {
+  reusableCdpClient,
+  captureSemanticTrees,
+} = require("./browser_fastpath.cjs");
 
 const [, , portArg, operation, ...args] = process.argv;
 const port = Number(portArg);
@@ -179,10 +188,17 @@ async function createPersistentCdpClient(tab) {
   return client;
 }
 
-async function getPersistentCdpClient(tabId) {
-  const tab = await findTab(tabId);
+async function getPersistentCdpClient(tabId, verifiedTab = null) {
   let client = persistentCdpClients.get(tabId);
-  if (!client || client.closed || client.url !== tab.webSocketDebuggerUrl) {
+  // A live WebSocket pins the original Chrome target. Repeatedly fetching
+  // /json/list for every CDP command adds an HTTP round trip without making
+  // that already authenticated target any safer.
+  if (reusableCdpClient(client)
+      && (!verifiedTab || client.url === verifiedTab.webSocketDebuggerUrl)) {
+    return client;
+  }
+  const tab = verifiedTab || await findTab(tabId);
+  if (!reusableCdpClient(client) || client.url !== tab.webSocketDebuggerUrl) {
     if (client) closePersistentCdpClient(tabId);
     let connecting = persistentCdpConnects.get(tabId);
     if (!connecting) {
@@ -652,11 +668,11 @@ async function semanticSnapshot(tabId, requestedMaxNodes) {
   const tab = await findTab(tabId);
   const maxNodes = Math.min(Math.max(Number(requestedMaxNodes || 800), 20), 2000);
 
-  await cdpCommand(tabId, "Accessibility.enable");
-  await cdpCommand(tabId, "DOM.enable");
-  const axTree = await cdpCommand(tabId, "Accessibility.getFullAXTree");
-  const domTree = await cdpCommand(tabId, "DOM.getDocument", { depth: -1, pierce: true });
-  const frameTree = await cdpCommand(tabId, "Page.getFrameTree");
+  const client = await getPersistentCdpClient(tabId, tab);
+  // Separate CDP domains may be enabled and captured concurrently. Preserve
+  // the complete AX and piercing-DOM evidence needed for signed semantic
+  // refs; do not replace it with an untrusted page-script approximation.
+  const { axTree, domTree, frameTree } = await captureSemanticTrees(client);
 
   const rawNodes = Array.isArray(axTree?.nodes) ? axTree.nodes : [];
   const domNodes = new Map();
@@ -1323,6 +1339,95 @@ async function uploadFile(tabId, selector, filePath) {
   };
 }
 
+let browserTransactionRuntime = null;
+
+function getBrowserTransactionRuntime() {
+  if (browserTransactionRuntime) return browserTransactionRuntime;
+  browserTransactionRuntime = createRemoteBrowserTransactionRuntime({
+    pageCommand: async (tabId, pageOperation, payload) => {
+      return await evaluate(tabId, browserTransactionPageExpression(pageOperation, payload));
+    },
+    getState: async (tabId) => {
+      const state = await mutationState(tabId);
+      return {
+        url: String(state?.url || ""),
+        documentIdentity: String(state?.documentGeneration || ""),
+      };
+    },
+    semanticClick: async ({ tabId, locator }) => {
+      const marker = `rt-semantic-click-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const marked = await evaluate(
+        tabId,
+        browserTransactionPageExpression("markSemanticClick", { locator, marker }),
+      );
+      if (!marked?.ok) {
+        const error = new Error(marked?.message || "Could not resolve semantic click target.");
+        error.code = marked?.code || "SEMANTIC_CLICK_TARGET_FAILED";
+        throw error;
+      }
+      const selector = `[data-repotunnel-semantic-click-marker="${marker}"]`;
+      try {
+        await cdpCommand(tabId, "DOM.enable");
+        const document = await cdpCommand(tabId, "DOM.getDocument", { depth: 1, pierce: true });
+        const rootNodeId = document?.root?.nodeId;
+        if (!Number.isInteger(rootNodeId)) throw new Error("Chrome did not return a DOM root node for semantic click fallback.");
+        const query = await cdpCommand(tabId, "DOM.querySelector", { nodeId: rootNodeId, selector });
+        const nodeId = query?.nodeId;
+        if (!Number.isInteger(nodeId) || nodeId <= 0) throw new Error("Semantic click target no longer exists.");
+        const described = await cdpCommand(tabId, "DOM.describeNode", { nodeId, depth: 0, pierce: true });
+        const backendNodeId = described?.node?.backendNodeId;
+        if (!Number.isInteger(backendNodeId) || backendNodeId <= 0) throw new Error("Chrome did not return a semantic click node identity.");
+        const frameTree = await cdpCommand(tabId, "Page.getFrameTree");
+        const expectedDocumentIdentity = semanticDocumentIdentity(frameTree, tabId);
+        await semanticClick(tabId, backendNodeId, expectedDocumentIdentity);
+        return {
+          ok: true,
+          verified: true,
+          operation: "semanticClick",
+          fallback: "semanticPointer",
+          tag: marked.tag || null,
+          id: marked.id || null,
+          name: marked.name || null,
+          role: marked.role || null,
+        };
+      } finally {
+        const cleanup = `(() => { for (const el of document.querySelectorAll(${JSON.stringify(selector)})) el.removeAttribute('data-repotunnel-semantic-click-marker'); return true; })()`;
+        await evaluate(tabId, cleanup).catch(() => undefined);
+      }
+    },
+    uploadFile: async ({ tabId, locator, workspaceRelativePath }) => {
+      if (!path.isAbsolute(workspaceRelativePath)) {
+        throw new Error("Resolved transaction upload path must be absolute.");
+      }
+      const marker = `rt-upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const marked = await evaluate(
+        tabId,
+        browserTransactionPageExpression("markUpload", { locator, marker }),
+      );
+      if (!marked?.ok) {
+        const error = new Error(marked?.message || "Could not resolve transaction upload target.");
+        error.code = marked?.code || "UPLOAD_TARGET_FAILED";
+        throw error;
+      }
+      const selector = `[data-repotunnel-upload-marker="${marker}"]`;
+      try {
+        try {
+          const result = await uploadFile(tabId, selector, workspaceRelativePath);
+          return { ok: true, verified: true, operation: "uploadFile", sizeBytes: result.sizeBytes };
+        } catch {
+          const error = new Error("Browser transaction upload failed after workspace validation.");
+          error.code = "UPLOAD_FAILED";
+          throw error;
+        }
+      } finally {
+        const cleanup = `(() => { for (const el of document.querySelectorAll(${JSON.stringify(selector)})) el.removeAttribute('data-repotunnel-upload-marker'); return true; })()`;
+        await evaluate(tabId, cleanup).catch(() => undefined);
+      }
+    },
+  });
+  return browserTransactionRuntime;
+}
+
 async function monitorTarget(tab, emit) {
   let socket;
   try {
@@ -1563,6 +1668,17 @@ async function executeOperation(currentOperation, currentArgs, emit = out) {
       out(cancelSemanticSequence(sequenceId));
       return;
     }
+    case "transaction": {
+      const plan = decodeJsonArg(args, 0, null);
+      if (!plan || typeof plan !== "object") throw new Error("Browser transaction plan is required.");
+      out(await getBrowserTransactionRuntime().execute(plan));
+      return;
+    }
+    case "transaction-cancel": {
+      const [transactionId] = args;
+      out(getBrowserTransactionRuntime().cancel(transactionId));
+      return;
+    }
     case "inspect": {
       const [tabId] = args;
       const selector = args[1] || "";
@@ -1634,6 +1750,30 @@ async function executeOperation(currentOperation, currentArgs, emit = out) {
       const result = await evaluate(tabId, expression);
       if (!result?.found) throw new Error("No page element was found at that preview position.");
       out(result);
+      return;
+    }
+    case "set-viewport": {
+      const tabId = args[0];
+      const width = Number(args[1]);
+      const height = Number(args[2]);
+      const clear = args[3] === "true";
+      if (!tabId) throw new Error("Managed tab ID is required for viewport emulation.");
+      if (clear) {
+        await cdpCommand(tabId, "Emulation.clearDeviceMetricsOverride");
+        out({ tabId, cleared: true, width: null, height: null });
+      } else {
+        if (!Number.isInteger(width) || width < 320 || width > 2560
+          || !Number.isInteger(height) || height < 480 || height > 1600) {
+          throw new Error("Viewport dimensions require width 320..2560 and height 480..1600 CSS px.");
+        }
+        await cdpCommand(tabId, "Emulation.setDeviceMetricsOverride", {
+          width, height, deviceScaleFactor: 1, mobile: width <= 600,
+        });
+        const actual = await evaluate(tabId,
+          "({width:window.innerWidth,height:window.innerHeight,devicePixelRatio:window.devicePixelRatio})");
+        out({ tabId, cleared: false, requestedWidth: width, requestedHeight: height,
+          actualViewport: actual });
+      }
       return;
     }
     case "screenshot": {
@@ -1710,7 +1850,9 @@ async function serve() {
       out({
         id,
         ok: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: requestedOperation === "transaction"
+          ? formatTransactionError(error)
+          : (error instanceof Error ? error.message : String(error)),
       });
     }
   };
@@ -1746,4 +1888,8 @@ async function main() {
   await executeOperation(operation, args, out);
 }
 
-main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+main().catch((error) => fail(
+  operation === "transaction"
+    ? formatTransactionError(error)
+    : (error instanceof Error ? error.message : String(error)),
+));

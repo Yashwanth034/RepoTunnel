@@ -12,8 +12,8 @@ use crate::{
     activity, ai_workspace,
     app_state::AppState,
     browser, changes, checkpoint, continuity, conversation, desktop_control, environment,
-    execution, filesystem, git, github, gmail_access, hardening, integrations, launcher, mcp_auth,
-    media_inspection,
+    execution, filesystem, git, github, gmail_access, hardening, integrations, large_project_read,
+    launcher, mcp_auth, media_inspection, mission,
     model_hub::{
         self, ModelHubSnapshot, ModelProviderId, ModelSelection, ModelTestResult, RuntimeStatus,
     },
@@ -41,14 +41,14 @@ use crate::{
     },
     monitoring, phone, project_context, project_index, project_memory, project_setup,
     public_tunnel::PublicTunnelProvider,
-    repository, semantic,
+    remote_access, remote_fleet, remote_view, repository, semantic,
     storage::{
         load_history_settings, load_workspaces, mutate_workspaces, save_ai_access_paused,
         save_history_settings,
     },
-    system_resources, team, temp_workspace, terminal, updates, versioning, video, video_assets,
-    video_director, video_narration, video_preview, video_production, video_qa, video_render,
-    video_scene, video_story_render, workflow,
+    system_resources, task_integrity, team, temp_workspace, terminal, updates, versioning, video,
+    video_assets, video_director, video_narration, video_preview, video_production, video_qa,
+    video_render, video_scene, video_story_render, workflow,
 };
 
 fn canonical_workspace_path(path: &str) -> Result<PathBuf, String> {
@@ -393,6 +393,30 @@ pub fn list_directory(
     filesystem::list_directory(&workspace, &relative_path)
 }
 
+/// The desktop Explorer reuses the existing workspace-scoped, time-budgeted
+/// cursor reader for directories that exceed the old 1,000-entry IPC limit.
+/// The blocking filesystem scan must not occupy Tauri's command async runtime.
+#[tauri::command]
+pub async fn list_directory_page(
+    app: AppHandle,
+    workspace_id: String,
+    relative_path: String,
+    cursor: Option<String>,
+    page_size: Option<usize>,
+) -> Result<large_project_read::DirectoryPage, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        large_project_read::list_directory_page(
+            &workspace,
+            &relative_path,
+            cursor.as_deref(),
+            page_size,
+        )
+    })
+    .await
+    .map_err(|error| format!("Directory page worker failed: {error}"))?
+}
+
 #[tauri::command]
 pub fn read_file(
     app: AppHandle,
@@ -469,6 +493,7 @@ pub fn editor_save_file(
     let outcome = changes::write_file(
         &app,
         &workspace,
+        changes::ChangeActor::LocalHuman,
         relative_path.clone(),
         content,
         Some(&group_id),
@@ -496,6 +521,7 @@ pub fn editor_create_file(
     let outcome = changes::create_file(
         &app,
         &workspace,
+        changes::ChangeActor::LocalHuman,
         relative_path.clone(),
         content,
         Some(&group_id),
@@ -522,6 +548,7 @@ pub fn editor_create_directory(
     let outcome = changes::create_directory(
         &app,
         &workspace,
+        changes::ChangeActor::LocalHuman,
         relative_path.clone(),
         true,
         Some(&group_id),
@@ -549,6 +576,7 @@ pub fn editor_rename_entry(
     let outcome = changes::rename_entry(
         &app,
         &workspace,
+        changes::ChangeActor::LocalHuman,
         relative_path.clone(),
         new_name.clone(),
         Some(&group_id),
@@ -576,6 +604,7 @@ pub fn editor_delete_entry(
     let outcome = changes::delete_entry(
         &app,
         &workspace,
+        changes::ChangeActor::LocalHuman,
         relative_path.clone(),
         recursive,
         Some(&group_id),
@@ -712,6 +741,76 @@ pub async fn get_resume_snapshot(
     })
     .await
     .map_err(|error| format!("Resume snapshot task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub fn get_task_integrity_status(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<task_integrity::LocalTaskIntegrityStatus, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    task_integrity::local_task_integrity_status(&app, &workspace.id)
+}
+
+#[tauri::command]
+pub fn approve_task_integrity_expansion(
+    app: AppHandle,
+    workspace_id: String,
+    expansion_id: String,
+) -> Result<task_integrity::LocalTaskIntegrityStatus, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    task_integrity::approve_scope_expansion_local(&app, &workspace, &expansion_id)?;
+    task_integrity::local_task_integrity_status(&app, &workspace.id)
+}
+
+#[tauri::command]
+pub fn reject_task_integrity_expansion(
+    app: AppHandle,
+    workspace_id: String,
+    expansion_id: String,
+) -> Result<task_integrity::LocalTaskIntegrityStatus, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    task_integrity::reject_scope_expansion_local(&app, &workspace.id, &expansion_id)?;
+    task_integrity::local_task_integrity_status(&app, &workspace.id)
+}
+
+#[tauri::command]
+pub fn cancel_task_integrity(
+    app: AppHandle,
+    workspace_id: String,
+    task_id: String,
+) -> Result<task_integrity::LocalTaskIntegrityStatus, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    task_integrity::cancel_task_local(&app, &workspace.id, &task_id)
+}
+
+#[tauri::command]
+pub fn list_scope_expansions(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<Vec<task_integrity::scope::ScopeExpansionRecord>, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    task_integrity::list_scope_expansions_for_workspace(&app, &workspace.id)
+}
+
+#[tauri::command]
+pub fn approve_scope_expansion(
+    app: AppHandle,
+    workspace_id: String,
+    expansion_id: String,
+) -> Result<task_integrity::ScopeExpansionOutcome, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    task_integrity::approve_scope_expansion_local(&app, &workspace, &expansion_id)
+}
+
+#[tauri::command]
+pub fn reject_scope_expansion(
+    app: AppHandle,
+    workspace_id: String,
+    expansion_id: String,
+) -> Result<task_integrity::scope::ScopeExpansionRecord, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    task_integrity::reject_scope_expansion_local(&app, &workspace.id, &expansion_id)
 }
 
 #[tauri::command]
@@ -1090,7 +1189,14 @@ pub fn create_file(
     content: String,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    changes::create_file(&app, &workspace, relative_path, content, None)
+    changes::create_file(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        relative_path,
+        content,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1101,7 +1207,14 @@ pub fn write_file(
     content: String,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    changes::write_file(&app, &workspace, relative_path, content, None)
+    changes::write_file(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        relative_path,
+        content,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1113,7 +1226,15 @@ pub fn patch_file(
     replacement: String,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    changes::patch_file(&app, &workspace, relative_path, expected, replacement, None)
+    changes::patch_file(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        relative_path,
+        expected,
+        replacement,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1124,7 +1245,14 @@ pub fn create_directory(
     recursive: bool,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    changes::create_directory(&app, &workspace, relative_path, recursive, None)
+    changes::create_directory(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        relative_path,
+        recursive,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1135,7 +1263,14 @@ pub fn rename_entry(
     new_name: String,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    changes::rename_entry(&app, &workspace, relative_path, new_name, None)
+    changes::rename_entry(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        relative_path,
+        new_name,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1146,7 +1281,14 @@ pub fn move_entry(
     destination_path: String,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    changes::move_entry(&app, &workspace, source_path, destination_path, None)
+    changes::move_entry(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        source_path,
+        destination_path,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1157,7 +1299,14 @@ pub fn delete_entry(
     recursive: bool,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    changes::delete_entry(&app, &workspace, relative_path, recursive, None)
+    changes::delete_entry(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        relative_path,
+        recursive,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -1641,7 +1790,7 @@ pub async fn restart_managed_process(
     tauri::async_runtime::spawn_blocking(move || {
         let record = terminal::get_process(&app, &process_id)?;
         let workspace = approved_workspace(&app, &record.workspace_id)?;
-        let restarted = terminal::restart_process(&app, &workspace, &process_id)?;
+        let restarted = terminal::restart_process(&app, &workspace, &process_id, None)?;
         activity::sync_process(&app, &restarted);
         Ok(restarted)
     })
@@ -1773,6 +1922,43 @@ pub async fn get_ai_workspace_status(
     })
     .await
     .map_err(|error| format!("AI Workspace status task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn list_ai_workspace_recovery_evidence(
+    app: AppHandle,
+    workspace_id: String,
+) -> Result<Vec<ai_workspace::AiWorkspaceRecoveryRecord>, String> {
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        ai_workspace::list_recovery_evidence(
+            &app_for_task,
+            &workspace_id,
+            std::path::Path::new(&workspace.path),
+        )
+    })
+    .await
+    .map_err(|error| format!("AI Workspace recovery review task could not complete: {error}"))?
+}
+
+#[tauri::command]
+pub async fn queue_ai_workspace_recovery_for_review(
+    app: AppHandle,
+    workspace_id: String,
+    receipt_id: String,
+) -> Result<Vec<String>, String> {
+    let app_for_task = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app_for_task, &workspace_id)?;
+        ai_workspace::queue_recovery_evidence_for_local_review(
+            &app_for_task,
+            &workspace,
+            &receipt_id,
+        )
+    })
+    .await
+    .map_err(|error| format!("AI Workspace recovery review request could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -1932,6 +2118,16 @@ pub fn launch_application(
 ) -> Result<LaunchActionOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
     launcher::request_launch_application(&app, &workspace, application_id)
+}
+
+#[tauri::command]
+pub fn launch_discovered_desktop_application(
+    app: AppHandle,
+    workspace_id: String,
+    application_id: String,
+) -> Result<LaunchActionOutcome, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    launcher::request_launch_desktop_application(&app, &workspace, application_id)
 }
 
 #[tauri::command]
@@ -2410,29 +2606,45 @@ pub async fn get_git_status(
 }
 
 #[tauri::command]
-pub fn get_git_diff(app: AppHandle, workspace_id: String, staged: bool) -> Result<GitDiff, String> {
-    let workspace = approved_workspace(&app, &workspace_id)?;
-    git::diff(&workspace, staged)
+pub async fn get_git_diff(
+    app: AppHandle,
+    workspace_id: String,
+    staged: bool,
+) -> Result<GitDiff, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app, &workspace_id)?;
+        git::diff(&workspace, staged)
+    })
+    .await
+    .map_err(|error| format!("Git diff task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn get_git_diff_check(
+pub async fn get_git_diff_check(
     app: AppHandle,
     workspace_id: String,
     staged: bool,
 ) -> Result<GitDiffCheck, String> {
-    let workspace = approved_workspace(&app, &workspace_id)?;
-    git::diff_check(&workspace, staged)
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app, &workspace_id)?;
+        git::diff_check(&workspace, staged)
+    })
+    .await
+    .map_err(|error| format!("Git diff validation task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn get_git_log(
+pub async fn get_git_log(
     app: AppHandle,
     workspace_id: String,
     limit: Option<usize>,
 ) -> Result<Vec<GitCommitSummary>, String> {
-    let workspace = approved_workspace(&app, &workspace_id)?;
-    git::recent_commits(&workspace, limit.unwrap_or(12))
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = approved_workspace(&app, &workspace_id)?;
+        git::recent_commits(&workspace, limit.unwrap_or(12))
+    })
+    .await
+    .map_err(|error| format!("Git history task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -2442,7 +2654,7 @@ pub fn request_git_stage(
     paths: Vec<String>,
 ) -> Result<GitActionRecord, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    git::request_stage(&app, &workspace, paths)
+    git::request_stage(&app, &workspace, paths, None)
 }
 
 #[tauri::command]
@@ -2452,7 +2664,7 @@ pub fn request_git_commit(
     message: String,
 ) -> Result<GitActionRecord, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    git::request_commit(&app, &workspace, message)
+    git::request_commit(&app, &workspace, message, None)
 }
 
 #[tauri::command]
@@ -2485,7 +2697,13 @@ pub fn request_git_restore_file(
     relative_path: String,
 ) -> Result<ChangeOutcome, String> {
     let workspace = approved_workspace(&app, &workspace_id)?;
-    git::request_restore_file(&app, &workspace, relative_path, None)
+    git::request_restore_file(
+        &app,
+        &workspace,
+        changes::ChangeActor::LocalHuman,
+        relative_path,
+        None,
+    )
 }
 
 #[tauri::command]
@@ -2857,8 +3075,10 @@ pub async fn validate_media_decode(
 }
 
 #[tauri::command]
-pub fn get_video_tools_status(app: AppHandle) -> Result<video::VideoToolsStatus, String> {
-    video::tools_status(&app)
+pub async fn get_video_tools_status(app: AppHandle) -> Result<video::VideoToolsStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || video::tools_status(&app))
+        .await
+        .map_err(|error| format!("Video helper status task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -2917,8 +3137,10 @@ pub fn cancel_video_analysis(job_id: String) -> Result<video::VideoAnalysisJob, 
 }
 
 #[tauri::command]
-pub fn clear_video_cache(app: AppHandle) -> Result<video::VideoToolsStatus, String> {
-    video::clear_cache(&app)
+pub async fn clear_video_cache(app: AppHandle) -> Result<video::VideoToolsStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || video::clear_cache(&app))
+        .await
+        .map_err(|error| format!("Video cache cleanup task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -3241,6 +3463,8 @@ pub fn start_video_project_recording(
         target.height,
         fps,
         max_seconds,
+        target.native_window_id.as_deref(),
+        target.native_session_id.as_deref(),
     )
 }
 
@@ -3493,6 +3717,1058 @@ pub async fn synthesize_video_project_narration(
     .map_err(|error| format!("Narration task could not complete: {error}"))?
 }
 
+// Remote-machine enrollment and revocation are desktop-only. Intentionally
+// NOT exposed through MCP tools, so an AI cannot mint/copy access credentials.
+#[tauri::command]
+pub fn issue_remote_machine_access(
+    app: AppHandle,
+    workspace_id: String,
+    scopes: Vec<String>,
+) -> Result<remote_access::Issued, String> {
+    remote_access::issue(&app, workspace_id, scopes)
+}
+
+#[tauri::command]
+pub fn revoke_remote_machine_access(app: AppHandle) -> Result<(), String> {
+    remote_access::revoke_all(&app)
+}
+/// Human native UI only; never exposed as an MCP tool.
+#[tauri::command]
+pub fn list_remote_machine_access_grants(
+    app: AppHandle,
+) -> Result<Vec<remote_access::GrantView>, String> {
+    remote_access::list_grants(&app)
+}
+/// Human native UI only; revoke exactly one grant by its full digest.
+#[tauri::command]
+pub fn revoke_remote_machine_access_grant(
+    app: AppHandle,
+    fingerprint: String,
+) -> Result<bool, String> {
+    remote_access::revoke_one(&app, &fingerprint)
+}
+
+/// Human-only local re-key; never exposed to remote credentials or AI MCP.
+#[tauri::command]
+pub fn rotate_remote_machine_access_grant(
+    app: AppHandle,
+    fingerprint: String,
+) -> Result<remote_access::Issued, String> {
+    remote_access::rotate_one(&app, &fingerprint)
+}
+
+#[tauri::command]
+pub async fn connect_remote_machine(
+    app: AppHandle,
+    name: String,
+    url: String,
+    credential: String,
+    remote_workspace_id: String,
+) -> Result<remote_fleet::NodeView, String> {
+    remote_fleet::connect(&app, name, url, credential, remote_workspace_id).await
+}
+
+#[tauri::command]
+pub async fn disconnect_remote_machine(node_id: String) -> Result<bool, String> {
+    Ok(remote_fleet::disconnect(&node_id).await)
+}
+/// Human-only re-pair with the rotated bearer, preserving the paired project.
+#[tauri::command]
+pub async fn reconnect_remote_machine(
+    node_id: String,
+    credential: String,
+) -> Result<remote_fleet::NodeView, String> {
+    remote_fleet::reconnect(&node_id, credential).await
+}
+
+/// Local public machine identity only; never exposes the signing key or bearer.
+#[tauri::command]
+pub fn get_local_remote_machine_identity(app: AppHandle) -> Result<String, String> {
+    remote_fleet::local_machine_identity_fingerprint(&app)
+}
+/// Human-only opt-in profile metadata. Saves no bearer and does not reopen a connection.
+#[tauri::command]
+pub fn list_remembered_remote_machines(
+    app: AppHandle,
+) -> Result<Vec<remote_fleet::RemoteProfile>, String> {
+    remote_fleet::list_profiles(&app)
+}
+#[tauri::command]
+pub async fn remember_remote_machine(
+    app: AppHandle,
+    node_id: String,
+) -> Result<remote_fleet::RemoteProfile, String> {
+    remote_fleet::remember_profile(&app, &node_id).await
+}
+#[tauri::command]
+pub fn forget_remembered_remote_machine(app: AppHandle, node_id: String) -> Result<bool, String> {
+    remote_fleet::forget_profile(&app, &node_id)
+}
+#[tauri::command]
+pub async fn list_remote_machines() -> Vec<remote_fleet::NodeView> {
+    remote_fleet::list().await
+}
+
+#[tauri::command]
+pub async fn probe_remote_machine(node_id: String) -> Result<remote_fleet::NodeProbe, String> {
+    remote_fleet::probe(&node_id).await
+}
+/// Human-only, read-only capacity check using the selected process-scoped
+/// project grant. Does not launch native apps or install SDKs.
+#[tauri::command]
+pub async fn inspect_remote_machine_capacity(
+    node_id: String,
+) -> Result<remote_fleet::CapacityProbe, String> {
+    remote_fleet::inspect_capacity(&node_id).await
+}
+/// Human-only, paginated SHA-256 source-difference preview. The local
+/// project must already be approved and the remote target comes from the
+/// human-paired node; no AI ownership claim or project writes are performed.
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Desktop source review requires explicit node, project, inventory, and all three machine session binding dimensions"
+)]
+pub async fn preview_remote_source_diff_desktop(
+    app: AppHandle,
+    local_workspace_id: String,
+    node_id: String,
+    expected_source_sha256: Option<String>,
+    cursor_index: Option<usize>,
+    expected_machine_identity: String,
+    expected_connection_time: u64,
+    expected_connection_nonce: String,
+) -> Result<crate::remote_project_sync::SourceAudit, String> {
+    let workspace = crate::storage::load_workspaces(&app)?
+        .into_iter()
+        .find(|item| item.id == local_workspace_id)
+        .ok_or_else(|| {
+            "Choose an already approved local workspace for source comparison.".to_string()
+        })?;
+    let remote_workspace = remote_fleet::desktop_paired_workspace(&node_id).await?;
+    crate::remote_project_sync::audit(crate::remote_project_sync::AuditOptions {
+        workspace,
+        node: node_id,
+        remote_workspace,
+        owner: String::new(),
+        local_desktop: true,
+        expected_machine_identity: Some(expected_machine_identity),
+        expected_connection_time: Some(expected_connection_time),
+        expected_connection_nonce: Some(expected_connection_nonce),
+        expected_source_sha: expected_source_sha256,
+        cursor_index: cursor_index.unwrap_or(0),
+        max_files: Some(8),
+    })
+    .await
+}
+/// Human explicitly requests a fresh one-shot no-write preflight for up to
+/// eight proposed missing files from the current complete source review.
+/// Neither this command nor its receipt grants source-import authority.
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Human create-only preflight explicitly binds approved project, exact paired session, and bounded source proposals"
+)]
+pub async fn preflight_remote_create_only_desktop(
+    app: AppHandle,
+    local_workspace_id: String,
+    node_id: String,
+    expected_source_sha256: String,
+    expected_machine_identity: String,
+    expected_connection_time: u64,
+    expected_connection_nonce: String,
+    proposed: Vec<crate::remote_project_sync::ProposedSourceFile>,
+) -> Result<crate::remote_project_sync::CreateOnlyPreflight, String> {
+    let workspace = crate::storage::load_workspaces(&app)?
+        .into_iter()
+        .find(|item| item.id == local_workspace_id)
+        .ok_or_else(|| "Choose an approved local workspace for source preflight.".to_string())?;
+    let remote_workspace = remote_fleet::desktop_paired_workspace(&node_id).await?;
+    crate::remote_project_sync::preflight_create_only(
+        crate::remote_project_sync::CreateOnlyPreflightOptions {
+            workspace,
+            node: node_id,
+            remote_workspace,
+            expected_machine_identity,
+            expected_connection_time,
+            expected_connection_nonce,
+            expected_source_sha: expected_source_sha256,
+            proposed,
+        },
+    )
+    .await
+}
+/// Human desktop review only: record immutable proposed create-only file
+/// identities after a NEW read-only receiver preflight. This records no grant,
+/// launches no transfer, and never impersonates an AI owner.
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Exact human review intent must bind project, pairing, source and proposed files"
+)]
+pub async fn record_remote_source_review_intent_desktop(
+    app: AppHandle,
+    local_workspace_id: String,
+    node_id: String,
+    expected_source_sha256: String,
+    expected_machine_identity: String,
+    expected_connection_time: u64,
+    expected_connection_nonce: String,
+    proposed: Vec<crate::remote_project_sync::ProposedSourceFile>,
+) -> Result<crate::remote_source_intent::Intent, String> {
+    let workspace = crate::storage::load_workspaces(&app)?
+        .into_iter()
+        .find(|item| item.id == local_workspace_id)
+        .ok_or_else(|| "Choose an approved local workspace for source review.".to_string())?;
+    let remote_workspace = remote_fleet::desktop_paired_workspace(&node_id).await?;
+    crate::remote_project_sync::record_human_review_intent(
+        &app,
+        crate::remote_project_sync::CreateOnlyPreflightOptions {
+            workspace,
+            node: node_id,
+            remote_workspace,
+            expected_machine_identity,
+            expected_connection_time,
+            expected_connection_nonce,
+            expected_source_sha: expected_source_sha256,
+            proposed,
+        },
+    )
+    .await
+}
+
+/// Read-only local receipt recovery after a lost desktop command response.
+/// Records do not permit dispatching mutations or connecting other machines.
+#[tauri::command]
+pub fn list_remote_source_review_intents_desktop(
+    app: AppHandle,
+) -> Result<Vec<crate::remote_source_intent::Intent>, String> {
+    crate::remote_source_intent::list(&app)
+}
+
+/// Human desktop only: inspect exact previously reviewed file hashes on the
+/// unchanged pairing using receiver READ-ONLY file-status MCP. The presence of
+/// identical content is not proof that any import was executed.
+#[tauri::command]
+pub async fn reconcile_remote_source_review_intent_desktop(
+    app: AppHandle,
+    intent_id: String,
+) -> Result<crate::remote_project_sync::HumanIntentReconciliation, String> {
+    let intent = crate::remote_source_intent::list(&app)?
+        .into_iter()
+        .find(|entry| entry.id == intent_id)
+        .ok_or_else(|| "Saved human source review intent not found.".to_string())?;
+    let workspace = crate::storage::load_workspaces(&app)?
+        .into_iter()
+        .find(|workspace| workspace.id == intent.local_workspace_id)
+        .ok_or_else(|| {
+            "The original approved local source project is no longer available.".to_string()
+        })?;
+    let destination = remote_fleet::desktop_paired_workspace(&intent.node_id).await?;
+    if destination != intent.remote_workspace_id {
+        return Err("The remote machine is now paired to a different destination; saved review evidence is historical only.".into());
+    }
+    let remembered = intent.clone();
+    let observation =
+        crate::remote_project_sync::reconcile_human_review_intent(workspace, intent).await?;
+    // The operator may withdraw a review from another instance while MCP
+    // replies are arriving. Re-load the authoritative primary journal before
+    // presenting the result; never resurrect a withdrawn proposal as pending.
+    let still_pending = crate::remote_source_intent::list(&app)?
+        .into_iter()
+        .any(|current| {
+            current.id == remembered.id
+                && current.state == "awaitingReceiverApproval"
+                && current.local_workspace_id == remembered.local_workspace_id
+                && current.remote_workspace_id == remembered.remote_workspace_id
+                && current.node_id == remembered.node_id
+                && current.machine_identity_fingerprint == remembered.machine_identity_fingerprint
+                && current.connection_nonce == remembered.connection_nonce
+                && current.connected_at == remembered.connected_at
+                && current.source_fingerprint == remembered.source_fingerprint
+                && current.proposed.len() == remembered.proposed.len()
+                && current
+                    .proposed
+                    .iter()
+                    .zip(&remembered.proposed)
+                    .all(|(left, right)| {
+                        left.path == right.path
+                            && left.sha256 == right.sha256
+                            && left.bytes == right.bytes
+                    })
+        });
+    if !still_pending {
+        return Err("Saved source review changed or was withdrawn during read-only reconciliation. Discard all old receiver status evidence.".into());
+    }
+    Ok(observation)
+}
+
+/// Resolve the receiving desktop's independent approval ONLY through the
+/// original bound machine credential, signing identity and saved human review.
+/// It does not authorize, stage, retry, or install source files.
+#[tauri::command]
+pub async fn inspect_remote_receiver_source_approval_desktop(
+    app: AppHandle,
+    intent_id: String,
+    approval_id: String,
+) -> Result<serde_json::Value, String> {
+    let intent = crate::remote_source_intent::list(&app)?
+        .into_iter()
+        .find(|receipt| receipt.id == intent_id && receipt.state == "awaitingReceiverApproval")
+        .ok_or_else(|| {
+            "Only an original pending source review can query receiver approval.".to_string()
+        })?;
+    let local_identity = remote_fleet::local_machine_identity_fingerprint(&app)?;
+    let result = remote_fleet::desktop_receiver_approval_status_bound(
+        &intent.node_id,
+        &approval_id,
+        &intent.remote_workspace_id,
+        (
+            &intent.machine_identity_fingerprint,
+            intent.connected_at,
+            &intent.connection_nonce,
+        ),
+    )
+    .await?;
+    let binding = result.get("reviewBinding").ok_or_else(|| {
+        "Receiver did not bind its approval to an exact signed review.".to_string()
+    })?;
+    if binding
+        .get("sourceReviewId")
+        .and_then(serde_json::Value::as_str)
+        != Some(intent.id.as_str())
+        || binding
+            .get("coordinatorMachineFingerprint")
+            .and_then(serde_json::Value::as_str)
+            != Some(local_identity.as_str())
+        || binding
+            .get("coordinatorWorkspaceId")
+            .and_then(serde_json::Value::as_str)
+            != Some(intent.local_workspace_id.as_str())
+        || binding
+            .get("coordinatorSourceFingerprint")
+            .and_then(serde_json::Value::as_str)
+            != Some(intent.source_fingerprint.as_str())
+    {
+        return Err("Receiving computer responded with approval for a different signed source, originating project, or coordinator installation.".into());
+    }
+    let files = result
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Receiver approval omitted the exact reviewed file batch.".to_string())?;
+    if files.len() != intent.proposed.len()
+        || files.iter().zip(&intent.proposed).any(|(item, expected)| {
+            item.get("path").and_then(serde_json::Value::as_str) != Some(expected.path.as_str())
+                || item
+                    .get("expectedSha256")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(expected.sha256.as_str())
+                || item
+                    .get("expectedBytes")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(expected.bytes)
+        })
+    {
+        return Err("Receiver approval file list differs from the exact human-reviewed paths, sizes or hashes.".into());
+    }
+    // A saved sender import reservation must reconcile to its EXACT original
+    // receiver transfer task. Matching bytes from a different task cannot
+    // become a proven result for this human-owned import.
+    if let Some(attempt) = &intent.import_attempt {
+        if attempt.approval_id != approval_id
+            || matches!(
+                result.get("state").and_then(serde_json::Value::as_str),
+                Some("imported" | "dispatchUnknown")
+            ) && result
+                .get("importTaskId")
+                .and_then(serde_json::Value::as_str)
+                != Some(attempt.task_id.as_str())
+        {
+            return Err("The receiver's one-shot staging task does not match the original saved human import attempt.".into());
+        }
+    }
+    // A user might withdraw their local review while the network request is
+    // pending. Never show the answer as current receiver authorization then.
+    if !crate::remote_source_intent::list(&app)?.iter().any(|item| {
+        item.id == intent.id
+            && item.state == "awaitingReceiverApproval"
+            && item.connection_nonce == intent.connection_nonce
+            && item.source_fingerprint == intent.source_fingerprint
+            && item.proposed.len() == intent.proposed.len()
+            && item
+                .proposed
+                .iter()
+                .zip(&intent.proposed)
+                .all(|(a, b)| a.path == b.path && a.sha256 == b.sha256 && a.bytes == b.bytes)
+    }) {
+        return Err(
+            "Saved coordinator source review changed while receiver approval was inspected.".into(),
+        );
+    }
+    Ok(result)
+}
+
+/// A successful mutation ACK alone is not proof of durable installation.
+/// Require an independently fetched, task-correlated receiver journal receipt
+/// and matching current bytes for the ENTIRE signed batch before upgrading
+/// the sender's one-shot journal from dispatchUnknown to imported.
+fn verified_human_import_observation(
+    inspection: &serde_json::Value,
+    approval_id: &str,
+    task_id: &str,
+    expected_files: usize,
+) -> bool {
+    inspection
+        .get("approvalId")
+        .and_then(serde_json::Value::as_str)
+        == Some(approval_id)
+        && inspection.get("state").and_then(serde_json::Value::as_str) == Some("imported")
+        && inspection
+            .get("importTaskId")
+            .and_then(serde_json::Value::as_str)
+            == Some(task_id)
+        && inspection
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|files| {
+                files.len() == expected_files
+                    && files.iter().all(|file| {
+                        file.get("status").and_then(serde_json::Value::as_str)
+                            == Some("matchingBytes")
+                    })
+            })
+}
+
+fn verified_human_import_completion(
+    mutation: &serde_json::Value,
+    inspection: &serde_json::Value,
+    approval_id: &str,
+    task_id: &str,
+    expected_files: usize,
+) -> bool {
+    mutation
+        .get("approvalId")
+        .and_then(serde_json::Value::as_str)
+        == Some(approval_id)
+        && mutation.get("state").and_then(serde_json::Value::as_str) == Some("imported")
+        && mutation
+            .get("importedFiles")
+            .and_then(serde_json::Value::as_u64)
+            == u64::try_from(expected_files).ok()
+        && verified_human_import_observation(inspection, approval_id, task_id, expected_files)
+}
+
+/// Human desktop action: transfer only the exact independently approved
+/// source manifest to the original paired receiver, then spend its one-shot
+/// receipt on a create-only import. Never delegate this to an AI owner key.
+#[tauri::command]
+pub async fn import_approved_remote_source_desktop(
+    app: AppHandle,
+    intent_id: String,
+    approval_id: String,
+) -> Result<serde_json::Value, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use sha2::{Digest, Sha256};
+    use tauri::Emitter;
+    let intent = crate::remote_source_intent::list(&app)?
+        .into_iter()
+        .find(|item| item.id == intent_id && item.state == "awaitingReceiverApproval")
+        .ok_or_else(|| {
+            "Only a current explicitly reviewed local human source intent may be imported."
+                .to_string()
+        })?;
+    // Reuse the separately authenticated receiver inspection's exact signed
+    // manifest checks before dispatching ANY source bytes.
+    let checked = inspect_remote_receiver_source_approval_desktop(
+        app.clone(),
+        intent_id.clone(),
+        approval_id.clone(),
+    )
+    .await?;
+    if checked.get("state").and_then(serde_json::Value::as_str) != Some("approved")
+        || checked
+            .get("humanImportSupported")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || checked
+            .get("canStillProposeCreateOnly")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || checked
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|files| {
+                files.len() != intent.proposed.len()
+                    || files.iter().any(|file| {
+                        file.get("status").and_then(serde_json::Value::as_str) != Some("missing")
+                    })
+            })
+    {
+        return Err("Receiver approval is not active or destinations are no longer all missing. No transfer started.".into());
+    }
+    let workspace = crate::storage::load_workspaces(&app)?
+        .into_iter()
+        .find(|workspace| workspace.id == intent.local_workspace_id)
+        .ok_or_else(|| "Originating source workspace no longer approved.".to_string())?;
+    let inventory =
+        tokio::task::spawn_blocking(move || crate::remote_snapshot::manifest(&workspace))
+            .await
+            .map_err(|_| "Source inventory task failed.".to_string())??;
+    if inventory.incomplete || inventory.fingerprint_sha256 != intent.source_fingerprint {
+        return Err(
+            "Source project inventory changed since human approval; re-review exact files.".into(),
+        );
+    }
+    let entries = intent
+        .proposed
+        .iter()
+        .map(|file| {
+            inventory
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.path == file.path
+                        && entry.sha256 == file.sha256
+                        && entry.bytes == file.bytes
+                })
+                .cloned()
+                .ok_or_else(|| format!("Approved source '{}' changed or disappeared.", file.path))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let workspace = crate::storage::load_workspaces(&app)?
+        .into_iter()
+        .find(|workspace| workspace.id == intent.local_workspace_id)
+        .ok_or_else(|| "Originating source workspace no longer approved.".to_string())?;
+    let sender_attempt =
+        crate::remote_source_intent::begin_human_import_attempt(&app, &intent_id, &approval_id)?;
+    let task_id = sender_attempt.task_id;
+    let pairing = (
+        intent.machine_identity_fingerprint.as_str(),
+        intent.connected_at,
+        intent.connection_nonce.as_str(),
+    );
+    let call = |name: &'static str, args: serde_json::Value| {
+        crate::remote_fleet::desktop_human_source_call_bound(
+            &intent.node_id,
+            &intent.remote_workspace_id,
+            pairing,
+            name,
+            args,
+        )
+    };
+    // A stage failure cannot have installed a file: the executable final
+    // import RPC is below this bounded staging block.
+    let stage_result: Result<(Vec<serde_json::Value>, u64, u64), String> = async {
+    let task_args = serde_json::json!({
+        "workspace_id":intent.remote_workspace_id,"approval_id":approval_id,"task_id":task_id,
+    });
+    let stage = match call("create_machine_source_import_stage", task_args.clone()).await {
+        Ok(receipt) => receipt,
+        Err(error) => call("inspect_machine_source_import_task", task_args).await
+            .map_err(|inspection| format!(
+                "Source task create acknowledgement lost or rejected ({error}); existing owned task cannot be verified read-only ({inspection}). No installation dispatched."
+            ))?,
+    };
+    if stage.get("taskId").and_then(serde_json::Value::as_str) != Some(&task_id) {
+        return Err("Receiver did not acknowledge the exact owned source stage. No install sent.".into());
+    }
+    let mut bindings = Vec::with_capacity(entries.len());
+    let mut sent_bytes = 0u64;
+    let total_bytes: u64 = entries.iter().map(|entry| entry.bytes).sum();
+    for entry in &entries {
+        let digest = Sha256::digest(format!("{}\n{}", task_id, entry.path).as_bytes());
+        let file_id = digest[..16].iter().map(|part| format!("{part:02x}")).collect::<String>();
+        if entry.bytes == 0 {
+            let chunk_sha = Sha256::digest(b"").iter()
+                .map(|part| format!("{part:02x}")).collect::<String>();
+            let ack = match call("stage_machine_source_import_chunk", serde_json::json!({
+                "workspace_id":intent.remote_workspace_id,"approval_id":approval_id,
+                "task_id":task_id,"relative_path":entry.path,"file_id":file_id,"total_bytes":0,
+                "sha256":entry.sha256,"offset":0,"chunk_sha256":chunk_sha,
+                "data_base64":"",
+            })).await {
+                Ok(receipt) => receipt,
+                Err(error) => call("inspect_machine_source_import_chunk", serde_json::json!({
+                    "workspace_id":intent.remote_workspace_id,"approval_id":approval_id,
+                    "task_id":task_id,"relative_path":entry.path,"file_id":file_id,"total_bytes":0,
+                    "sha256":entry.sha256,"offset":0,"length":0,
+                })).await.map_err(|inspection| format!(
+                    "Empty source stage acknowledgement uncertain ({error}); exact receiver checkpoint inspection failed ({inspection}). No install dispatched."
+                ))?,
+            };
+            if ack.get("fileId").and_then(serde_json::Value::as_str) != Some(file_id.as_str())
+                || ack.get("completed").and_then(serde_json::Value::as_bool) != Some(true)
+                || ack.get("sha256").and_then(serde_json::Value::as_str) != Some(entry.sha256.as_str()) {
+                return Err("Receiver did not confirm the exact verified empty file stage.".into());
+            }
+        }
+        let mut offset = 0u64;
+        while offset < entry.bytes {
+            let local = workspace.clone();
+            let current = entry.clone();
+            let blocks = tokio::task::spawn_blocking(move ||
+                crate::remote_snapshot::verified_source_chunks(&local, &current, offset, 8))
+                .await.map_err(|_| "Approved source reading task failed.".to_string())??;
+            if blocks.is_empty() {
+                return Err("Approved source bytes could not be read completely.".into());
+            }
+            for block in blocks {
+                let end = offset + block.len() as u64;
+                let chunk_sha = Sha256::digest(&block).iter()
+                    .map(|part| format!("{part:02x}")).collect::<String>();
+                let (receipt, recovered) = match call("stage_machine_source_import_chunk", serde_json::json!({
+                    "workspace_id":intent.remote_workspace_id,"approval_id":approval_id,
+                    "task_id":task_id,"relative_path":entry.path,"file_id":file_id,"total_bytes":entry.bytes,
+                    "sha256":entry.sha256,"offset":offset,"chunk_sha256":chunk_sha,
+                    "data_base64":STANDARD.encode(&block),
+                })).await {
+                    Ok(receipt) => (receipt, false),
+                    Err(error) => (
+                        call("inspect_machine_source_import_chunk", serde_json::json!({
+                            "workspace_id":intent.remote_workspace_id,"approval_id":approval_id,
+                            "task_id":task_id,"relative_path":entry.path,"file_id":file_id,
+                            "total_bytes":entry.bytes,"sha256":entry.sha256,
+                            "offset":offset,"length":block.len(),
+                        })).await.map_err(|inspection| format!(
+                            "Source chunk acknowledgement uncertain ({error}); read-only proof unavailable ({inspection}). No installation dispatched."
+                        ))?, true
+                    ),
+                };
+                if receipt.get("taskId").and_then(serde_json::Value::as_str) != Some(task_id.as_str())
+                    || receipt.get("fileId").and_then(serde_json::Value::as_str) != Some(file_id.as_str())
+                    || !receipt.get("receivedBytes").and_then(serde_json::Value::as_u64)
+                        .is_some_and(|received| if recovered { received >= end } else { received == end })
+                    || receipt.get("totalBytes").and_then(serde_json::Value::as_u64) != Some(entry.bytes)
+                    || receipt.get("sha256").and_then(serde_json::Value::as_str) != Some(entry.sha256.as_str())
+                    || (recovered && receipt.get("chunkSha256").and_then(serde_json::Value::as_str)
+                        != Some(chunk_sha.as_str()))
+                    || (end == entry.bytes
+                        && receipt.get("completed").and_then(serde_json::Value::as_bool) != Some(true)) {
+                    return Err("Receiver did not prove this exact signed, owned and durable source chunk. No import dispatched.".into());
+                }
+                sent_bytes += block.len() as u64;
+                offset = end;
+                let _ = app.emit("human-source-import-progress", serde_json::json!({
+                    "intentId":intent.id,"taskId":task_id,"path":entry.path,
+                    "sentBytes":sent_bytes,"totalBytes":total_bytes,
+                    "phase":"staging",
+                }));
+            }
+        }
+        bindings.push(serde_json::json!({"path":entry.path,"file_id":file_id}));
+    }
+    Ok((bindings, sent_bytes, total_bytes))
+    }.await;
+    let (bindings, sent_bytes, total_bytes) = match stage_result {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = crate::remote_source_intent::advance_human_import_attempt(
+                &app,
+                &intent.id,
+                &approval_id,
+                &task_id,
+                "failedBeforeInstall",
+                0,
+            );
+            return Err(error);
+        }
+    };
+    // Re-check the entire originating project AFTER streaming and BEFORE
+    // spending the one-shot import. Files (including zero-byte files) may
+    // have changed while earlier 256 KiB chunks were being transmitted.
+    // A matching staged hash alone cannot prove the current human-reviewed
+    // source still represents the original project snapshot.
+    let recheck_workspace = workspace.clone();
+    let current_snapshot =
+        tokio::task::spawn_blocking(move || crate::remote_snapshot::manifest(&recheck_workspace))
+            .await
+            .map_err(|_| "Final source snapshot verification task failed.".to_string())??;
+    if current_snapshot.incomplete
+        || current_snapshot.fingerprint_sha256 != intent.source_fingerprint
+        || entries.iter().any(|file| {
+            !current_snapshot.entries.iter().any(|actual| {
+                actual.path == file.path
+                    && actual.bytes == file.bytes
+                    && actual.sha256 == file.sha256
+            })
+        })
+    {
+        let _ = crate::remote_source_intent::advance_human_import_attempt(
+            &app,
+            &intent.id,
+            &approval_id,
+            &task_id,
+            "failedBeforeInstall",
+            0,
+        );
+        return Err("Original source changed during transfer. Receiver staging remains inert; NO installation requested. Re-review before a new import.".into());
+    }
+    // A withdrawal or credential/pairing change while staging must halt the
+    // irreversible operation. The receiving side independently rechecks too.
+    if !crate::remote_source_intent::list(&app)?
+        .iter()
+        .any(|entry| {
+            entry.id == intent.id
+                && entry.state == "awaitingReceiverApproval"
+                && entry.connection_nonce == intent.connection_nonce
+                && entry.source_fingerprint == intent.source_fingerprint
+        })
+    {
+        return Err(
+            "Coordinator human source intent withdrawn during staging; no import dispatched."
+                .into(),
+        );
+    }
+    // Durably mark the sender's one-shot import as UNKNOWN BEFORE calling
+    // the receiver. Losing the ACK or crashing cannot remove this barrier.
+    crate::remote_source_intent::advance_human_import_attempt(
+        &app,
+        &intent.id,
+        &approval_id,
+        &task_id,
+        "dispatchUnknown",
+        0,
+    )?;
+    let _ = app.emit(
+        "human-source-import-progress",
+        serde_json::json!({
+            "intentId":intent.id,"taskId":task_id,"sentBytes":sent_bytes,
+            "totalBytes":total_bytes,"phase":"installing",
+        }),
+    );
+    // From this call onward a missing network acknowledgement means UNKNOWN,
+    // never an opportunity to send the mutation again.
+    let result = call(
+        "execute_machine_source_import",
+        serde_json::json!({
+            "workspace_id":intent.remote_workspace_id,"approval_id":approval_id,
+            "task_id":task_id,"files":bindings,
+        }),
+    )
+    .await;
+    let response = match result {
+        Ok(value)
+            if value.get("approvalId").and_then(serde_json::Value::as_str)
+                == Some(approval_id.as_str())
+                && matches!(
+                    value.get("state").and_then(serde_json::Value::as_str),
+                    Some("imported" | "dispatchUnknown")
+                ) =>
+        {
+            value
+        }
+        Ok(_) | Err(_) => serde_json::json!({
+            "approvalId":approval_id,"state":"dispatchUnknown","importedFiles":0,
+            "note":"Receiver import acknowledgement was lost, rejected or invalid. The one-shot operation may have executed. Inspect original receiving computer; NEVER replay.",
+        }),
+    };
+    let response = if response.get("state").and_then(serde_json::Value::as_str) == Some("imported")
+    {
+        // Do not trust the final RPC alone: the receiver must INDEPENDENTLY
+        // expose the same durable completion reservation and current exact
+        // SHA-256 for every file through its read-only machine-scoped API.
+        // Network loss or hash drift here leaves the sender UNKNOWN forever
+        // until the user chooses a separate read-only reconciliation.
+        let inspected = inspect_remote_receiver_source_approval_desktop(
+            app.clone(),
+            intent_id.clone(),
+            approval_id.clone(),
+        )
+        .await;
+        if inspected.as_ref().is_ok_and(|observed| {
+            verified_human_import_completion(
+                &response,
+                observed,
+                &approval_id,
+                &task_id,
+                intent.proposed.len(),
+            )
+        }) && crate::remote_source_intent::advance_human_import_attempt(
+            &app,
+            &intent.id,
+            &approval_id,
+            &task_id,
+            "imported",
+            intent.proposed.len(),
+        )
+        .is_ok()
+        {
+            response
+        } else {
+            serde_json::json!({
+                "approvalId":approval_id,"state":"dispatchUnknown","importedFiles":0,
+                "note":"Receiver import ACK was not independently corroborated by the original signed approval, one-shot task, and every current destination hash. Outcome UNKNOWN; inspect receiver read-only; NEVER replay.",
+            })
+        }
+    } else {
+        response
+    };
+    // This task ID comes from the sender's durable reservation, never an
+    // unauthenticated remote claim. Return it so the UI can cross-check the
+    // receiver's independent read-only completion journal immediately.
+    let mut response = response;
+    if let Some(receipt) = response.as_object_mut() {
+        receipt.insert("taskId".into(), serde_json::Value::String(task_id.clone()));
+    }
+    let _ = app.emit("human-source-import-progress", serde_json::json!({
+        "intentId":intent.id,"taskId":task_id,"sentBytes":sent_bytes,
+        "totalBytes":total_bytes,"phase":response.get("state").and_then(serde_json::Value::as_str),
+    }));
+    Ok(response)
+}
+
+/// Explicit human reconciliation of a lost final import ACK. This performs
+/// only a fresh receiver READ, never stage/create/execute/retry. A valid
+/// original durable receiver receipt and all matching current file hashes
+/// may safely update the coordinating desktop's LOCAL saved journal.
+#[tauri::command]
+pub async fn reconcile_verified_remote_source_import_desktop(
+    app: AppHandle,
+    intent_id: String,
+) -> Result<crate::remote_source_intent::HumanImportAttempt, String> {
+    let intent = crate::remote_source_intent::list(&app)?
+        .into_iter()
+        .find(|item| item.id == intent_id && item.state == "awaitingReceiverApproval")
+        .ok_or_else(|| "Original human source review is no longer pending.".to_string())?;
+    let attempt = intent.import_attempt.as_ref()
+        .filter(|attempt| attempt.state == "dispatchUnknown")
+        .ok_or_else(|| "Only an existing UNKNOWN one-shot import can be reconciled; no new import may be created.".to_string())?;
+    let observed = inspect_remote_receiver_source_approval_desktop(
+        app.clone(),
+        intent_id.clone(),
+        attempt.approval_id.clone(),
+    )
+    .await?;
+    if !verified_human_import_observation(
+        &observed,
+        &attempt.approval_id,
+        &attempt.task_id,
+        intent.proposed.len(),
+    ) {
+        return Err("Receiver does not prove the original one-shot imported task and every approved destination hash. Local receipt stays UNKNOWN; NEVER replay.".into());
+    }
+    // Receipt persistence is itself a conditional, exact-state local mutation;
+    // a simultaneous withdrawal, reconnect, or modified journal fails closed.
+    crate::remote_source_intent::advance_human_import_attempt(
+        &app,
+        &intent_id,
+        &attempt.approval_id,
+        &attempt.task_id,
+        "imported",
+        intent.proposed.len(),
+    )
+}
+
+/// Sign only a freshly rechecked, pending, exact create-only proposal with
+/// this coordinator installation's Ed25519 key. This is an out-of-band review
+/// assertion, NOT a receiver authorization or an import capability.
+#[tauri::command]
+pub async fn export_signed_incoming_source_review_desktop(
+    app: AppHandle,
+    intent_id: String,
+) -> Result<crate::remote_source_review_proof::SignedReview, String> {
+    let intent = crate::remote_source_intent::list(&app)?
+        .into_iter()
+        .find(|receipt| receipt.id == intent_id && receipt.state == "awaitingReceiverApproval"
+            && receipt.import_attempt.is_none())
+        .ok_or_else(|| "Only an unused pending human source review may be exported. Import has already been attempted or consumed.".to_string())?;
+    let workspace = crate::storage::load_workspaces(&app)?
+        .into_iter()
+        .find(|workspace| workspace.id == intent.local_workspace_id)
+        .ok_or_else(|| "Original approved source workspace is unavailable.".to_string())?;
+    let remote = remote_fleet::desktop_paired_workspace(&intent.node_id).await?;
+    if remote != intent.remote_workspace_id {
+        return Err("Receiver project pairing changed before signed review export.".into());
+    }
+    let _preflight = crate::remote_project_sync::preflight_create_only(
+        crate::remote_project_sync::CreateOnlyPreflightOptions {
+            workspace,
+            node: intent.node_id.clone(),
+            remote_workspace: intent.remote_workspace_id.clone(),
+            expected_machine_identity: intent.machine_identity_fingerprint.clone(),
+            expected_connection_time: intent.connected_at,
+            expected_connection_nonce: intent.connection_nonce.clone(),
+            expected_source_sha: intent.source_fingerprint.clone(),
+            proposed: intent.proposed.clone(),
+        },
+    )
+    .await?;
+    // The review might have been withdrawn while the independent remote
+    // source checks ran. Never sign historical or withdrawn evidence.
+    let newest = crate::remote_source_intent::list(&app)?
+        .into_iter()
+        .find(|receipt| receipt.id == intent.id)
+        .ok_or_else(|| "Original source review was removed during export.".to_string())?;
+    if newest.state != "awaitingReceiverApproval"
+        || newest.local_workspace_id != intent.local_workspace_id
+        || newest.remote_workspace_id != intent.remote_workspace_id
+        || newest.node_id != intent.node_id
+        || newest.machine_identity_fingerprint != intent.machine_identity_fingerprint
+        || newest.connected_at != intent.connected_at
+        || newest.connection_nonce != intent.connection_nonce
+        || newest.source_fingerprint != intent.source_fingerprint
+        || newest.proposed.len() != intent.proposed.len()
+        || !newest
+            .proposed
+            .iter()
+            .zip(&intent.proposed)
+            .all(|(left, right)| {
+                left.path == right.path && left.sha256 == right.sha256 && left.bytes == right.bytes
+            })
+    {
+        return Err("Human source review changed or was withdrawn during signed export.".into());
+    }
+    if remote_fleet::connection_nonce(&intent.node_id).await? != intent.connection_nonce {
+        return Err(
+            "Remote connection generation changed after signed source review recheck.".into(),
+        );
+    }
+    let local_identity = remote_fleet::local_machine_identity_fingerprint(&app)?;
+    let body = crate::remote_source_review_proof::Body::from_intent(&intent, local_identity);
+    crate::remote_source_review_proof::sign(&app, body)
+}
+
+/// Human desktop withdraws an unexecuted local proposal; this never calls MCP.
+#[tauri::command]
+pub fn withdraw_remote_source_review_intent_desktop(
+    app: AppHandle,
+    intent_id: String,
+) -> Result<crate::remote_source_intent::Intent, String> {
+    crate::remote_source_intent::withdraw(&app, &intent_id)
+}
+
+/// Receiver-local human grant for exactly selected missing source paths, hashes
+/// and one live machine credential. Neither the coordinator's review receipt
+/// nor an AI MCP caller can issue a receiver approval. This DOES NOT install.
+#[tauri::command]
+pub fn approve_incoming_source_review_desktop(
+    app: AppHandle,
+    request: crate::remote_source_receiver::Request,
+) -> Result<crate::remote_source_receiver::Approval, String> {
+    crate::remote_source_receiver::record(&app, request)
+}
+
+/// Inspect live receiver grant and exact destination statuses without sending MCP
+/// or mutating files. A still-missing receipt is never a dispatch capability.
+#[tauri::command]
+pub fn inspect_incoming_source_approval_desktop(
+    app: AppHandle,
+    approval_id: String,
+) -> Result<crate::remote_source_receiver::Inspection, String> {
+    crate::remote_source_receiver::inspect(&app, &approval_id)
+}
+
+/// Receiver-local withdrawal, with no remote MCP or file mutation.
+#[tauri::command]
+pub fn withdraw_incoming_source_approval_desktop(
+    app: AppHandle,
+    approval_id: String,
+) -> Result<crate::remote_source_receiver::Approval, String> {
+    crate::remote_source_receiver::withdraw(&app, &approval_id)
+}
+
+/// Human receiver desktop-only journal recovery after lost local ACK.
+#[tauri::command]
+pub fn list_incoming_source_approvals_desktop(
+    app: AppHandle,
+) -> Result<Vec<crate::remote_source_receiver::Approval>, String> {
+    crate::remote_source_receiver::list(&app)
+}
+
+/// Human-only read-only browser runtime metadata for the paired project.
+/// Does not open a browser or access any AI's tabs.
+#[tauri::command]
+pub async fn inspect_remote_machine_browser(
+    node_id: String,
+) -> Result<remote_fleet::BrowserProbe, String> {
+    remote_fleet::inspect_browser(&node_id).await
+}
+/// Human-only read-only project-bound process history; no remote job mutations.
+#[tauri::command]
+pub async fn inspect_remote_machine_jobs(
+    node_id: String,
+) -> Result<remote_fleet::RemoteJobPreview, String> {
+    remote_fleet::inspect_jobs(&node_id).await
+}
+
+/// Human desktop only: reads bounded persisted receipts without contacting remote machines.
+#[tauri::command]
+pub fn list_remote_native_test_runs_desktop(
+    app: AppHandle,
+) -> Result<Vec<crate::remote_matrix::DesktopRun>, String> {
+    crate::remote_matrix::list_for_desktop(&app)
+}
+
+/// Human-confirmed one-shot graceful stop of an exact saved native job.
+/// Durable intent precedes remote mutation. No MCP AI grant-manager exposure.
+#[tauri::command]
+pub async fn cancel_remote_native_test_job_desktop(
+    app: AppHandle,
+    run_id: String,
+    job_index: usize,
+    expected_process_id: String,
+) -> Result<crate::remote_matrix::DesktopRun, String> {
+    crate::remote_matrix::cancel_for_desktop(&app, &run_id, job_index, &expected_process_id).await
+}
+/// Human desktop only: verified read-only process observation followed by
+/// an atomic local evidence update, without claiming AI ownership or sending
+/// any remote execution/cancellation command.
+#[tauri::command]
+pub async fn reconcile_remote_native_test_job_desktop(
+    app: AppHandle,
+    run_id: String,
+    job_index: usize,
+    expected_process_id: String,
+) -> Result<crate::remote_matrix::DesktopRun, String> {
+    crate::remote_matrix::reconcile_for_desktop(&app, &run_id, job_index, &expected_process_id)
+        .await
+}
+/// Local desktop action only; never advertised through MCP.
+#[tauri::command]
+pub fn view_remote_machine_screen(peer_id: String) -> Result<(), String> {
+    remote_view::launch(&peer_id)
+}
+#[tauri::command]
+pub fn list_downloaded_remote_artifacts(
+    app: AppHandle,
+) -> Result<Vec<crate::remote_artifact_fetch::DownloadView>, String> {
+    crate::remote_artifact_fetch::downloads(&app)
+}
+#[tauri::command]
+pub fn export_remote_artifact(app: AppHandle, transfer_id: String) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let source = crate::remote_artifact_fetch::export_source(&app, &transfer_id)?;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("Export verified RepoTunnel remote build artifact")
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Err("Artifact export cancelled.".into());
+    };
+    let destination = selected
+        .into_path()
+        .map_err(|_| "Cannot resolve selected artifact export destination.".to_string())?;
+    if std::fs::symlink_metadata(&destination).is_ok() {
+        return Err("A file already exists at that destination. Choose a new filename to avoid overwriting it.".into());
+    }
+    let mut input = std::fs::File::open(&source)
+        .map_err(|_| "Cannot open verified private artifact.".to_string())?;
+    let mut output = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&destination)
+        .map_err(|_| "Cannot create selected artifact export file.".to_string())?;
+    if std::io::copy(&mut input, &mut output)
+        .and_then(|_| output.sync_all())
+        .is_err()
+    {
+        let _ = std::fs::remove_file(&destination);
+        return Err("Could not export entire verified artifact.".into());
+    }
+    Ok("Verified artifact exported to the user-selected location.".into())
+}
+
 #[tauri::command]
 pub fn get_ai_access_status(state: State<'_, AppState>) -> Result<AiAccessStatus, String> {
     Ok(AiAccessStatus {
@@ -3690,44 +4966,58 @@ pub async fn clear_public_tunnel(app: AppHandle) -> Result<PublicTunnelStatus, S
 }
 
 #[tauri::command]
-pub fn get_chat_connection_status(
-    state: State<'_, AppState>,
-) -> Result<ChatConnectionStatus, String> {
-    state.chat_connection_status()
+pub async fn get_chat_connection_status(app: AppHandle) -> Result<ChatConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().chat_connection_status())
+        .await
+        .map_err(|error| format!("OpenAI Secure Tunnel status check could not complete: {error}"))?
+}
+
+/// Explicit human-only Connect UI action. Never called by AI/MCP tooling.
+#[tauri::command]
+pub async fn install_official_tunnel_client() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(crate::tunnel_client_setup::install_official_client)
+        .await
+        .map_err(|_| "Official tunnel-client setup could not complete.".to_string())?
 }
 
 #[tauri::command]
-pub fn start_chat_connection(
+pub async fn start_chat_connection(
     app: AppHandle,
-    state: State<'_, AppState>,
     tunnel_id: String,
     api_key: String,
 ) -> Result<ChatConnectionStatus, String> {
-    let result = state.start_chat_connection(app.clone(), tunnel_id, api_key);
-    if result.is_ok() {
-        hardening::log_event(
-            &app,
-            "INFO",
-            "chat.connect",
-            "Secure MCP Tunnel process started.",
-        );
-    }
-    result
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let result = state.start_chat_connection(app.clone(), tunnel_id, api_key);
+        if result.is_ok() {
+            hardening::log_event(
+                &app,
+                "INFO",
+                "chat.connect",
+                "Secure MCP Tunnel process started.",
+            );
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("OpenAI Secure Tunnel start task could not complete: {error}"))?
 }
 
 #[tauri::command]
-pub fn stop_chat_connection(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<ChatConnectionStatus, String> {
-    state.stop_chat_connection()?;
-    hardening::log_event(
-        &app,
-        "INFO",
-        "chat.disconnect",
-        "Secure MCP Tunnel stopped.",
-    );
-    state.chat_connection_status()
+pub async fn stop_chat_connection(app: AppHandle) -> Result<ChatConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.stop_chat_connection()?;
+        hardening::log_event(
+            &app,
+            "INFO",
+            "chat.disconnect",
+            "Secure MCP Tunnel stopped.",
+        );
+        state.chat_connection_status()
+    })
+    .await
+    .map_err(|error| format!("OpenAI Secure Tunnel stop task could not complete: {error}"))?
 }
 
 #[tauri::command]
@@ -3933,6 +5223,179 @@ pub async fn install_update_and_restart(
 }
 
 #[tauri::command]
+pub fn create_agent_mission(
+    app: AppHandle,
+    workspace_id: String,
+    goal: String,
+    autonomy_policy: Option<mission::MissionAutonomyPolicy>,
+) -> Result<mission::MissionSnapshot, String> {
+    let workspace = approved_workspace(&app, &workspace_id)?;
+    mission::create_agent_mission(&app, &workspace, goal, autonomy_policy)
+}
+
+#[tauri::command]
+pub fn list_agent_missions(
+    app: AppHandle,
+    workspace_id: Option<String>,
+) -> Result<Vec<mission::MissionSummary>, String> {
+    if let Some(workspace_id) = workspace_id.as_deref() {
+        let _ = approved_workspace(&app, workspace_id)?;
+    }
+    mission::list(&app, workspace_id.as_deref())
+}
+
+#[tauri::command]
+pub fn get_agent_mission(
+    app: AppHandle,
+    mission_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let snapshot = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, snapshot.mission().workspace_id())?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn submit_agent_mission_directive(
+    app: AppHandle,
+    mission_id: String,
+    text: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let existing = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, existing.mission().workspace_id())?;
+    mission::submit_agent_mission_directive(&app, &mission_id, text)
+}
+
+#[tauri::command]
+pub fn submit_agent_mission_question(
+    app: AppHandle,
+    mission_id: String,
+    text: String,
+) -> Result<mission::MissionQuestion, String> {
+    let existing = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, existing.mission().workspace_id())?;
+    mission::submit_agent_mission_question(&app, &mission_id, text)
+}
+
+#[tauri::command]
+pub fn pause_agent_mission(
+    app: AppHandle,
+    mission_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let existing = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, existing.mission().workspace_id())?;
+    mission::pause_agent_mission(&app, &mission_id)
+}
+
+#[tauri::command]
+pub fn resume_agent_mission(
+    app: AppHandle,
+    mission_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let existing = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, existing.mission().workspace_id())?;
+    mission::resume_agent_mission(&app, &mission_id)
+}
+
+#[tauri::command]
+pub fn stop_agent_mission(
+    app: AppHandle,
+    mission_id: String,
+    reason: Option<String>,
+) -> Result<mission::MissionSnapshot, String> {
+    let existing = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, existing.mission().workspace_id())?;
+    mission::stop_agent_mission(&app, &mission_id, reason)
+}
+
+#[tauri::command]
+pub fn rename_mission_agent(
+    app: AppHandle,
+    mission_id: String,
+    agent_id: String,
+    name: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let current = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, current.mission().workspace_id())?;
+    mission::rename_mission_agent(&app, &mission_id, &agent_id, &name)
+}
+
+#[tauri::command]
+pub fn remove_mission_agent(
+    app: AppHandle,
+    mission_id: String,
+    agent_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let current = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, current.mission().workspace_id())?;
+    mission::remove_mission_agent(&app, &mission_id, &agent_id)
+}
+
+#[tauri::command]
+pub fn restore_mission_agent(
+    app: AppHandle,
+    mission_id: String,
+    agent_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let current = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, current.mission().workspace_id())?;
+    mission::restore_mission_agent(&app, &mission_id, &agent_id)
+}
+
+#[tauri::command]
+pub fn archive_agent_mission(
+    app: AppHandle,
+    mission_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let current = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, current.mission().workspace_id())?;
+    mission::archive_agent_mission(&app, &mission_id)
+}
+
+#[tauri::command]
+pub fn restore_archived_agent_mission(
+    app: AppHandle,
+    mission_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let current = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, current.mission().workspace_id())?;
+    mission::restore_archived_agent_mission(&app, &mission_id)
+}
+
+#[tauri::command]
+pub fn delete_agent_mission(app: AppHandle, mission_id: String) -> Result<(), String> {
+    let current = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, current.mission().workspace_id())?;
+    mission::delete_agent_mission(&app, &mission_id)
+}
+
+#[tauri::command]
+pub fn approve_agent_mission_gate(
+    app: AppHandle,
+    gate_id: String,
+) -> Result<mission::MissionHumanGate, String> {
+    mission::approve_agent_mission_gate(&app, &gate_id)
+}
+
+#[tauri::command]
+pub fn reject_agent_mission_gate(
+    app: AppHandle,
+    gate_id: String,
+    reason: Option<String>,
+) -> Result<mission::MissionHumanGate, String> {
+    mission::reject_agent_mission_gate(&app, &gate_id, reason.as_deref())
+}
+
+#[tauri::command]
+pub fn accept_agent_mission_result(
+    app: AppHandle,
+    mission_id: String,
+) -> Result<mission::MissionSnapshot, String> {
+    let existing = mission::snapshot(&app, &mission_id)?;
+    let _ = approved_workspace(&app, existing.mission().workspace_id())?;
+    mission::accept_agent_mission_result(&app, &mission_id)
+}
+
+#[tauri::command]
 pub fn list_team_sessions(
     app: AppHandle,
     workspace_id: Option<String>,
@@ -4000,6 +5463,33 @@ pub fn post_team_user_message(
         "Posted guidance to the AI team",
         None,
         ActivityStatus::Succeeded,
+        Some(session_id),
+    );
+    Ok(snapshot)
+}
+
+/// Manual owner recovery when an AI chat disappeared without leaving its
+/// role. This command is deliberately desktop-only, never exposed via MCP.
+#[tauri::command]
+pub fn disconnect_team_agent(
+    app: AppHandle,
+    session_id: String,
+    agent_id: String,
+) -> Result<TeamSnapshot, String> {
+    let before = team::get_snapshot(&app, &session_id, None)?;
+    let workspace = approved_workspace(&app, &before.session.workspace_id)?;
+    let snapshot = team::disconnect_agent_client(&app, &session_id, &agent_id)?;
+    let _ = activity::record(
+        &app,
+        &workspace,
+        None,
+        ActivityKind::Team,
+        "teamDisconnectAgent",
+        "Manually disconnected an abandoned Team AI connection",
+        Some(format!(
+            "Agent {agent_id}; Team and task ownership preserved"
+        )),
+        ActivityStatus::Stopped,
         Some(session_id),
     );
     Ok(snapshot)
@@ -4108,6 +5598,57 @@ mod tests {
             change_policy: WorkspaceChangePolicy::Automatic,
             command_policy: CommandPolicy::Automatic,
         }
+    }
+
+    #[test]
+    fn human_import_completion_requires_independent_task_and_exact_file_proof() {
+        use serde_json::json;
+        let approval = format!("receiver-source-{}", "a".repeat(32));
+        let task = format!("remote-sync-{}", "b".repeat(32));
+        let mutation = json!({
+            "approvalId": approval, "state": "imported", "importedFiles": 2
+        });
+        let observed = json!({
+            "approvalId": approval, "state": "imported", "importTaskId": task,
+            "files": [{"status":"matchingBytes"},{"status":"matchingBytes"}]
+        });
+        let verified = |ack: &serde_json::Value, inspection: &serde_json::Value| {
+            verified_human_import_completion(ack, inspection, &approval, &task, 2)
+        };
+        assert!(verified(&mutation, &observed));
+        let mut changed = observed.clone();
+        changed["importTaskId"] = json!(format!("remote-sync-{}", "c".repeat(32)));
+        assert!(!verified(&mutation, &changed), "unrelated one-shot task");
+        changed = observed.clone();
+        changed["state"] = json!("dispatchUnknown");
+        assert!(
+            !verified(&mutation, &changed),
+            "matching bytes without durable completion"
+        );
+        changed = observed.clone();
+        changed["files"][1]["status"] = json!("conflict");
+        assert!(
+            !verified(&mutation, &changed),
+            "destination changed after import"
+        );
+        changed = observed.clone();
+        changed["files"] = json!([{"status":"matchingBytes"}]);
+        assert!(!verified(&mutation, &changed), "missing approved file");
+        changed = observed.clone();
+        changed["approvalId"] = json!(format!("receiver-source-{}", "c".repeat(32)));
+        assert!(!verified(&mutation, &changed), "approval substituted");
+        changed = mutation.clone();
+        changed["importedFiles"] = json!(1);
+        assert!(
+            !verified(&changed, &observed),
+            "mutation ACK omitted one file"
+        );
+        changed = mutation.clone();
+        changed["state"] = json!("dispatchUnknown");
+        assert!(
+            !verified(&changed, &observed),
+            "an uncertain ACK is never promoted"
+        );
     }
 
     #[test]

@@ -16,12 +16,13 @@ use crate::{
     access::{resolve_workspace_path, AccessOperation},
     changes, github,
     models::{
-        ChangeOutcome, GitActionKind, GitActionRecord, GitActionStatus, GitCommitSummary, GitDiff,
-        GitDiffCheck, GitDiffCheckIssue, GitDiffStats, GitFileChange, GitRepositoryStatus,
-        Workspace, WorkspaceAccessMode, WorkspaceChangePolicy,
+        ChangeOutcome, ChangeTaskBinding, GitActionKind, GitActionRecord, GitActionStatus,
+        GitCommitSummary, GitDiff, GitDiffCheck, GitDiffCheckIssue, GitDiffStats, GitFileChange,
+        GitRepositoryStatus, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy,
     },
     secret_guard,
     storage::load_workspaces,
+    task_integrity::{gateway as task_integrity_gateway, model::TaskOperationClass},
 };
 
 const ACTION_HISTORY_FILE: &str = "git-history.json";
@@ -271,13 +272,40 @@ fn run_git(workspace: &Workspace, args: &[&str]) -> Result<Output, String> {
     Ok(output)
 }
 
-fn head_hash(workspace: &Workspace) -> Result<Option<String>, String> {
+pub(crate) fn head_hash(workspace: &Workspace) -> Result<Option<String>, String> {
     let output = run_git(workspace, &["rev-parse", "--verify", "HEAD"])?;
     if output.status.success() {
         let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
         return Ok((!value.is_empty()).then_some(value));
     }
     Ok(None)
+}
+
+pub(crate) fn path_has_worktree_changes(
+    workspace: &Workspace,
+    relative_path: &str,
+) -> Result<bool, String> {
+    resolve_workspace_path(workspace, relative_path, AccessOperation::Read, false)?;
+    let output = base_git_command(workspace)?
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            relative_path,
+        ])
+        .output()
+        .map_err(|error| format!("Could not inspect targeted Git dirty state: {error}"))?;
+    if !output.status.success() {
+        let detail = secret_guard::redact_text(String::from_utf8_lossy(&output.stderr).trim());
+        return Err(if detail.is_empty() {
+            "Git could not inspect targeted dirty state.".to_string()
+        } else {
+            format!("Git could not inspect targeted dirty state: {detail}")
+        });
+    }
+    Ok(!output.stdout.is_empty())
 }
 
 fn branch_name(workspace: &Workspace) -> Result<(Option<String>, bool), String> {
@@ -371,6 +399,77 @@ fn parse_status(workspace: &Workspace) -> Result<Vec<GitFileChange>, String> {
         });
     }
     Ok(changes)
+}
+
+// Complete, path-exact Git status for test-impact planning. Unlike the normal
+// UI status (untracked-files=normal), this expands new directories so no new
+// Rust source/test file is silently skipped. The caller must fail conservatively
+// if the bounded set is too large or Git cannot enumerate it.
+pub(crate) fn changed_paths_for_test_impact(
+    workspace: &Workspace,
+    max_paths: usize,
+) -> Result<Vec<String>, String> {
+    let output = run_git(
+        workspace,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    if !output.status.success() {
+        return Err("Git could not enumerate the changed files for test impact.".to_string());
+    }
+    parse_impact_status(&output.stdout, max_paths, |path| {
+        path_is_visible(workspace, path)
+    })
+}
+
+fn parse_impact_status(
+    bytes: &[u8],
+    max_paths: usize,
+    visible: impl Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    let mut paths = std::collections::BTreeSet::new();
+    let mut items = bytes.split(|byte| *byte == 0);
+    while let Some(record) = items.next() {
+        if record.is_empty() {
+            continue;
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            return Err("Git returned an unexpected changed-file status record.".to_string());
+        }
+        let status = (record[0], record[1]);
+        if status.0 == b'U' || status.1 == b'U' || status == (b'A', b'A') || status == (b'D', b'D')
+        {
+            return Err("Git reports unresolved conflicts; full regression and conflict review are necessary.".to_string());
+        }
+        let primary = std::str::from_utf8(&record[3..])
+            .map_err(|_| "A changed Git pathname is not valid UTF-8.".to_string())?;
+        if !visible(primary) {
+            return Err(
+                "A changed path cannot be inspected safely; test impact is uncertain.".to_string(),
+            );
+        }
+        paths.insert(primary.to_string());
+        if matches!(status.0, b'R' | b'C') || matches!(status.1, b'R' | b'C') {
+            let old = items
+                .next()
+                .filter(|item| !item.is_empty())
+                .ok_or_else(|| "Git returned an incomplete rename/copy record.".to_string())?;
+            let old = std::str::from_utf8(old)
+                .map_err(|_| "A renamed Git pathname is not valid UTF-8.".to_string())?;
+            if !visible(old) {
+                return Err(
+                    "A renamed path cannot be inspected safely; test impact is uncertain."
+                        .to_string(),
+                );
+            }
+            paths.insert(old.to_string());
+        }
+        if paths.len() > max_paths {
+            return Err(format!(
+                "More than {max_paths} paths changed. Use the full regression gate instead of a partial impact plan."
+            ));
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 pub(crate) fn repository_status(workspace: &Workspace) -> GitRepositoryStatus {
@@ -776,6 +875,76 @@ pub(crate) fn recent_commits(
     Ok(commits)
 }
 
+pub(crate) fn staged_paths_for_task(workspace: &Workspace) -> Result<Vec<String>, String> {
+    let output = run_git(
+        workspace,
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--find-copies",
+            "--",
+            ".",
+        ],
+    )?;
+    if !output.status.success() {
+        return Err("Git could not inspect staged paths for Task Integrity.".to_string());
+    }
+
+    let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut blocked = 0usize;
+    let mut index = 0usize;
+    while index < fields.len() {
+        if fields[index].is_empty() {
+            index += 1;
+            continue;
+        }
+        let status = String::from_utf8_lossy(fields[index]).into_owned();
+        index += 1;
+        if index >= fields.len() || fields[index].is_empty() {
+            break;
+        }
+        let first_path = String::from_utf8_lossy(fields[index]).into_owned();
+        index += 1;
+        let is_rename_or_copy = status.starts_with('R') || status.starts_with('C');
+        let second_path = if is_rename_or_copy && index < fields.len() && !fields[index].is_empty()
+        {
+            let value = String::from_utf8_lossy(fields[index]).into_owned();
+            index += 1;
+            Some(value)
+        } else {
+            None
+        };
+
+        let visible = path_is_visible(workspace, &first_path)
+            && second_path
+                .as_deref()
+                .is_none_or(|path| path_is_visible(workspace, path));
+        if !visible {
+            blocked = blocked.saturating_add(1);
+            continue;
+        }
+
+        if seen.insert(first_path.clone()) {
+            paths.push(first_path);
+        }
+        if let Some(second_path) = second_path {
+            if seen.insert(second_path.clone()) {
+                paths.push(second_path);
+            }
+        }
+    }
+
+    if blocked > 0 {
+        return Err("The staged set contains one or more RepoTunnel-protected paths.".to_string());
+    }
+    Ok(paths)
+}
+
 fn scan_staged_secrets(workspace: &Workspace) -> Result<(), String> {
     let (paths, blocked) = diff_paths(workspace, true)?;
     if blocked > 0 {
@@ -1048,6 +1217,7 @@ pub(crate) fn request_stage(
     app: &AppHandle,
     workspace: &Workspace,
     mut paths: Vec<String>,
+    task_binding: Option<ChangeTaskBinding>,
 ) -> Result<GitActionRecord, String> {
     if workspace.access_mode != WorkspaceAccessMode::ReadWrite {
         return Err("This project is read-only. Git staging is disabled until read/write access is enabled.".to_string());
@@ -1075,6 +1245,7 @@ pub(crate) fn request_stage(
             format!("Stage {} files", paths.len())
         },
         detail: Some(detail),
+        task_binding,
         status: GitActionStatus::Pending,
         created_at,
         updated_at: created_at,
@@ -1097,6 +1268,7 @@ pub(crate) fn request_commit(
     app: &AppHandle,
     workspace: &Workspace,
     message: String,
+    task_binding: Option<ChangeTaskBinding>,
 ) -> Result<GitActionRecord, String> {
     if workspace.access_mode != WorkspaceAccessMode::ReadWrite {
         return Err("This project is read-only. Git commits are disabled until read/write access is enabled.".to_string());
@@ -1128,6 +1300,7 @@ pub(crate) fn request_commit(
         kind: GitActionKind::Commit,
         summary: format!("Commit staged changes: {message}"),
         detail: Some(staged.content),
+        task_binding,
         status: GitActionStatus::Pending,
         created_at,
         updated_at: created_at,
@@ -1151,6 +1324,44 @@ fn approved_workspace(app: &AppHandle, id: &str) -> Result<Workspace, String> {
         .into_iter()
         .find(|workspace| workspace.id == id)
         .ok_or_else(|| "That project is no longer approved in RepoTunnel.".to_string())
+}
+
+#[cfg(test)]
+fn revalidate_git_action_task_binding_with_loader<F>(
+    record: &GitActionRecord,
+    operation: TaskOperationClass,
+    paths: &[String],
+    loader: F,
+) -> Result<(), String>
+where
+    F: FnOnce(
+        &crate::task_integrity::model::TaskId,
+    ) -> Result<crate::task_integrity::model::TaskContract, String>,
+{
+    let path_refs = paths.iter().map(String::as_str).collect::<Vec<_>>();
+    task_integrity_gateway::revalidate_queued_task_binding_with_loader(
+        record.task_binding.as_ref(),
+        &record.workspace_id,
+        operation,
+        &path_refs,
+        loader,
+    )
+}
+
+fn revalidate_git_action_task_binding(
+    app: &AppHandle,
+    record: &GitActionRecord,
+    operation: TaskOperationClass,
+    paths: &[String],
+) -> Result<(), String> {
+    let path_refs = paths.iter().map(String::as_str).collect::<Vec<_>>();
+    task_integrity_gateway::revalidate_queued_task_binding(
+        app,
+        record.task_binding.as_ref(),
+        &record.workspace_id,
+        operation,
+        &path_refs,
+    )
 }
 
 fn fail_action(
@@ -1206,6 +1417,14 @@ pub(crate) fn approve_action(app: &AppHandle, action_id: &str) -> Result<GitActi
                     "The saved Git staging request does not match its history record.".to_string(),
                 );
             }
+            if let Err(error) = revalidate_git_action_task_binding(
+                app,
+                &record,
+                TaskOperationClass::GitStage,
+                &paths,
+            ) {
+                return fail_action(app, action_id, record, error);
+            }
             let current_fingerprint = stage_fingerprint(&workspace, &paths)?;
             if current_fingerprint != expected_fingerprint {
                 return fail_action(
@@ -1260,6 +1479,15 @@ pub(crate) fn approve_action(app: &AppHandle, action_id: &str) -> Result<GitActi
                     record,
                     "The saved Git commit request does not match its history record.".to_string(),
                 );
+            }
+            let current_staged_paths = staged_paths_for_task(&workspace)?;
+            if let Err(error) = revalidate_git_action_task_binding(
+                app,
+                &record,
+                TaskOperationClass::GitCommit,
+                &current_staged_paths,
+            ) {
+                return fail_action(app, action_id, record, error);
             }
             let current_head = head_hash(&workspace)?;
             if current_head != expected_head {
@@ -1352,6 +1580,46 @@ pub(crate) fn clear_workspace_history(
     Ok(removed.len())
 }
 
+pub(crate) fn get_action(app: &AppHandle, action_id: &str) -> Result<GitActionRecord, String> {
+    load_history(app)?
+        .into_iter()
+        .find(|record| record.id == action_id)
+        .ok_or_else(|| "That Git action no longer exists.".to_string())
+}
+
+pub(crate) fn task_actions_for_integrity(
+    app: &AppHandle,
+    contract: &crate::task_integrity::model::TaskContract,
+) -> Result<Vec<GitActionRecord>, String> {
+    let mut task_actions = Vec::new();
+    for record in load_history(app)? {
+        if record.workspace_id != contract.workspace_id {
+            continue;
+        }
+        let Some(binding) = record.task_binding.as_ref() else {
+            continue;
+        };
+        if binding.task_id != contract.task_id.as_str() {
+            continue;
+        }
+        if binding.principal_fingerprint != contract.principal.as_str() {
+            return Err(format!(
+                "Task Integrity Git receipt '{}' has a principal mismatch.",
+                record.id
+            ));
+        }
+        if binding.scope_revision > contract.scope_revision().get() {
+            return Err(format!(
+                "Task Integrity Git receipt '{}' references future scope revision {}.",
+                record.id, binding.scope_revision
+            ));
+        }
+        task_actions.push(record);
+    }
+    task_actions.sort_by_key(|record| record.created_at);
+    Ok(task_actions)
+}
+
 pub(crate) fn list_actions(
     app: &AppHandle,
     workspace_id: Option<&str>,
@@ -1380,6 +1648,7 @@ pub(crate) fn list_actions(
 pub(crate) fn request_restore_file(
     app: &AppHandle,
     workspace: &Workspace,
+    actor: changes::ChangeActor,
     relative_path: String,
     edit_group_id: Option<&str>,
 ) -> Result<ChangeOutcome, String> {
@@ -1412,12 +1681,39 @@ pub(crate) fn request_restore_file(
     let content = String::from_utf8(output.stdout).map_err(|_| {
         "Git restore through RepoTunnel currently supports UTF-8 text files only.".to_string()
     })?;
-    changes::write_file(app, workspace, relative_path, content, edit_group_id)
+    changes::write_file(app, workspace, actor, relative_path, content, edit_group_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn impact_status_includes_staged_unstaged_new_files_and_rename_origins() {
+        let bytes = b" M src-tauri/src/access.rs\0M  src-tauri/src/git.rs\0?? src-tauri/src/new.rs\0R  src-tauri/src/new_name.rs\0src-tauri/src/old_name.rs\0";
+        let paths = parse_impact_status(bytes, 16, |_| true).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                "src-tauri/src/access.rs",
+                "src-tauri/src/git.rs",
+                "src-tauri/src/new.rs",
+                "src-tauri/src/new_name.rs",
+                "src-tauri/src/old_name.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn impact_status_refuses_incomplete_or_uninspectable_changes() {
+        assert!(parse_impact_status(b"R  new.rs\0", 16, |_| true).is_err());
+        assert!(parse_impact_status(b"UU conflict.rs\0", 16, |_| true).is_err());
+        assert!(parse_impact_status(b"AA conflict.rs\0", 16, |_| true).is_err());
+        assert!(parse_impact_status(b"DD conflict.rs\0", 16, |_| true).is_err());
+        assert!(parse_impact_status(b"?? file.rs\0", 16, |_| false).is_err());
+        assert!(parse_impact_status(b"?? one.rs\0?? two.rs\0", 1, |_| true).is_err());
+        assert!(parse_impact_status(b"?? \xff\0", 16, |_| true).is_err());
+    }
 
     #[test]
     fn commit_message_limit_is_reasonable() {
@@ -1427,6 +1723,134 @@ mod tests {
     #[test]
     fn git_action_ids_are_distinct() {
         assert_ne!(new_action_id(), new_action_id());
+    }
+
+    #[test]
+    fn git_action_task_binding_is_backward_compatible_and_round_trips() {
+        let legacy = r#"{
+            "id":"git-legacy",
+            "workspaceId":"workspace-test",
+            "workspaceName":"Test",
+            "kind":"stage",
+            "summary":"Stage one file",
+            "detail":"src/main.rs",
+            "status":"pending",
+            "createdAt":1,
+            "updatedAt":1,
+            "commitHash":null,
+            "error":null
+        }"#;
+        let legacy_record: GitActionRecord =
+            serde_json::from_str(legacy).expect("legacy Git action record");
+        assert!(legacy_record.task_binding.is_none());
+
+        let mut bound_record = legacy_record;
+        bound_record.task_binding = Some(crate::models::ChangeTaskBinding {
+            task_id: "task-git-binding".to_string(),
+            scope_revision: 3,
+            principal_fingerprint: "principal-git-binding".to_string(),
+        });
+        let json = serde_json::to_string(&bound_record).expect("serialize bound Git action");
+        let round_trip: GitActionRecord =
+            serde_json::from_str(&json).expect("deserialize bound Git action");
+        let binding = round_trip.task_binding.expect("task binding");
+        assert_eq!(binding.task_id, "task-git-binding");
+        assert_eq!(binding.scope_revision, 3);
+        assert_eq!(binding.principal_fingerprint, "principal-git-binding");
+    }
+
+    #[test]
+    fn queued_git_action_revalidation_uses_bound_task_revision_principal_and_paths() {
+        use crate::task_integrity::model::{
+            TaskAcceptanceCriterion, TaskChangeBudget, TaskContract, TaskId, TaskIntegrityStatus,
+            TaskOperationClass, TaskPrincipal, TaskScopeRule, TaskVerificationContract,
+            VerificationLevel,
+        };
+        use std::collections::BTreeSet;
+
+        let principal = TaskPrincipal::from_opaque_id("principal-git-review").expect("principal");
+        let stage = BTreeSet::from([TaskOperationClass::GitStage]);
+        let mut contract = TaskContract::new(
+            TaskId::new("task-git-review").expect("task id"),
+            "workspace-test".to_string(),
+            principal.clone(),
+            "Queue one scoped Git stage action for local Review.".to_string(),
+            vec![
+                TaskAcceptanceCriterion::new("criterion", "Only the approved file is staged")
+                    .expect("criterion"),
+            ],
+            stage.clone(),
+            vec![TaskScopeRule::allow_exact("src/main.rs", stage.clone()).expect("scope rule")],
+            TaskChangeBudget::default(),
+            TaskVerificationContract::new(VerificationLevel::ChangeSpecific),
+            1_700_000_000_000,
+        )
+        .expect("contract");
+        contract
+            .transition_to(TaskIntegrityStatus::Active, 1_700_000_000_100)
+            .expect("activate task");
+
+        let record = GitActionRecord {
+            id: "git-review-test".to_string(),
+            workspace_id: "workspace-test".to_string(),
+            workspace_name: "Test".to_string(),
+            kind: GitActionKind::Stage,
+            summary: "Stage src/main.rs".to_string(),
+            detail: Some("src/main.rs".to_string()),
+            task_binding: Some(ChangeTaskBinding {
+                task_id: contract.task_id.as_str().to_string(),
+                scope_revision: contract.scope_revision.get(),
+                principal_fingerprint: principal.as_str().to_string(),
+            }),
+            status: GitActionStatus::Pending,
+            created_at: 1,
+            updated_at: 1,
+            commit_hash: None,
+            error: None,
+        };
+        let paths = vec!["src/main.rs".to_string()];
+
+        revalidate_git_action_task_binding_with_loader(
+            &record,
+            TaskOperationClass::GitStage,
+            &paths,
+            |_| Ok(contract.clone()),
+        )
+        .expect("unchanged task authority should remain valid");
+
+        let mut changed_revision = contract.clone();
+        changed_revision
+            .advance_scope_revision()
+            .expect("advance revision");
+        assert!(revalidate_git_action_task_binding_with_loader(
+            &record,
+            TaskOperationClass::GitStage,
+            &paths,
+            |_| Ok(changed_revision),
+        )
+        .expect_err("changed revision must invalidate queued Git authority")
+        .contains("scope revision"));
+
+        let mut changed_principal = contract.clone();
+        changed_principal.principal =
+            TaskPrincipal::from_opaque_id("principal-git-review-other").expect("other principal");
+        assert!(revalidate_git_action_task_binding_with_loader(
+            &record,
+            TaskOperationClass::GitStage,
+            &paths,
+            |_| Ok(changed_principal),
+        )
+        .expect_err("changed principal must invalidate queued Git authority")
+        .contains("principal"));
+
+        assert!(revalidate_git_action_task_binding_with_loader(
+            &record,
+            TaskOperationClass::GitStage,
+            &["src/unrelated.rs".to_string()],
+            |_| Ok(contract),
+        )
+        .expect_err("changed paths must invalidate queued Git authority")
+        .contains("no longer authorizes"));
     }
 
     #[test]
@@ -1443,6 +1867,126 @@ mod tests {
         assert_eq!(issues[1].line, Some(9));
         assert_eq!(issues[1].message, "leftover conflict marker");
         assert_eq!(issues[1].context.as_deref(), Some("<<<<<<< ours"));
+    }
+
+    #[test]
+    fn task_staged_paths_include_both_sides_of_a_rename() {
+        if git_binary().is_err() {
+            return;
+        }
+        let nonce = now_millis();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-git-task-rename-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).expect("create temp repository");
+        let git = git_binary().expect("git binary");
+        let run = |args: &[&str]| {
+            let output = Command::new(&git)
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        fs::write(root.join("src/old.rs"), "fn old() {}\n").expect("write baseline");
+        run(&["add", "--", "src/old.rs"]);
+        run(&[
+            "-c",
+            "user.name=RepoTunnel Test",
+            "-c",
+            "user.email=repotunnel@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ]);
+        run(&["mv", "src/old.rs", "src/new.rs"]);
+
+        let workspace = Workspace {
+            id: "git-task-rename-test".to_string(),
+            name: "git-task-rename-test".to_string(),
+            path: root.to_string_lossy().into_owned(),
+            added_at: 0,
+            access_mode: WorkspaceAccessMode::ReadWrite,
+            change_policy: WorkspaceChangePolicy::Automatic,
+            command_policy: crate::models::CommandPolicy::Automatic,
+        };
+        let paths = staged_paths_for_task(&workspace).expect("task staged paths");
+        assert_eq!(
+            paths,
+            vec!["src/old.rs".to_string(), "src/new.rs".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn targeted_dirty_probe_checks_only_the_requested_path_and_includes_untracked_files() {
+        if git_binary().is_err() {
+            return;
+        }
+        let nonce = now_millis();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-git-targeted-dirty-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create temp repository");
+        let git = git_binary().expect("git binary");
+        let init = Command::new(&git)
+            .current_dir(&root)
+            .args(["init", "-q"])
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        let workspace = Workspace {
+            id: "git-targeted-dirty-test".to_string(),
+            name: "git-targeted-dirty-test".to_string(),
+            path: root.to_string_lossy().into_owned(),
+            added_at: 0,
+            access_mode: WorkspaceAccessMode::ReadWrite,
+            change_policy: WorkspaceChangePolicy::Automatic,
+            command_policy: crate::models::CommandPolicy::Automatic,
+        };
+        assert!(run_git(
+            &workspace,
+            &["config", "user.email", "test@example.invalid"]
+        )
+        .expect("configure email")
+        .status
+        .success());
+        assert!(
+            run_git(&workspace, &["config", "user.name", "RepoTunnel Test"])
+                .expect("configure name")
+                .status
+                .success()
+        );
+        fs::write(root.join("tracked.txt"), "tracked\n").expect("write tracked");
+        fs::write(root.join("other.txt"), "other\n").expect("write other");
+        assert!(run_git(&workspace, &["add", "tracked.txt", "other.txt"])
+            .expect("git add")
+            .status
+            .success());
+        assert!(run_git(&workspace, &["commit", "-q", "-m", "baseline"])
+            .expect("git commit")
+            .status
+            .success());
+
+        assert!(!path_has_worktree_changes(&workspace, "tracked.txt").expect("clean tracked"));
+        fs::write(root.join("tracked.txt"), "changed\n").expect("modify tracked");
+        assert!(path_has_worktree_changes(&workspace, "tracked.txt").expect("dirty tracked"));
+        assert!(!path_has_worktree_changes(&workspace, "other.txt").expect("unrelated clean path"));
+        fs::write(root.join("new.txt"), "untracked\n").expect("write untracked");
+        assert!(path_has_worktree_changes(&workspace, "new.txt").expect("untracked path"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

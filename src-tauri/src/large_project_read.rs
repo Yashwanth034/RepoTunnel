@@ -26,7 +26,10 @@ const DEFAULT_SEARCH_BUDGET_MS: u64 = 900;
 const MAX_SEARCH_BUDGET_MS: u64 = 1_500;
 const SEARCH_PREVIEW_CHARS: usize = 240;
 const MAX_SEARCH_LINE_BYTES: usize = 16 * 1024;
-const SEARCH_SESSION_TTL: Duration = Duration::from_secs(180);
+// A long multi-agent source inspection can pause between pages for minutes.
+// Keep continuation state for a useful idle window; session-count caps and
+// lazy expiry still bound memory and open resources.
+const SEARCH_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const RECENT_SEARCH_TTL: Duration = Duration::from_secs(1);
 const MAX_SEARCH_SESSIONS: usize = 64;
 
@@ -39,7 +42,7 @@ const RANGE_BUDGET: Duration = Duration::from_millis(900);
 
 const DEFAULT_DIRECTORY_PAGE_SIZE: usize = 200;
 const MAX_DIRECTORY_PAGE_SIZE: usize = 500;
-const DIRECTORY_SESSION_TTL: Duration = Duration::from_secs(180);
+const DIRECTORY_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_DIRECTORY_SESSIONS: usize = 32;
 const DIRECTORY_PAGE_BUDGET: Duration = Duration::from_millis(700);
 
@@ -242,6 +245,7 @@ struct SearchFileOutcome {
 }
 
 fn search_file_page(
+    workspace: &Workspace,
     pending: &PendingSearchFile,
     query_lower: &str,
     result_limit: usize,
@@ -249,6 +253,10 @@ fn search_file_page(
 ) -> Result<SearchFileOutcome, String> {
     let mut file = File::open(&pending.path)
         .map_err(|error| format!("Could not open a file during fast search: {error}"))?;
+    #[cfg(target_os = "linux")]
+    crate::access::ensure_opened_file_authorized(workspace, &file)?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = workspace;
     file.seek(SeekFrom::Start(pending.byte_offset))
         .map_err(|error| format!("Could not resume a fast-search file: {error}"))?;
     let mut reader = BufReader::new(file);
@@ -431,7 +439,13 @@ pub(crate) fn fast_search_page(
         };
 
         let remaining = max_results.saturating_sub(matches.len()).max(1);
-        let outcome = search_file_page(&pending, &session.query_lower, remaining, deadline)?;
+        let outcome = search_file_page(
+            workspace,
+            &pending,
+            &session.query_lower,
+            remaining,
+            deadline,
+        )?;
         matches.extend(outcome.matches);
         if let Some(next_byte_offset) = outcome.next_byte_offset {
             session.pending_file = Some(PendingSearchFile {
@@ -544,12 +558,17 @@ pub(crate) fn read_file_range(
     cursor: Option<&str>,
 ) -> Result<FileRangeResult, String> {
     let path = resolve_workspace_path(workspace, relative_path, AccessOperation::Read, true)?;
-    let metadata = fs::metadata(&path)
+    let mut file =
+        File::open(&path).map_err(|error| format!("Could not open the requested file: {error}"))?;
+    #[cfg(target_os = "linux")]
+    crate::access::ensure_opened_file_authorized(workspace, &file)?;
+    let metadata = file
+        .metadata()
         .map_err(|error| format!("Could not inspect the requested file: {error}"))?;
     if !metadata.is_file() {
         return Err("The requested path is not a file.".to_string());
     }
-    if project_index::is_probably_binary(&path, metadata.len())? {
+    if project_index::is_probably_binary_opened(&path, metadata.len(), &mut file)? {
         return Err("Binary files are not available through the text range reader.".to_string());
     }
 
@@ -575,8 +594,6 @@ pub(crate) fn read_file_range(
         (1usize, 0u64, requested_start_line)
     };
 
-    let mut file =
-        File::open(&path).map_err(|error| format!("Could not open the requested file: {error}"))?;
     file.seek(SeekFrom::Start(byte_offset))
         .map_err(|error| format!("Could not resume the requested file range: {error}"))?;
     let mut reader = BufReader::new(file);
@@ -927,7 +944,7 @@ struct ProjectTreeSession {
 const DEFAULT_TREE_PAGE_SIZE: usize = 300;
 const MAX_TREE_PAGE_SIZE: usize = 800;
 const TREE_PAGE_BUDGET: Duration = Duration::from_millis(900);
-const TREE_SESSION_TTL: Duration = Duration::from_secs(180);
+const TREE_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_TREE_SESSIONS: usize = 32;
 
 static TREE_SESSIONS: OnceLock<Mutex<HashMap<String, ProjectTreeSession>>> = OnceLock::new();
@@ -1146,6 +1163,20 @@ mod tests {
 
     use super::{fast_search_page, inspect_project_page, list_directory_page, read_file_range};
     use crate::models::{CommandPolicy, Workspace, WorkspaceAccessMode, WorkspaceChangePolicy};
+
+    #[test]
+    fn long_running_inspections_have_bounded_reusable_cursor_windows() {
+        // A busy reviewer should not lose its cursor after only three minutes,
+        // but in-memory sessions must still be capped to avoid resource leaks.
+        assert!(super::SEARCH_SESSION_TTL >= std::time::Duration::from_secs(10 * 60));
+        assert!(super::DIRECTORY_SESSION_TTL >= std::time::Duration::from_secs(10 * 60));
+        assert!(super::TREE_SESSION_TTL >= std::time::Duration::from_secs(10 * 60));
+        const {
+            assert!(super::MAX_SEARCH_SESSIONS <= 128);
+            assert!(super::MAX_DIRECTORY_SESSIONS <= 128);
+            assert!(super::MAX_TREE_SESSIONS <= 128);
+        }
+    }
 
     fn temp_workspace() -> (PathBuf, Workspace) {
         let nonce = SystemTime::now()

@@ -11,6 +11,7 @@ import {
   stopManagedProcess,
 } from "../lib/backend";
 import { listDirectory, readFile } from "../lib/filesystem";
+import { reconcilePolledRecords } from "../lib/commandPolling";
 import { NavIcon } from "./AppSidebar";
 
 export type EditorProblem = {
@@ -268,6 +269,7 @@ export default function DeveloperDock({
   const runningProcessCount = processes.filter((process) => process.status === "running").length;
   const recordIdentity = useMemo(() => records.map((record) => record.id).join("|"), [records]);
   const previousRecordIdentityRef = useRef("");
+  const latestRefreshRequestRef = useRef(0);
 
   useEffect(() => {
     if (previousRecordIdentityRef.current && previousRecordIdentityRef.current !== recordIdentity) setDismissedProblemKeys(new Set());
@@ -316,22 +318,43 @@ export default function DeveloperDock({
   }, [sessionEntries, busy]);
 
   const refresh = useCallback(async () => {
+    const requestId = ++latestRefreshRequestRef.current;
     try {
       const [nextRecords, nextProcesses] = await Promise.all([
         listTerminalHistory(workspaceId, 30),
         listManagedProcesses(workspaceId, 30),
       ]);
-      setRecords(nextRecords);
-      setProcesses(nextProcesses);
+      // A user-triggered refresh or project switch can overtake a background
+      // poll. Never let the earlier result replace the newer workspace state.
+      if (requestId !== latestRefreshRequestRef.current) return;
+      setRecords((current) => reconcilePolledRecords(current, nextRecords));
+      setProcesses((current) => reconcilePolledRecords(current, nextProcesses));
     } catch (error) {
-      onNotice(`Developer terminal: ${error instanceof Error ? error.message : String(error)}`);
+      if (requestId === latestRefreshRequestRef.current) {
+        onNotice(`Developer terminal: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
   }, [workspaceId, onNotice]);
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2500);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let pending = false;
+    const poll = async () => {
+      if (!active || pending) return;
+      pending = true;
+      try {
+        await refresh();
+      } finally {
+        pending = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 2500);
+    return () => {
+      active = false;
+      latestRefreshRequestRef.current++;
+      window.clearInterval(timer);
+    };
   }, [workspaceId, refresh]);
 
   useEffect(() => {

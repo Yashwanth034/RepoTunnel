@@ -2,6 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ApplicationLauncher from "./ApplicationLauncher";
 import BrowserAutomation from "./BrowserAutomation";
 import MonitoringPanel from "./MonitoringPanel";
+import TaskIntegrityPanel from "./TaskIntegrityPanel";
+import CustomApplicationsPanel from "./custom-applications/CustomApplicationsPanel";
+import { mergePolledProcessLog, reconcilePolledRecords } from "../lib/commandPolling";
 import {
   approveCommand,
   approveManagedProcess,
@@ -37,6 +40,7 @@ type ExecutionPanelProps = {
   workspaces: Workspace[];
   gatewayRunning: boolean;
   onError: (message: string) => void;
+  onNotice: (message: string) => void;
 };
 
 type ProcessLogView = {
@@ -90,19 +94,7 @@ function policyCopy(workspace: Workspace | null): string {
   return "AI Review · live actions require approval";
 }
 
-function mergeLogChunk(current: ProcessLogView | null, chunk: Awaited<ReturnType<typeof readManagedProcessOutput>>): ProcessLogView {
-  const sameProcess = current?.processId === chunk.processId;
-  return {
-    processId: chunk.processId,
-    stdout: `${sameProcess ? current.stdout : ""}${chunk.stdout}`,
-    stderr: `${sameProcess ? current.stderr : ""}${chunk.stderr}`,
-    stdoutOffset: chunk.nextStdoutOffset,
-    stderrOffset: chunk.nextStderrOffset,
-    outputTruncated: Boolean((sameProcess && current.outputTruncated) || chunk.outputTruncated),
-  };
-}
-
-function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelProps) {
+function ExecutionPanel({ workspaces, gatewayRunning, onError, onNotice }: ExecutionPanelProps) {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string>("");
   const [status, setStatus] = useState<ExecutionStatus | null>(null);
   const [presets, setPresets] = useState<CommandPreset[]>([]);
@@ -120,7 +112,13 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
   const [processLog, setProcessLog] = useState<ProcessLogView | null>(null);
   const processLogRef = useRef<ProcessLogView | null>(null);
   const expandedProcessIdRef = useRef<string | null>(null);
-  const processOutputPollingRef = useRef(false);
+  const processOutputInFlightRef = useRef<{ processId: string; generation: number } | null>(null);
+  const processOutputGenerationRef = useRef(0);
+  const latestRefreshRequestRef = useRef(0);
+  // All activity snapshots (manual refresh, background poll, and the post-
+  // command refresh) use the same revision. A slow old poll must never roll
+  // back a newer Exited/Failed state to Running.
+  const activitySnapshotRevisionRef = useRef(0);
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
@@ -134,6 +132,8 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
   }, [selectedWorkspaceId, workspaces]);
 
   const refresh = useCallback(async () => {
+    const requestId = ++latestRefreshRequestRef.current;
+    const activityRevision = ++activitySnapshotRevisionRef.current;
     setLoading(true);
     try {
       const [sandboxStatus, commandHistory, liveHistory, processHistory] = await Promise.all([
@@ -142,41 +142,66 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
         listTerminalHistory(undefined, 60),
         listManagedProcesses(undefined, 60),
       ]);
+      if (requestId !== latestRefreshRequestRef.current) return;
       setStatus(sandboxStatus);
-      setSandboxHistory(commandHistory);
-      setTerminalHistory(liveHistory);
-      setProcesses(processHistory);
+      if (activityRevision === activitySnapshotRevisionRef.current) {
+        setSandboxHistory((current) => reconcilePolledRecords(current, commandHistory));
+        setTerminalHistory((current) => reconcilePolledRecords(current, liveHistory));
+        setProcesses((current) => reconcilePolledRecords(current, processHistory));
+      }
       if (selectedWorkspaceId) {
-        setPresets(await listCommandPresets(selectedWorkspaceId));
+        const nextPresets = await listCommandPresets(selectedWorkspaceId);
+        if (requestId === latestRefreshRequestRef.current) setPresets(nextPresets);
       } else {
         setPresets([]);
       }
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
+      if (requestId === latestRefreshRequestRef.current) {
+        onError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setLoading(false);
+      if (requestId === latestRefreshRequestRef.current) setLoading(false);
     }
   }, [onError, selectedWorkspaceId]);
 
   useEffect(() => {
-    refresh().catch(() => undefined);
+    void refresh();
+    return () => {
+      latestRefreshRequestRef.current++;
+      activitySnapshotRevisionRef.current++;
+    };
   }, [refresh]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      Promise.all([
-        listCommandHistory(undefined, 60),
-        listTerminalHistory(undefined, 60),
-        listManagedProcesses(undefined, 60),
-      ])
-        .then(([commands, terminals, managed]) => {
-          setSandboxHistory(commands);
-          setTerminalHistory(terminals);
-          setProcesses(managed);
-        })
-        .catch(() => undefined);
-    }, gatewayRunning ? 2500 : 5000);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let pending = false;
+    const poll = async () => {
+      // Slow backend reads must not queue duplicate IPC calls or apply results
+      // after the user navigates away from Commands.
+      if (!active || pending) return;
+      pending = true;
+      const activityRevision = ++activitySnapshotRevisionRef.current;
+      try {
+        const [commands, terminals, managed] = await Promise.all([
+          listCommandHistory(undefined, 60),
+          listTerminalHistory(undefined, 60),
+          listManagedProcesses(undefined, 60),
+        ]);
+        if (!active || activityRevision !== activitySnapshotRevisionRef.current) return;
+        setSandboxHistory((current) => reconcilePolledRecords(current, commands));
+        setTerminalHistory((current) => reconcilePolledRecords(current, terminals));
+        setProcesses((current) => reconcilePolledRecords(current, managed));
+      } catch {
+        // Background status polling remains best-effort.
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), gatewayRunning ? 2500 : 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [gatewayRunning]);
 
   useEffect(() => {
@@ -185,47 +210,85 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
 
   useEffect(() => {
     expandedProcessIdRef.current = expandedProcessId;
-    processOutputPollingRef.current = false;
   }, [expandedProcessId]);
+
+  // A process in another project must not retain active polling or visible
+  // output when the selected project changes.
+  useEffect(() => {
+    processOutputGenerationRef.current++;
+    expandedProcessIdRef.current = null;
+    processOutputInFlightRef.current = null;
+    setExpandedProcessId(null);
+    setProcessLog(null);
+  }, [selectedWorkspaceId]);
+
+  useEffect(() => () => {
+    // Ignore any request completing after the Commands view unmounts.
+    processOutputGenerationRef.current++;
+    expandedProcessIdRef.current = null;
+    processOutputInFlightRef.current = null;
+  }, []);
 
   const expandedProcessStatus = useMemo(
     () => processes.find((item) => item.id === expandedProcessId)?.status ?? null,
     [expandedProcessId, processes],
   );
 
+  function requestProcessOutput(processId: string, generation: number, reportError = false) {
+    if (expandedProcessIdRef.current !== processId || processOutputGenerationRef.current !== generation) {
+      return;
+    }
+    const existing = processOutputInFlightRef.current;
+    if (existing?.processId === processId && existing.generation === generation) return;
+
+    // Initial click and periodic output polling share this single-flight guard.
+    // A superseded request cannot release a newer process's guard or write its log.
+    const token = { processId, generation };
+    processOutputInFlightRef.current = token;
+    const current = processLogRef.current;
+    const stdoutOffset = current?.processId === processId ? current.stdoutOffset : 0;
+    const stderrOffset = current?.processId === processId ? current.stderrOffset : 0;
+    void readManagedProcessOutput(processId, stdoutOffset, stderrOffset)
+      .then((chunk) => {
+        if (processOutputInFlightRef.current === token
+          && expandedProcessIdRef.current === processId
+          && processOutputGenerationRef.current === generation
+          && chunk.processId === processId) {
+          setProcessLog((latest) => mergePolledProcessLog(latest, chunk));
+        }
+      })
+      .catch((error) => {
+        if (reportError && processOutputInFlightRef.current === token
+          && processOutputGenerationRef.current === generation) {
+          onError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (processOutputInFlightRef.current === token) processOutputInFlightRef.current = null;
+      });
+  }
+
   useEffect(() => {
     if (!expandedProcessId) return;
     if (!expandedProcessStatus || expandedProcessStatus === "pending" || expandedProcessStatus === "rejected") return;
 
-    const pollOutput = () => {
-      if (processOutputPollingRef.current) return;
-      processOutputPollingRef.current = true;
-      const current = processLogRef.current;
-      const stdoutOffset = current?.processId === expandedProcessId ? current.stdoutOffset : 0;
-      const stderrOffset = current?.processId === expandedProcessId ? current.stderrOffset : 0;
-      readManagedProcessOutput(expandedProcessId, stdoutOffset, stderrOffset)
-        .then((chunk) => {
-          if (expandedProcessIdRef.current === chunk.processId) {
-            setProcessLog((latest) => mergeLogChunk(latest, chunk));
-          }
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          processOutputPollingRef.current = false;
-        });
-    };
-
-    const timer = window.setInterval(pollOutput, expandedProcessStatus === "running" ? 1500 : 4000);
+    const generation = processOutputGenerationRef.current;
+    const timer = window.setInterval(
+      () => requestProcessOutput(expandedProcessId, generation),
+      expandedProcessStatus === "running" ? 1500 : 4000,
+    );
     return () => window.clearInterval(timer);
   }, [expandedProcessId, expandedProcessStatus]);
 
   async function refreshLiveActivity() {
+    const activityRevision = ++activitySnapshotRevisionRef.current;
     const [liveHistory, managed] = await Promise.all([
       listTerminalHistory(undefined, 60),
       listManagedProcesses(undefined, 60),
     ]);
-    setTerminalHistory(liveHistory);
-    setProcesses(managed);
+    if (activityRevision !== activitySnapshotRevisionRef.current) return;
+    setTerminalHistory((current) => reconcilePolledRecords(current, liveHistory));
+    setProcesses((current) => reconcilePolledRecords(current, managed));
   }
 
   async function requestPreset(preset: CommandPreset) {
@@ -327,24 +390,15 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
     }
   }
 
-  async function toggleProcessOutput(process: ManagedProcessRecord) {
-    if (expandedProcessId === process.id) {
-      expandedProcessIdRef.current = null;
-      setExpandedProcessId(null);
-      setProcessLog(null);
-      return;
-    }
-    expandedProcessIdRef.current = process.id;
-    setExpandedProcessId(process.id);
+  function toggleProcessOutput(process: ManagedProcessRecord) {
+    const closing = expandedProcessIdRef.current === process.id;
+    const generation = ++processOutputGenerationRef.current;
+    processOutputInFlightRef.current = null;
+    expandedProcessIdRef.current = closing ? null : process.id;
+    setExpandedProcessId(closing ? null : process.id);
     setProcessLog(null);
-    try {
-      const chunk = await readManagedProcessOutput(process.id, 0, 0);
-      if (expandedProcessIdRef.current === process.id) {
-        setProcessLog(mergeLogChunk(null, chunk));
-      }
-    } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
-    }
+    processLogRef.current = null;
+    if (!closing) requestProcessOutput(process.id, generation, true);
   }
 
   const pendingCount = sandboxHistory.filter((command) => command.status === "pending").length
@@ -367,6 +421,19 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
           </p>
         </div>
         <div className="execution-heading-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={!selectedWorkspace}
+            onClick={() => {
+              const section = document.getElementById("commands-ai-workspace");
+              if (!section) return;
+              section.scrollIntoView({ block: "center", behavior: "smooth" });
+              section.focus({ preventScroll: true });
+            }}
+          >
+            AI Workspace
+          </button>
           {runningProcesses > 0 ? <span className="running-count">{runningProcesses} running</span> : null}
           {pendingCount > 0 ? <span className="pending-count">{pendingCount} pending</span> : null}
           <button className="secondary-button" type="button" onClick={() => refresh()} disabled={loading}>
@@ -388,6 +455,14 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
           </select>
           <span><strong>{policyCopy(selectedWorkspace)}</strong></span>
         </div>
+      ) : null}
+
+      {selectedWorkspace ? (
+        <TaskIntegrityPanel
+          workspaceId={selectedWorkspace.id}
+          onError={onError}
+          onNotice={onNotice}
+        />
       ) : null}
 
       <div className="live-terminal-grid">
@@ -468,6 +543,8 @@ function ExecutionPanel({ workspaces, gatewayRunning, onError }: ExecutionPanelP
           </div>
         </div>
       </div>
+
+      <CustomApplicationsPanel workspaceId={selectedWorkspace?.id ?? null} onError={onError} onNotice={onNotice} />
 
       <ApplicationLauncher
         workspace={selectedWorkspace}

@@ -665,7 +665,10 @@ fn install_ffmpeg(app: &AppHandle, cancel: Option<&AtomicBool>) -> Result<(), St
         let mut file = archive
             .by_index(index)
             .map_err(|error| format!("Could not inspect the FFmpeg package: {error}"))?;
-        let name = file.name().replace('\\', "/");
+        let name = file
+            .name()
+            .map_err(|error| format!("Could not decode an FFmpeg package entry name: {error}"))?
+            .replace('\\', "/");
         let lower = name.to_ascii_lowercase();
         let looks_like_binary = lower.contains("/binaries/ffmpeg-")
             && !lower.ends_with(".txt")

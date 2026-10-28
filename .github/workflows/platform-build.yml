@@ -75,13 +75,10 @@ jobs:
         shell: bash
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          case "${GITHUB_REF_NAME}" in
-            "v${VERSION}"|"v${VERSION}-retry"*) ;;
-            *)
-              echo "Tag ${GITHUB_REF_NAME} does not match RepoTunnel v${VERSION}." >&2
-              exit 1
-              ;;
-          esac
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "STOP: Release tag ${GITHUB_REF_NAME} must match exact source version v${VERSION}." >&2
+            exit 1
+          fi
 
       - name: Verify release metadata
         shell: bash
@@ -453,8 +450,13 @@ jobs:
 
   release:
     name: Publish release
-    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+    # Manual dispatch validates and builds only. Publication requires an
+    # explicit version tag and successful platform/security gates.
+    if: github.ref_type == 'tag'
     needs: [quality, linux, windows_checks, windows, macos]
+    concurrency:
+      group: repotunnel-release-publication
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -491,21 +493,23 @@ jobs:
           )
           ls -lh release-files
 
-      - name: Point final release tag at verified commit
+      - name: Verify immutable release tag and unpublished release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh api --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" \
-              -f sha="${GITHUB_SHA}" \
-              -F force=true >/dev/null
-          else
-            gh api --method POST \
-              "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/${RELEASE_TAG}" \
-              -f sha="${GITHUB_SHA}" >/dev/null
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
+            echo "STOP: Publishing requires the exact source-version tag." >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}" || {
+            echo "STOP: Checked-out commit differs from the workflow release commit." >&2
+            exit 1
+          }
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "STOP: Release ${RELEASE_TAG} already exists; do not overwrite it." >&2
+            exit 1
           fi
 
       - name: Publish GitHub release
@@ -516,15 +520,3 @@ jobs:
             --verify-tag \
             --title "RepoTunnel ${RELEASE_TAG}" \
             --notes-file release-notes.md
-
-      - name: Remove successful retry tag
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
-            gh api --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/git/refs/tags/${GITHUB_REF_NAME}" \
-              >/dev/null || echo "Release succeeded; retry-tag cleanup can be done later."
-          fi

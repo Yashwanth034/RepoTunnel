@@ -5,6 +5,7 @@ import {
   completeTeamSession,
   createTeamSession,
   deleteTeamSession,
+  disconnectTeamAgent,
   getTeamSession,
   listTeamSessions,
   pauseTeamSession,
@@ -65,6 +66,7 @@ function taskStatusClass(task: TeamTask): string {
 }
 
 function agentPresenceLabel(snapshot: TeamSnapshot, agent: TeamAgent): string {
+  if (agent.manuallyDisconnected) return "Disconnected";
   const reviewRequired = currentTasks(snapshot).some((task) =>
     task.status === "review" && task.reviewerAgentId === agent.id,
   );
@@ -129,6 +131,20 @@ ${persistentInstructions()}
 Always re-check team_status before each coordination transition. First join, then wait until BOTH engineers are connected. Do not race ahead. Once both are joined, follow RepoTunnel's planning barrier exactly: both post plans, each creates one distinct initial implementation task, both confirm the split, then claim paths and implement in parallel. Cross-review each other; when review finds bugs, communicate the issue and let the owner fix it. Claim @browser before interactive browser testing and release it afterward. Do not voluntarily go offline while the current request is active: if you finish first, remain attached, long-poll team_status while waiting when useful, and stay available for the teammate's review/verification until completion or the final report. If global AI access is paused, stop immediately.`;
 }
 
+function reconnectPrompt(snapshot: TeamSnapshot, agent: TeamAgent): string {
+  return `Resume the EXISTING RepoTunnel Team role in this NEW AI chat — do not create a Team or agent.
+
+Project: ${snapshot.session.workspaceName}
+Team session: ${snapshot.session.id}
+Assigned agent ID: ${agent.id}
+Role: ${agent.role}
+
+The old AI chat was manually disconnected by the project owner because the previous conversation was lost. This role, tasks, file claims, messages, reviews and checkpoint have been preserved.
+
+Use RepoTunnel team_status with session_id=${snapshot.session.id} and agent_id=${agent.id}, then team_action action=join with these exact IDs and an appropriate client_label.
+Read current Team tasks, messages, reviews, get_resume_snapshot and project memory. Inspect live Git/workspace state, preserve uncommitted work, and CONTINUE the claimed task. Do not duplicate implementation, reset the Team, or replay completed planning. Coordinate with the other existing engineer and honor all existing ownership restrictions. If access is paused or a tool reports an actual permission denial, stop and report the blocker.`;
+}
+
 type TeamPanelProps = {
   workspaces: Workspace[];
   selectedWorkspaceId: string | null;
@@ -153,6 +169,7 @@ function TeamPanel({ workspaces, selectedWorkspaceId, onSelectWorkspace, onNotic
   const [agentBName, setAgentBName] = useState("Engineer B");
   const [agentBRole, setAgentBRole] = useState(DEFAULT_AGENT_B_ROLE);
   const [confirmAction, setConfirmAction] = useState<"end" | "delete" | null>(null);
+  const [disconnectAgentId, setDisconnectAgentId] = useState<string | null>(null);
   const hasLiveSession = sessions.some((session) => session.status === "active" || session.status === "paused");
 
   const refresh = useCallback(async (preferredSessionId?: string | null) => {
@@ -265,6 +282,23 @@ function TeamPanel({ workspaces, selectedWorkspaceId, onSelectWorkspace, onNotic
     }
   }
 
+  async function handleDisconnectAgent() {
+    if (!snapshot || !disconnectAgentId) return;
+    const agent=snapshot.session.agents.find((item) => item.id === disconnectAgentId);
+    setBusy(true);
+    try {
+      const updated=await disconnectTeamAgent(snapshot.session.id,disconnectAgentId);
+      setSnapshot(updated);
+      await refresh(updated.session.id);
+      setDisconnectAgentId(null);
+      onNotice(`${agent?.name ?? "AI"} disconnected. Open a new chat and use Copy resume prompt to continue the same Team role.`);
+    } catch(error) {
+      onNotice(`Team Mode: ${errorMessage(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleEndTeam() {
     if (!snapshot) return;
     await mutate(
@@ -297,6 +331,7 @@ function TeamPanel({ workspaces, selectedWorkspaceId, onSelectWorkspace, onNotic
 
   const tasks = snapshot ? currentTasks(snapshot) : [];
   const joinedCount = snapshot?.session.agents.filter((agent) => agent.joinedAt).length ?? 0;
+  const connectedCount = snapshot?.session.agents.filter((agent) => agent.joinedAt && !agent.manuallyDisconnected).length ?? 0;
   const waitingForNextRequest = snapshot?.session.status === "active" && snapshot.session.phase === "complete";
 
   return (
@@ -388,17 +423,18 @@ function TeamPanel({ workspaces, selectedWorkspaceId, onSelectWorkspace, onNotic
           <section className="panel team-agents-panel team-simple-agents">
             <div className="panel-heading-row">
               <div><h3>Your AI engineers</h3><p>They keep these identities for this project until you end the Team.</p></div>
-              <div className="team-agent-heading-actions"><span>{joinedCount}/2 connected</span>{joinedCount === 2 ? <span className="team-connected-note">Connected — kickoff is no longer needed</span> : <span className="team-connected-note">Use the separate A/B kickoff buttons below</span>}</div>
+              <div className="team-agent-heading-actions"><span>{connectedCount}/2 attached</span>{connectedCount === 2 ? <span className="team-connected-note">Connected — kickoff is no longer needed</span> : snapshot.session.agents.some((agent) => agent.manuallyDisconnected) ? <span className="team-connected-note">AI disconnected — copy its resume prompt below</span> : <span className="team-connected-note">Use the separate A/B kickoff buttons below</span>}</div>
             </div>
             <div className="team-agent-grid">
               {snapshot.session.agents.map((agent, index) => {
                 const currentTask = snapshot.session.tasks.find((task) => task.id === agent.currentTaskId)?.title;
                 return (
                   <article className="team-agent-card team-simple-agent-card" key={agent.id}>
-                    <div className="team-agent-card-head"><span className="team-agent-avatar">AI {index + 1}</span><span className={`team-agent-presence team-agent-presence-${agent.status}`}>{agentPresenceLabel(snapshot, agent)}</span></div>
+                    <div className="team-agent-card-head"><span className="team-agent-avatar">AI {index + 1}</span><div className="team-agent-card-head-actions"><span className={`team-agent-presence team-agent-presence-${agent.manuallyDisconnected ? "offline" : agent.status}`}>{agentPresenceLabel(snapshot, agent)}</span>{agent.joinedAt && !agent.manuallyDisconnected && ["active","paused"].includes(snapshot.session.status) ? <button type="button" className="team-agent-disconnect-button" disabled={busy} title={`Disconnect previous ${agent.name} AI chat binding only — preserve its work`} onClick={() => setDisconnectAgentId(agent.id)}>Disconnect AI</button> : null}</div></div>
                     <strong>{agent.name}</strong>
                     <div className="team-agent-primary-status">{currentTask ?? (waitingForNextRequest ? "Ready for your next request" : agent.joinedAt ? "Coordinating with team" : "Waiting to join")}</div>
                     <div className="team-agent-quick-meta"><span>{agent.clientLabel ?? "Not connected"}</span><span>{relativeHeartbeat(agent.lastSeenAt)}</span><span>{agentContributed(snapshot, agent.id) ? "Implemented work" : "Implementation pending"}</span></div>
+                    {agent.manuallyDisconnected ? <button type="button" className="team-agent-resume-button" onClick={() => void copyText(reconnectPrompt(snapshot,agent), `${agent.name} resume prompt`)}>Copy resume prompt</button> : null}
                     {!agent.joinedAt ? <button type="button" onClick={() => void copyText(kickoffPrompt(snapshot, agent), `${agent.name} kickoff`)}>Copy {agent.name} kickoff</button> : null}
                   </article>
                 );
@@ -451,6 +487,18 @@ function TeamPanel({ workspaces, selectedWorkspaceId, onSelectWorkspace, onNotic
             {snapshot.recommendedAction ? <div className="team-next-action"><span>RepoTunnel guidance</span><p>{snapshot.recommendedAction}</p></div> : null}
           </details>
         </>
+      ) : null}
+
+      {disconnectAgentId && snapshot ? (
+        <ConfirmationDialog
+          title={`Disconnect ${snapshot.session.agents.find((agent) => agent.id === disconnectAgentId)?.name ?? "this AI"}?`}
+          message="Use this only if the old AI chat is lost or forgot to unbind. This revokes its current Team connection and lets a NEW chat take over the SAME role. Tasks, file claims, review obligations, messages, and progress stay intact. Already-running external commands may continue; check them before resuming."
+          confirmLabel="Disconnect AI"
+          busy={busy}
+          busyLabel="Disconnecting…"
+          onCancel={() => setDisconnectAgentId(null)}
+          onConfirm={() => void handleDisconnectAgent()}
+        />
       ) : null}
 
       {confirmAction === "end" ? (

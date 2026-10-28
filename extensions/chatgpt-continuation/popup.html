@@ -40,6 +40,26 @@
       <div id="targetList" class="target-list"></div>
     </section>
 
+    <section class="manual">
+      <div class="section-heading">
+        <strong>Default message chats</strong>
+        <span id="manualTargetCount" class="count">0</span>
+      </div>
+      <p class="section-copy">Send the same message after each completed reply, including supported stuck/error recovery.</p>
+
+      <label for="manualUrl">ChatGPT conversation URL</label>
+      <input id="manualUrl" class="full-input" type="url" placeholder="https://chatgpt.com/c/..." autocomplete="off" spellcheck="false" />
+
+      <label for="manualMessage">Default message</label>
+      <textarea id="manualMessage" rows="3" placeholder="Enter the exact message to send automatically" spellcheck="true"></textarea>
+
+      <div class="manual-form-actions">
+        <button id="addManualTarget" class="secondary manual-save" type="button">Save default-message chat</button>
+        <button id="cancelManualEdit" class="secondary" type="button" hidden>Cancel</button>
+      </div>
+      <div id="manualTargetList" class="target-list manual-list"></div>
+    </section>
+
     <div class="footer-row">
       <button id="refreshBridge" class="secondary" type="button">Check bridge</button>
       <span id="version" class="version"></span>

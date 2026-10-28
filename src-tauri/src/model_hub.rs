@@ -3,15 +3,15 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
-    },
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ const OLLAMA_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const OLLAMA_SERVICE_GRACE: Duration = Duration::from_millis(1600);
 const OLLAMA_STARTUP_POLL: Duration = Duration::from_millis(180);
 const OLLAMA_USER_FALLBACK_ENDPOINT: &str = "http://127.0.0.1:11435";
+#[cfg(any(target_os = "linux", test))]
 const OLLAMA_USER_SERVICE_START_ARGS: &[&str] = &[
     "--user",
     "start",
@@ -47,6 +48,7 @@ struct OwnedOllama {
 }
 
 static OWNED_OLLAMA: OnceLock<Mutex<Option<OwnedOllama>>> = OnceLock::new();
+#[cfg(target_os = "linux")]
 static OLLAMA_USER_SERVICE_START_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 fn ollama_autostart_supported_endpoint(endpoint: &str) -> bool {
@@ -63,10 +65,50 @@ fn ollama_autostart_supported_endpoint(endpoint: &str) -> bool {
     host_ok && path_ok && parsed.port_or_known_default() == Some(11434)
 }
 
+// Keep the CLI discovery independent of shell PATH conventions. Native Ollama
+// installers do not always expose their executable to a packaged GUI process.
+fn ollama_candidates_for_platform(
+    platform: &str,
+    local_app_data: Option<&Path>,
+    program_files: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = vec![PathBuf::from("ollama")];
+    match platform {
+        "windows" => {
+            if let Some(base) = local_app_data {
+                candidates.push(base.join("Programs/Ollama/ollama.exe"));
+            }
+            if let Some(base) = program_files {
+                candidates.push(base.join("Ollama/ollama.exe"));
+            }
+        }
+        "macos" => {
+            candidates.push(PathBuf::from("/opt/homebrew/bin/ollama"));
+            candidates.push(PathBuf::from("/usr/local/bin/ollama"));
+            candidates.push(PathBuf::from("/usr/bin/ollama"));
+        }
+        "linux" => {
+            candidates.push(PathBuf::from("/usr/local/bin/ollama"));
+            candidates.push(PathBuf::from("/usr/bin/ollama"));
+        }
+        _ => {}
+    }
+    candidates
+}
+
+fn ollama_candidates() -> Vec<PathBuf> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+    ollama_candidates_for_platform(
+        std::env::consts::OS,
+        local_app_data.as_deref(),
+        program_files.as_deref(),
+    )
+}
+
 fn spawn_ollama_server() -> std::io::Result<Child> {
-    let candidates = ["ollama", "/usr/local/bin/ollama", "/usr/bin/ollama"];
     let mut last_not_found = None;
-    for executable in candidates {
+    for executable in ollama_candidates() {
         let mut command = Command::new(executable);
         command
             .arg("serve")
@@ -91,6 +133,7 @@ fn spawn_ollama_server() -> std::io::Result<Child> {
     }))
 }
 
+#[cfg(target_os = "linux")]
 fn try_start_existing_ollama_service() {
     if OLLAMA_USER_SERVICE_START_ATTEMPTED.swap(true, Ordering::SeqCst) {
         return;
@@ -106,6 +149,12 @@ fn try_start_existing_ollama_service() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_start_existing_ollama_service() {
+    // The existing API probe and private owned-process fallback work here;
+    // never invoke Linux service managers from Windows/macOS Model Hub.
 }
 
 async fn wait_for_ollama_api(tags_url: &str, timeout: Duration, window: Duration) -> Option<Value> {
@@ -125,7 +174,8 @@ fn user_ollama_models_root() -> Option<PathBuf> {
     let models_root = std::env::var_os("OLLAMA_MODELS")
         .map(PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ollama/models"))
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| PathBuf::from(home).join(".ollama/models"))
         })?;
     let manifests = models_root.join("manifests");
     let mut stack = vec![manifests];
@@ -154,9 +204,8 @@ fn user_ollama_models_root() -> Option<PathBuf> {
 }
 
 fn spawn_user_ollama_server(models_root: &Path) -> std::io::Result<Child> {
-    let candidates = ["ollama", "/usr/local/bin/ollama", "/usr/bin/ollama"];
     let mut last_not_found = None;
-    for executable in candidates {
+    for executable in ollama_candidates() {
         let mut command = Command::new(executable);
         command
             .arg("serve")
@@ -1876,9 +1925,10 @@ mod tests {
 
     use super::{
         chat_connect_timed_out, chat_idle_timed_out, discover_provider_with_timeout,
-        load_config_path, run_model_test_with_timeout, save_config_path, stream_chat,
-        stream_chat_structured, validate_loopback_endpoint, LocalChatErrorKind, LocalChatMessage,
-        ModelHubConfig, ModelProviderId, ModelSelection, OLLAMA_USER_SERVICE_START_ARGS,
+        load_config_path, ollama_candidates_for_platform, run_model_test_with_timeout,
+        save_config_path, stream_chat, stream_chat_structured, validate_loopback_endpoint,
+        LocalChatErrorKind, LocalChatMessage, ModelHubConfig, ModelProviderId, ModelSelection,
+        OLLAMA_USER_SERVICE_START_ARGS,
     };
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -2002,6 +2052,30 @@ mod tests {
             "repotunnel-model-hub-test-{}-{label}-{id}.json",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn ollama_cli_discovery_covers_native_windows_and_macos_installs() {
+        let app_data = PathBuf::from("C:/Users/test/AppData/Local");
+        let program_files = PathBuf::from("C:/Program Files");
+        let windows =
+            ollama_candidates_for_platform("windows", Some(&app_data), Some(&program_files));
+        assert_eq!(windows[0], PathBuf::from("ollama"));
+        assert!(windows.contains(&app_data.join("Programs/Ollama/ollama.exe")));
+        assert!(windows.contains(&program_files.join("Ollama/ollama.exe")));
+        assert!(!windows
+            .iter()
+            .any(|path| path.to_string_lossy().contains("/usr/bin/")));
+
+        let macos = ollama_candidates_for_platform("macos", None, None);
+        assert!(macos.contains(&PathBuf::from("/opt/homebrew/bin/ollama")));
+        assert!(macos.contains(&PathBuf::from("/usr/local/bin/ollama")));
+
+        let linux = ollama_candidates_for_platform("linux", None, None);
+        assert!(linux.contains(&PathBuf::from("/usr/bin/ollama")));
+        assert!(!linux
+            .iter()
+            .any(|path| path.to_string_lossy().contains("Ollama.exe")));
     }
 
     #[test]

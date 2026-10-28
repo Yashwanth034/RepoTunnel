@@ -48,6 +48,14 @@ pub(crate) struct AppState {
     last_remote_request_at: AtomicU64,
 }
 
+fn secure_tunnel_token_matches(
+    candidate: &str,
+    expected_hash: &[u8; 32],
+    process_running: bool,
+) -> bool {
+    process_running && crate::mcp_auth::verify_token(candidate, expected_hash)
+}
+
 impl AppState {
     pub(crate) fn ai_access_paused(&self) -> bool {
         self.ai_access_paused.load(Ordering::SeqCst)
@@ -681,69 +689,102 @@ impl AppState {
         public_tunnel::clear_config(app)
     }
 
-    pub(crate) fn chat_connection_status(&self) -> Result<ChatConnectionStatus, String> {
-        let client = connection::detect_tunnel_client();
-        let mut tunnel = self
-            .tunnel
-            .lock()
-            .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
-
-        let finished_status = if let Some(runtime) = tunnel.runtime.as_mut() {
-            match runtime.child.try_wait() {
-                Ok(Some(status)) => Some(Ok(status)),
-                Ok(None) => None,
-                Err(error) => Some(Err(error)),
-            }
-        } else {
-            None
+    /// Accepts the private bearer only while its owning tunnel-client process is
+    /// still alive. The stored value is a hash, and comparison is constant-time.
+    pub(crate) fn verify_secure_tunnel_token(&self, candidate: &str) -> bool {
+        let Ok(mut tunnel) = self.tunnel.lock() else {
+            return false;
         };
+        let Some(runtime) = tunnel.runtime.as_mut() else {
+            return false;
+        };
+        let process_running = matches!(runtime.child.try_wait(), Ok(None));
+        secure_tunnel_token_matches(candidate, &runtime.local_mcp_token_hash, process_running)
+    }
 
-        if let Some(result) = finished_status {
-            match result {
-                Ok(status) => {
-                    if let Some(finished) = tunnel.runtime.take() {
-                        let detail = connection::log_tail(&finished.log_file)
-                            .unwrap_or_else(|| format!("tunnel-client exited with {status}."));
-                        connection::cleanup_runtime_files(&finished);
-                        tunnel.last_message = Some(detail);
+    pub(crate) fn chat_connection_status(&self) -> Result<ChatConnectionStatus, String> {
+        let client_version = connection::detect_tunnel_client().map(|info| info.version);
+        let client_available = client_version.is_some();
+
+        // Snapshot the process state and health URL while holding the state lock.
+        // Do the HTTP readiness probe only after releasing it, so MCP requests
+        // authorized by verify_secure_tunnel_token cannot be stalled by polling.
+        let (active_runtime, last_message) = {
+            let mut tunnel = self
+                .tunnel
+                .lock()
+                .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
+
+            let finished_status = if let Some(runtime) = tunnel.runtime.as_mut() {
+                match runtime.child.try_wait() {
+                    Ok(Some(status)) => Some(Ok(status)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                }
+            } else {
+                None
+            };
+
+            if let Some(result) = finished_status {
+                match result {
+                    Ok(status) => {
+                        if let Some(finished) = tunnel.runtime.take() {
+                            let detail = connection::log_tail(&finished.log_file)
+                                .unwrap_or_else(|| format!("tunnel-client exited with {status}."));
+                            connection::cleanup_runtime_files(&finished);
+                            tunnel.last_message = Some(detail);
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(mut uncertain) = tunnel.runtime.take() {
+                            connection::stop_runtime(&mut uncertain);
+                        }
+                        tunnel.last_message = Some(format!(
+                            "Could not inspect the tunnel-client process; it was stopped for safety: {error}"
+                        ));
                     }
                 }
-                Err(error) => {
-                    tunnel.last_message = Some(format!(
-                        "Could not inspect the tunnel-client process: {error}"
-                    ));
-                }
             }
-        }
 
-        if let Some(runtime) = tunnel.runtime.as_ref() {
-            let (ready, message) = match connection::runtime_ready(runtime) {
-                Ok(true) => (true, Some("Secure MCP Tunnel is ready.".to_string())),
-                Ok(false) => (false, Some("Secure MCP Tunnel is starting.".to_string())),
-                Err(detail) => (false, Some(detail)),
+            let active = tunnel.runtime.as_ref().map(|runtime| {
+                (
+                    runtime.tunnel_id.clone(),
+                    connection::runtime_health_url(runtime),
+                )
+            });
+            (active, tunnel.last_message.clone())
+        };
+
+        if let Some((tunnel_id, health_url)) = active_runtime {
+            let (ready, message) = match health_url.as_deref() {
+                Some(url) => match connection::probe_runtime_readiness(url) {
+                    Ok(true) => (true, Some("Secure MCP Tunnel is ready.".to_string())),
+                    Ok(false) => (false, Some("Secure MCP Tunnel is starting.".to_string())),
+                    Err(detail) => (false, Some(detail)),
+                },
+                None => (false, Some("Secure MCP Tunnel is starting.".to_string())),
             };
-            let admin_url =
-                connection::runtime_health_url(runtime).map(|base| format!("{base}/ui"));
+            let admin_url = health_url.map(|base| format!("{base}/ui"));
 
             return Ok(ChatConnectionStatus {
-                client_available: client.is_some(),
-                client_version: client.map(|info| info.version),
+                client_available,
+                client_version,
                 running: true,
                 ready,
-                tunnel_id: Some(runtime.tunnel_id.clone()),
+                tunnel_id: Some(tunnel_id),
                 admin_url,
                 message,
             });
         }
 
         Ok(ChatConnectionStatus {
-            client_available: client.is_some(),
-            client_version: client.map(|info| info.version),
+            client_available,
+            client_version,
             running: false,
             ready: false,
             tunnel_id: None,
             admin_url: None,
-            message: tunnel.last_message.clone(),
+            message: last_message,
         })
     }
 
@@ -841,5 +882,25 @@ impl Drop for AppState {
                 let _ = runtime.worker.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod secure_tunnel_auth_tests {
+    use super::secure_tunnel_token_matches;
+    use crate::mcp_auth::{generate_token, hash_token};
+
+    #[test]
+    fn private_tunnel_token_is_bound_to_the_current_running_process() {
+        let token = generate_token().unwrap();
+        let stored_hash = hash_token(&token);
+
+        assert!(secure_tunnel_token_matches(&token, &stored_hash, true));
+        assert!(!secure_tunnel_token_matches(
+            "wrong-token",
+            &stored_hash,
+            true
+        ));
+        assert!(!secure_tunnel_token_matches(&token, &stored_hash, false));
     }
 }

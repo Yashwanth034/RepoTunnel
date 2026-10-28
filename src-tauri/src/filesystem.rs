@@ -219,7 +219,12 @@ pub(crate) fn list_directory(
 
 pub(crate) fn read_file(workspace: &Workspace, relative_path: &str) -> Result<FileContent, String> {
     let path = resolve_workspace_path(workspace, relative_path, AccessOperation::Read, true)?;
-    let metadata = fs::metadata(&path)
+    let mut file =
+        File::open(&path).map_err(|error| format!("Could not open the file: {error}"))?;
+    #[cfg(target_os = "linux")]
+    crate::access::ensure_opened_file_authorized(workspace, &file)?;
+    let metadata = file
+        .metadata()
         .map_err(|error| format!("Could not inspect the requested file: {error}"))?;
 
     if !metadata.is_file() {
@@ -233,11 +238,10 @@ pub(crate) fn read_file(workspace: &Workspace, relative_path: &str) -> Result<Fi
         ));
     }
 
-    if project_index::is_probably_binary(&path, metadata.len())? {
+    if project_index::is_probably_binary_opened(&path, metadata.len(), &mut file)? {
         return Err("Binary files are not available through the text file tool.".to_string());
     }
 
-    let file = File::open(&path).map_err(|error| format!("Could not open the file: {error}"))?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_READ_BYTES + 1)
         .read_to_end(&mut bytes)
@@ -259,20 +263,26 @@ pub(crate) fn read_file(workspace: &Workspace, relative_path: &str) -> Result<Fi
 }
 
 fn search_file(
+    workspace: &Workspace,
     path: &Path,
     relative_path: &str,
     query_lower: &str,
     matches: &mut Vec<SearchMatch>,
 ) -> Result<(), String> {
-    let metadata = fs::metadata(path)
+    let file = File::open(path)
+        .map_err(|error| format!("Could not open a file during search: {error}"))?;
+    #[cfg(target_os = "linux")]
+    crate::access::ensure_opened_file_authorized(workspace, &file)?;
+    #[cfg(not(target_os = "linux"))]
+    let _ = workspace;
+    let metadata = file
+        .metadata()
         .map_err(|error| format!("Could not inspect a file during search: {error}"))?;
 
     if !metadata.is_file() || metadata.len() > MAX_SEARCH_FILE_BYTES {
         return Ok(());
     }
 
-    let file = File::open(path)
-        .map_err(|error| format!("Could not open a file during search: {error}"))?;
     let reader = BufReader::new(file);
 
     for (index, line_result) in reader.split(b'\n').enumerate() {
@@ -340,7 +350,7 @@ pub(crate) fn search_files_detailed(
 
     for path in scan.files {
         let relative = workspace_relative_path(&root, &path);
-        match search_file(&path, &relative, &query_lower, &mut matches) {
+        match search_file(workspace, &path, &relative, &query_lower, &mut matches) {
             Ok(()) => searched_file_count = searched_file_count.saturating_add(1),
             Err(_) => {
                 skipped_io_count = skipped_io_count.saturating_add(1);
@@ -650,6 +660,74 @@ mod tests {
             command_policy: CommandPolicy::Review,
         };
         (root, workspace)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn opened_file_guard_rejects_alias_retargeted_after_path_check() {
+        use std::{fs::File, os::unix::fs::symlink};
+
+        let (root, workspace) = temp_workspace();
+        let outside = root.with_extension("outside");
+        fs::write(&outside, "private data").unwrap();
+        let alias = root.join("alias.txt");
+        symlink(root.join("src/app.ts"), &alias).unwrap();
+        crate::access::resolve_workspace_path(
+            &workspace,
+            "alias.txt",
+            crate::access::AccessOperation::Read,
+            true,
+        )
+        .unwrap();
+
+        fs::remove_file(&alias).unwrap();
+        symlink(&outside, &alias).unwrap();
+        let wrong_file = File::open(&alias).unwrap();
+        fs::remove_file(&alias).unwrap();
+        symlink(root.join("src/app.ts"), &alias).unwrap();
+        assert!(crate::access::ensure_opened_file_authorized(&workspace, &wrong_file).is_err());
+
+        let permitted_file = File::open(&alias).unwrap();
+        assert!(crate::access::ensure_opened_file_authorized(&workspace, &permitted_file).is_ok());
+        fs::create_dir_all(root.join(".ssh")).unwrap();
+        fs::write(root.join(".ssh/secret.txt"), "private").unwrap();
+        let protected_file = File::open(root.join(".ssh/secret.txt")).unwrap();
+        assert!(crate::access::ensure_opened_file_authorized(&workspace, &protected_file).is_err());
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(outside);
+    }
+
+    #[test]
+    fn binary_classification_uses_opened_handle_after_path_replacement() {
+        use std::{fs::File, io::Read as _};
+
+        let (root, _workspace) = temp_workspace();
+        let path = root.join("src/app.ts");
+        let mut opened = File::open(&path).unwrap();
+        let original_size = opened.metadata().unwrap().len();
+
+        fs::rename(&path, root.join("src/original.ts")).unwrap();
+        fs::write(&path, [0_u8, 0, 0, 0]).unwrap();
+
+        assert!(!crate::project_index::is_probably_binary_opened(
+            &path,
+            original_size,
+            &mut opened,
+        )
+        .unwrap());
+        let mut original_text = String::new();
+        opened.read_to_string(&mut original_text).unwrap();
+        assert!(original_text.contains("hello"));
+
+        let mut replaced = File::open(&path).unwrap();
+        assert!(crate::project_index::is_probably_binary_opened(
+            &path,
+            replaced.metadata().unwrap().len(),
+            &mut replaced,
+        )
+        .unwrap());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

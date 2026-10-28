@@ -1,37 +1,35 @@
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import AppHeader from "./components/AppHeader";
 import AppErrorBoundary from "./components/AppErrorBoundary";
 import AppSidebar, { type AppView } from "./components/AppSidebar";
-import ChangeHistoryPanel from "./components/ChangeHistoryPanel";
 import PendingChangeReview from "./components/PendingChangeReview";
-import CheckpointManager from "./components/CheckpointManager";
 import ChatConnectionPanel from "./components/ChatConnectionPanel";
 import ConfirmationDialog from "./components/ConfirmationDialog";
-import ExecutionPanel from "./components/ExecutionPanel";
 import GatewayPanel from "./components/GatewayPanel";
-import GitPanel from "./components/GitPanel";
-import ProductionPanel from "./components/ProductionPanel";
 import HelpPanel from "./components/HelpPanel";
 import HttpsSetupGuide from "./components/HttpsSetupGuide";
+import SecureMcpTunnelGuide from "./components/SecureMcpTunnelGuide";
 import HomeWorkspace from "./components/HomeWorkspace";
-import ModelHub from "./components/ModelHub";
-import PhonePanel from "./components/PhonePanel";
 import HomeFeatureDialog from "./components/HomeFeatureDialog";
 import NewProjectDialog from "./components/NewProjectDialog";
 import ProjectSetupPanel from "./components/ProjectSetupPanel";
 import ProjectMemoryPanel from "./components/ProjectMemoryPanel";
 import ProjectRail from "./components/ProjectRail";
-import TeamPanel from "./components/TeamPanel";
-import VideoPanel from "./components/VideoPanel";
 import WindowChrome from "./components/WindowChrome";
 import ProjectOverviewPanel from "./components/ProjectOverviewPanel";
 import PublicTunnelPanel from "./components/PublicTunnelPanel";
 import WorkspaceList from "./components/WorkspaceList";
-import WorkflowPanel from "./components/WorkflowPanel";
-import WorkspaceEditor, { type EditorDocument, type EditorRevealLocation, type EditorSelectionContext } from "./components/WorkspaceEditor";
+import type { EditorDocument, EditorRevealLocation, EditorSelectionContext } from "./components/WorkspaceEditor";
 import type { EditorProblem } from "./components/DeveloperDock";
 import WorkspaceProductivity from "./components/WorkspaceProductivity";
+import { markMissingEditorFile, reconcileEditorFileChecks } from "./lib/editorSync";
+import { coalesceAsync, mapBounded } from "./lib/asyncWork";
+import { restoreEditorDocuments, type SavedEditorTab } from "./lib/editorSessionRestore";
+import { useVisibleViewRefresh } from "./lib/visibleViewRefresh";
+import { useWorkspaceHealthPolling } from "./lib/workspaceHealthPolling";
+import { useProjectGitStatus } from "./lib/projectGitStatus";
+import { useProjectHistory } from "./lib/projectHistory";
 import {
   getFileInfo,
   openWorkspacePathLocal,
@@ -48,6 +46,7 @@ import {
   clearVersionHistory,
   getAiAccessStatus,
   getChatConnectionStatus,
+  installOfficialTunnelClient,
   getGatewayStatus,
   getModelHub,
   getWorkspaceHealth,
@@ -85,7 +84,6 @@ import type {
   CommandPolicy,
   DirectoryEntry,
   GatewayStatus,
-  GitRepositoryStatus,
   HomeContextErrorInput,
   HomeContextTextInput,
   ModelHubSnapshot,
@@ -93,11 +91,26 @@ import type {
   PublicTunnelStatus,
   SafetyScanResult,
   Workspace,
-  WorkspaceHealth,
   WorkspaceAccessMode,
   WorkspaceChangePolicy,
   VersionTimeline,
 } from "./types";
+
+// Keep heavyweight, non-home views out of the initial app/modulepreload graph.
+// Module-level lazy identities are stable across navigation and editor edits.
+const WorkspaceEditor = lazy(() => import("./components/WorkspaceEditor"));
+const VideoPanel = lazy(() => import("./components/VideoPanel"));
+const ProductionPanel = lazy(() => import("./components/ProductionPanel"));
+const AgentsPanel = lazy(() => import("./components/AgentsPanel"));
+const TeamPanel = lazy(() => import("./components/TeamPanel"));
+const RemoteMachinesPanel = lazy(() => import("./components/RemoteMachinesPanel"));
+const PhonePanel = lazy(() => import("./components/PhonePanel"));
+const ExecutionPanel = lazy(() => import("./components/ExecutionPanel"));
+const GitPanel = lazy(() => import("./components/GitPanel"));
+const WorkflowPanel = lazy(() => import("./components/WorkflowPanel"));
+const ModelHub = lazy(() => import("./components/ModelHub"));
+const ChangeHistoryPanel = lazy(() => import("./components/ChangeHistoryPanel"));
+const CheckpointManager = lazy(() => import("./components/CheckpointManager"));
 
 const initialStatus: GatewayStatus = {
   running: false,
@@ -198,16 +211,8 @@ function rememberRecentEditorFile(workspaceId: string, path: string) {
   }
 }
 
-type PersistedEditorTab = {
-  workspaceId: string;
-  path: string;
-  dirty: boolean;
-  draftContent?: string;
-  savedContent?: string;
-};
-
 type PersistedEditorSession = {
-  tabs: PersistedEditorTab[];
+  tabs: SavedEditorTab[];
   activeKey: string | null;
   secondaryKey: string | null;
 };
@@ -265,9 +270,12 @@ function App() {
   const [activeView, setActiveView] = useState<AppView>("overview");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
+  const [agentsWorkspaceId, setAgentsWorkspaceId] = useState<string | null>(null);
+  const [teamWorkspaceId, setTeamWorkspaceId] = useState<string | null>(null);
   const [changes, setChanges] = useState<ChangeRecord[]>([]);
-  const [versionTimeline, setVersionTimeline] = useState<VersionTimeline>({ records: [], currentVersionId: null });
-  const [activityTimeline, setActivityTimeline] = useState<ActivityTimeline>({ groups: [] });
+  const { versionTimeline, activityTimeline, refresh: refreshProjectHistory,
+    refreshVersions: refreshProjectVersions, refreshActivity: refreshProjectActivity } =
+    useProjectHistory(selectedWorkspaceId, getVersionTimeline, getActivityTimeline);
   const [versionBusy, setVersionBusy] = useState(false);
   const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus>(initialStatus);
   const [connectionStatus, setConnectionStatus] = useState<ChatConnectionStatus>(
@@ -287,7 +295,8 @@ function App() {
   const [changeBusyId, setChangeBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState(false);
-  const [workspaceHealth, setWorkspaceHealth] = useState<Record<string, WorkspaceHealth>>({});
+  const { health: workspaceHealth, refresh: refreshWorkspaceHealth, update: updateWorkspaceHealth } =
+    useWorkspaceHealthPolling(workspaces, getWorkspaceHealth);
   const [relocatingWorkspaceId, setRelocatingWorkspaceId] = useState<string | null>(null);
   const [pendingWorkspaceSelection, setPendingWorkspaceSelection] = useState<string | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
@@ -305,7 +314,8 @@ function App() {
   const [activeEditorKey, setActiveEditorKey] = useState<string | null>(null);
   const [editorSavingKey, setEditorSavingKey] = useState<string | null>(null);
   const [projectTreeRefreshToken, setProjectTreeRefreshToken] = useState(0);
-  const [gitStatus, setGitStatus] = useState<GitRepositoryStatus | null>(null);
+  const { status: gitStatus, refresh: refreshGitStatus } =
+    useProjectGitStatus(selectedWorkspaceId, getGitStatus);
   const [editorRevealLocation, setEditorRevealLocation] = useState<EditorRevealLocation | null>(null);
   const [editorSelectionContext, setEditorSelectionContext] = useState<EditorSelectionContext | null>(null);
   const [editorProblems, setEditorProblems] = useState<EditorProblem[]>([]);
@@ -370,18 +380,8 @@ function App() {
 
   const refreshChanges = useCallback(async () => {
     await refreshPendingChanges();
-    if (selectedWorkspaceId) {
-      const [versions, activities] = await Promise.all([
-        getVersionTimeline(selectedWorkspaceId),
-        getActivityTimeline(selectedWorkspaceId),
-      ]);
-      setVersionTimeline(versions);
-      setActivityTimeline(activities);
-    } else {
-      setVersionTimeline({ records: [], currentVersionId: null });
-      setActivityTimeline({ groups: [] });
-    }
-  }, [selectedWorkspaceId, refreshPendingChanges]);
+    await refreshProjectHistory();
+  }, [refreshPendingChanges, refreshProjectHistory]);
 
   const refresh = useCallback(async () => {
     const [savedWorkspaces, status, publicStatus, chatStatus, savedChanges, aiStatus] = await Promise.all([
@@ -411,42 +411,16 @@ function App() {
     }
   }, []);
 
-  const refreshWorkspaceHealth = useCallback(async () => {
-    if (workspaces.length === 0) {
-      setWorkspaceHealth({});
-      return;
-    }
-    const entries = await Promise.all(workspaces.map(async (workspace) => {
-      try {
-        return [workspace.id, await getWorkspaceHealth(workspace.id)] as const;
-      } catch (error) {
-        return [workspace.id, { workspaceId: workspace.id, available: false, message: errorMessage(error) }] as const;
-      }
-    }));
-    setWorkspaceHealth(Object.fromEntries(entries));
-  }, [workspaces]);
-
-  const refreshGitStatus = useCallback(async () => {
-    if (!selectedWorkspaceId) {
-      setGitStatus(null);
-      return;
-    }
-    try {
-      setGitStatus(await getGitStatus(selectedWorkspaceId));
-    } catch {
-      setGitStatus(null);
-    }
-  }, [selectedWorkspaceId]);
-
-  const syncEditorFiles = useCallback(async () => {
+  const syncEditorFiles = useMemo(() => coalesceAsync(async () => {
     const tabs = editorTabsRef.current;
     if (tabs.length === 0) return;
 
-    const updates = await Promise.all(tabs.map(async (tab): Promise<EditorDocument> => {
+    // Limit file metadata/content IPC fanout when many editor tabs are open.
+    const updates = await mapBounded(tabs, async (tab): Promise<EditorDocument> => {
       if (editorSavingKeyRef.current === tab.key) return tab;
       try {
         const info = await getFileInfo(tab.workspaceId, tab.path);
-        if (info.kind !== "file") return { ...tab, externalDeleted: true };
+        if (info.kind !== "file") return markMissingEditorFile(tab);
         if (info.modifiedAt === tab.modifiedAt && !tab.externalDeleted) return tab;
 
         if (tab.kind === "image") {
@@ -493,23 +467,19 @@ function App() {
           updatedExternally: true,
         };
       } catch {
-        return { ...tab, externalDeleted: true };
+        return markMissingEditorFile(tab);
       }
-    }));
+    }, 4);
 
-    setEditorTabs((current) => {
-      const byKey = new Map(updates.map((tab) => [tab.key, tab]));
-      return current.map((tab) => byKey.get(tab.key) ?? tab);
-    });
-  }, []);
+    setEditorTabs((current) => reconcileEditorFileChecks(current, tabs, updates));
+  }), []);
 
   useEffect(() => {
     setLoading(true);
     refresh()
       .catch((error) => setNotice(`RepoTunnel could not initialize: ${errorMessage(error)}`))
       .finally(() => setLoading(false));
-    void refreshModelHub(true);
-  }, [refresh, refreshModelHub]);
+  }, [refresh]);
 
   useEffect(() => {
     let active = true;
@@ -530,16 +500,14 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (activeView !== "overview") return;
-    const refreshDetectedModels = () => void refreshModelHub(false);
-    const timer = window.setInterval(refreshDetectedModels, 10_000);
-    window.addEventListener("focus", refreshDetectedModels);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", refreshDetectedModels);
-    };
-  }, [activeView, refreshModelHub]);
+  // Model discovery is only needed on the Model Hub screen. The Home shell
+  // does not display it, so avoid scanning runtimes every 10s in the idle UI.
+  useVisibleViewRefresh(
+    activeView === "models",
+    () => refreshModelHub(true),
+    () => refreshModelHub(false),
+    10_000,
+  );
 
   useEffect(() => {
     if (!notice) return;
@@ -573,21 +541,20 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void refreshWorkspaceHealth();
-    if (workspaces.length === 0) return;
-    const timer = window.setInterval(() => void refreshWorkspaceHealth(), 30_000);
-    return () => window.clearInterval(timer);
-  }, [workspaces.length, refreshWorkspaceHealth]);
-
-  useEffect(() => {
     if (workspaces.length === 0) {
       setSelectedWorkspaceId(null);
+      setAgentsWorkspaceId(null);
+      setTeamWorkspaceId(null);
       return;
     }
 
-    setSelectedWorkspaceId((current) =>
-      current && workspaces.some((workspace) => workspace.id === current) ? current : null,
-    );
+    const firstWorkspaceId = workspaces[0]?.id ?? null;
+    const isValidWorkspace = (workspaceId: string | null) =>
+      Boolean(workspaceId && workspaces.some((workspace) => workspace.id === workspaceId));
+
+    setSelectedWorkspaceId((current) => (isValidWorkspace(current) ? current : null));
+    setAgentsWorkspaceId((current) => (isValidWorkspace(current) ? current : firstWorkspaceId));
+    setTeamWorkspaceId((current) => (isValidWorkspace(current) ? current : firstWorkspaceId));
   }, [workspaces]);
 
   useEffect(() => {
@@ -607,45 +574,22 @@ function App() {
 
     let cancelled = false;
     async function restoreSession() {
-      const restored: EditorDocument[] = [];
-      for (const saved of session!.tabs.slice(0, MAX_RESTORED_TABS)) {
-        const workspace = workspaces.find((item) => item.id === saved.workspaceId);
-        if (!workspace || typeof saved.path !== "string" || !saved.path) continue;
-        try {
-          const info = await getFileInfo(workspace.id, saved.path);
-          if (info.kind !== "file") continue;
-          const entry: DirectoryEntry = {
-            name: saved.path.split("/").pop() ?? saved.path,
-            path: saved.path,
-            kind: "file",
-            size: info.size,
-            modifiedAt: info.modifiedAt,
-          };
-          let document = await loadEditorDocument(workspace, entry);
-          if (document.kind === "text" && saved.dirty && typeof saved.draftContent === "string" && typeof saved.savedContent === "string") {
-            if (saved.savedContent === document.savedContent) {
-              document = { ...document, content: saved.draftContent, dirty: saved.draftContent !== document.savedContent };
-            } else if (saved.draftContent === document.content) {
-              document = { ...document, dirty: false };
-            } else {
-              document = {
-                ...document,
-                content: saved.draftContent,
-                savedContent: saved.savedContent,
-                dirty: true,
-                externalContent: document.content,
-                externalModifiedAt: document.modifiedAt,
-                conflict: true,
-              };
-            }
-          }
-          restored.push(document);
-        } catch {
-          // A removed/protected file is skipped; session restore must never block app startup.
-        }
-      }
+      // Each tab load validates file type/access itself. Avoid a duplicate
+      // metadata read and restore at most four tabs concurrently, in order.
+      const restored = await restoreEditorDocuments(
+        session!.tabs,
+        workspaces,
+        (workspace, path) => loadEditorDocument(workspace, {
+          name: path.split("/").pop() ?? path,
+          path, kind: "file", size: null, modifiedAt: null,
+        }),
+        MAX_RESTORED_TABS,
+      );
       if (cancelled) return;
       editorSessionRestoredRef.current = true;
+      // A user may have opened a file while restore was reading from disk.
+      // Never overwrite their newly opened tab or in-progress edits.
+      if (editorTabsRef.current.length > 0) return;
       if (restored.length === 0) {
         window.localStorage.removeItem(EDITOR_SESSION_KEY);
         return;
@@ -701,18 +645,9 @@ function App() {
 
   useEffect(() => {
     if (activeView !== "changes") return;
-    if (!selectedWorkspaceId) {
-      setVersionTimeline({ records: [], currentVersionId: null });
-      setActivityTimeline({ groups: [] });
-      return;
-    }
-    Promise.all([getVersionTimeline(selectedWorkspaceId), getActivityTimeline(selectedWorkspaceId)])
-      .then(([versions, activities]) => {
-        setVersionTimeline(versions);
-        setActivityTimeline(activities);
-      })
+    void refreshProjectHistory()
       .catch((error) => setNotice(`Could not load history: ${errorMessage(error)}`));
-  }, [activeView, selectedWorkspaceId]);
+  }, [activeView, refreshProjectHistory]);
 
   useEffect(() => {
     if (activeView !== "git" && activeView !== "editor") return;
@@ -765,13 +700,7 @@ function App() {
       try {
         await refreshPendingChanges().catch(() => undefined);
         if (activeView === "changes" && selectedWorkspaceId) {
-          await Promise.all([
-            getVersionTimeline(selectedWorkspaceId),
-            getActivityTimeline(selectedWorkspaceId),
-          ]).then(([versions, activities]) => {
-            setVersionTimeline(versions);
-            setActivityTimeline(activities);
-          }).catch(() => undefined);
+          await refreshProjectHistory().catch(() => undefined);
         }
         if (editorTabsRef.current.length > 0) {
           await syncEditorFiles().catch(() => undefined);
@@ -811,7 +740,7 @@ function App() {
       if (timer !== null) window.clearTimeout(timer);
       unlisten?.();
     };
-  }, [activeView, selectedWorkspaceId, refreshPendingChanges, syncEditorFiles, refreshGitStatus]);
+  }, [activeView, selectedWorkspaceId, refreshPendingChanges, refreshProjectHistory, syncEditorFiles, refreshGitStatus]);
 
   useEffect(() => {
     let disposed = false;
@@ -823,7 +752,7 @@ function App() {
       if (disposed || activeView !== "changes" || !selectedWorkspaceId || refreshRunning) return;
       refreshRunning = true;
       try {
-        setActivityTimeline(await getActivityTimeline(selectedWorkspaceId));
+        await refreshProjectActivity();
       } catch {
         // Keep the last successful history snapshot during active AI work.
       } finally {
@@ -850,7 +779,7 @@ function App() {
       if (timer !== null) window.clearTimeout(timer);
       unlisten?.();
     };
-  }, [activeView, selectedWorkspaceId]);
+  }, [activeView, selectedWorkspaceId, refreshProjectActivity]);
 
   useEffect(() => {
     if (!gatewayStatus.running) return;
@@ -927,7 +856,7 @@ function App() {
   async function handleWorkspaceHealthRetry(workspaceId: string) {
     try {
       const health = await getWorkspaceHealth(workspaceId);
-      setWorkspaceHealth((current) => ({ ...current, [workspaceId]: health }));
+      updateWorkspaceHealth(workspaceId, health);
       setNotice(health.available ? "Project folder is available again." : (health.message ?? "Project folder is still unavailable."));
       if (health.available) setProjectTreeRefreshToken((current) => current + 1);
     } catch (error) {
@@ -1128,6 +1057,20 @@ function App() {
     }
   }
 
+  async function handleChatClientInstall() {
+    setNotice(null);
+    setConnectionBusy(true);
+    try {
+      const message = await installOfficialTunnelClient();
+      setConnectionStatus(await getChatConnectionStatus());
+      setNotice(message);
+    } catch (error) {
+      setNotice(`Could not install the official OpenAI tunnel-client: ${errorMessage(error)}`);
+    } finally {
+      setConnectionBusy(false);
+    }
+  }
+
   async function handleChatDisconnect() {
     setNotice(null);
     setConnectionBusy(true);
@@ -1212,7 +1155,8 @@ function App() {
     setVersionBusy(true);
     try {
       const result = await restoreVersion(workspace.id, versionId);
-      setVersionTimeline(await getVersionTimeline(workspace.id));
+      // A successful restore must not depend on the unrelated activity reader.
+      await refreshProjectVersions();
       await refreshChanges().catch(() => undefined);
       setNotice(`Version restored. ${result.restoredFiles} files restored${result.removedFiles ? `, ${result.removedFiles} newer files removed` : ""}. Later versions remain saved.`);
     } catch (error) {
@@ -1557,12 +1501,23 @@ function App() {
       );
     }
 
+    if (activeView === "agents") {
+      return (
+        <AgentsPanel
+          workspaces={workspaces}
+          selectedWorkspaceId={agentsWorkspaceId}
+          onSelectWorkspace={setAgentsWorkspaceId}
+          onNotice={setNotice}
+        />
+      );
+    }
+
     if (activeView === "team") {
       return (
         <TeamPanel
           workspaces={workspaces}
-          selectedWorkspaceId={selectedWorkspaceId}
-          onSelectWorkspace={handleSelectWorkspaceSafe}
+          selectedWorkspaceId={teamWorkspaceId}
+          onSelectWorkspace={setTeamWorkspaceId}
           onNotice={setNotice}
         />
       );
@@ -1596,12 +1551,7 @@ function App() {
             onRestore={handleRestoreVersion}
             onClear={handleClearVersionHistory}
             onRefresh={() => {
-              if (!selectedWorkspaceId) return;
-              Promise.all([getVersionTimeline(selectedWorkspaceId), getActivityTimeline(selectedWorkspaceId)])
-                .then(([versions, activities]) => {
-                  setVersionTimeline(versions);
-                  setActivityTimeline(activities);
-                })
+              void refreshProjectHistory()
                 .catch((error) => setNotice(`Could not refresh history: ${errorMessage(error)}`));
             }}
           />
@@ -1634,17 +1584,32 @@ function App() {
           workspaces={workspaces}
           gatewayRunning={gatewayStatus.running}
           onError={handleExecutionError}
+          onNotice={setNotice}
         />
       );
     }
 
     if (activeView === "phone") return <PhonePanel />;
+    if (activeView === "remoteMachines") return <RemoteMachinesPanel />;
 
     if (activeView === "httpsSetup") {
       return (
-        <HttpsSetupGuide
-          onError={(message) => setNotice(`HTTPS Setup: ${message}`)}
-        />
+        <div className="page-stack guide-page-stack">
+          <SecureMcpTunnelGuide />
+          <section className="guide-direct-https-section" aria-labelledby="guide-direct-https-heading">
+            <header className="guide-direct-https-heading">
+              <span className="section-kicker">OPTIONAL ALTERNATIVE</span>
+              <h2 id="guide-direct-https-heading">Direct HTTPS setup</h2>
+              <p>
+                Prefer a public HTTPS endpoint instead? Keep using the existing Direct HTTPS guide below.
+                This setup is optional and independent of OpenAI Secure MCP Tunnel.
+              </p>
+            </header>
+            <HttpsSetupGuide
+              onError={(message) => setNotice(`HTTPS Setup: ${message}`)}
+            />
+          </section>
+        </div>
       );
     }
 
@@ -1697,6 +1662,8 @@ function App() {
             aiAccessPaused={aiAccessPaused}
             onConnect={handleChatConnect}
             onDisconnect={handleChatDisconnect}
+            onInstallClient={handleChatClientInstall}
+            onOpenGuide={() => setActiveView("httpsSetup")}
           />
         </div>
       );
@@ -1715,14 +1682,14 @@ function App() {
   return (
     <div className="desktop-app">
       <WindowChrome />
-      <div className={`desktop-shell ${focusMode ? "focus-mode" : ""} ${activeView === "video" ? "video-view" : ""} ${activeView === "phone" ? "phone-view" : ""} ${activeView === "httpsSetup" ? "https-setup-view" : ""}`}>
+      <div className={`desktop-shell ${focusMode ? "focus-mode" : ""} ${activeView === "video" ? "video-view" : ""} ${activeView === "phone" ? "phone-view" : ""} ${activeView === "httpsSetup" ? "https-setup-view" : ""} ${activeView === "remoteMachines" ? "remote-computers-view" : ""}`}>
         <AppSidebar
           activeView={activeView}
           pendingCount={pendingCount}
           onNavigate={setActiveView}
         />
 
-        {activeView !== "video" && activeView !== "phone" && activeView !== "httpsSetup" ? (
+        {activeView !== "video" && activeView !== "phone" && activeView !== "httpsSetup" && activeView !== "remoteMachines" ? (
           <ProjectRail
             workspaces={workspaces}
             selectedWorkspaceId={selectedWorkspaceId}
@@ -1742,7 +1709,7 @@ function App() {
           />
         ) : null}
 
-        <main className={`main-view ${activeView === "overview" ? "home-main-view" : ""} ${activeView === "editor" ? "editor-main-view" : ""} ${activeView === "video" ? "video-main-view" : ""} ${activeView === "phone" ? "phone-main-view" : ""} ${activeView === "httpsSetup" ? "https-setup-main-view" : ""}`}>
+        <main className={`main-view ${activeView === "overview" ? "home-main-view" : ""} ${activeView === "editor" ? "editor-main-view" : ""} ${activeView === "video" ? "video-main-view" : ""} ${activeView === "phone" ? "phone-main-view" : ""} ${activeView === "httpsSetup" ? "https-setup-main-view" : ""} ${activeView === "remoteMachines" ? "remote-computers-main-view" : ""}`}>
           <AppHeader
             view={activeView}
             gatewayRunning={gatewayStatus.running}
@@ -1763,6 +1730,7 @@ function App() {
             resetKey={`${activeView}:${selectedWorkspaceId ?? "none"}`}
             onGoHome={() => setActiveView("overview")}
           >
+          <Suspense fallback={<section className="loading-state" aria-live="polite"><div className="loader" aria-hidden="true" /><span>Opening section…</span></section>}>
           {loading ? (
             <section className="loading-state" aria-live="polite">
               <div className="loader" aria-hidden="true" />
@@ -1824,6 +1792,7 @@ function App() {
               <div className="page-content">{renderPage()}</div>
             </div>
           )}
+          </Suspense>
           </AppErrorBoundary>
         </main>
       </div>

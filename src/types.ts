@@ -92,6 +92,79 @@ export type ResumeSnapshot = {
   detailsAvailable: string[];
 };
 
+export type TaskIntegrityStatus =
+  | "draft"
+  | "active"
+  | "awaitingScopeApproval"
+  | "frozenConflict"
+  | "frozenIntegrityViolation"
+  | "verifying"
+  | "awaitingReview"
+  | "ambiguous"
+  | "failed"
+  | "succeeded"
+  | "cancelled";
+
+export type TaskVerificationLevel =
+  | "changeSpecific"
+  | "subsystemRegression"
+  | "staticTooling"
+  | "integration"
+  | "fullGate";
+
+export type TaskIntegrityRemainingBudget = {
+  existingFiles: number;
+  newFiles: number;
+  deletes: number;
+  renames: number;
+  changedLines: number;
+};
+
+export type TaskIntegrityVerificationProgress = {
+  requiredLevel: TaskVerificationLevel;
+  completedLevel: TaskVerificationLevel | null;
+  evidenceCount: number;
+  complete: boolean;
+};
+
+export type TaskIntegrityReceiptSummary = {
+  changedPathCount: number;
+  changedPathsTruncated: boolean;
+  acceptedScopeExpansions: number;
+  deniedScopeExpansions: number;
+  completedAt: number;
+};
+
+export type TaskIntegrityTaskStatus = {
+  taskId: string;
+  intentSummary: string;
+  status: TaskIntegrityStatus;
+  scopeRevision: number;
+  scopeSummary: string[];
+  actualChangedCount: number;
+  remainingBudget: TaskIntegrityRemainingBudget;
+  protectedDirtyCount: number;
+  verification: TaskIntegrityVerificationProgress;
+  pendingReview: boolean;
+  conflict: boolean;
+  integrityViolation: boolean;
+  completionReceipt: TaskIntegrityReceiptSummary | null;
+};
+
+export type TaskIntegrityPendingExpansion = {
+  expansionId: string;
+  taskId: string;
+  relativePath: string;
+  operation: string;
+  reason: string;
+};
+
+export type TaskIntegrityLocalStatus = {
+  task: TaskIntegrityTaskStatus | null;
+  activeTasks: TaskIntegrityTaskStatus[];
+  pendingExpansions: TaskIntegrityPendingExpansion[];
+};
+
 export type WorkspaceHealth = {
   workspaceId: string;
   available: boolean;
@@ -904,6 +977,18 @@ export type LaunchApplication = {
   supportsPaths: boolean;
 };
 
+export type DiscoverableApplication = {
+  id: string;
+  name: string;
+  launchMode: "native" | "desktop";
+};
+
+export type CustomApplication = {
+  id: string;
+  name: string;
+  executable: string;
+};
+
 export type GithubConnectionStatus = {
   available: boolean;
   connected: boolean;
@@ -952,11 +1037,29 @@ export type AiWorkspaceStatus = {
   maxConcurrentApplications: number;
   lastStartedAppSessionId: string | null;
   resourceAdmission: string | null;
+  recoveryEvidenceCount: number;
   message: string | null;
+};
+
+export type AiWorkspaceRecoveryChange = {
+  operation: "edit" | "create" | "delete" | "rename";
+  paths: string[];
+};
+
+export type AiWorkspaceRecoveryRecord = {
+  id: string;
+  taskId: string;
+  appSessionId: string;
+  recordedAt: number;
+  reason: string;
+  changes: AiWorkspaceRecoveryChange[];
+  reviewError: string | null;
+  nativeGuiEvidenceStatus?: "present-unverified" | "missing-evidence-path" | "missing-evidence-directory" | "unsafe-evidence-path" | "evidence-inaccessible" | null;
 };
 
 export type AiWorkspaceFrame = {
   sessionId: string;
+  windowId: string;
   mimeType: string;
   width: number;
   height: number;
@@ -1011,7 +1114,7 @@ export type BrowserActionKind =
 
 export type BrowserActionStatus = "pending" | "applied" | "ambiguous" | "failed" | "rejected";
 
-export type BrowserMutationCompletion = "applied" | "ambiguous";
+export type BrowserMutationCompletion = "applied" | "ambiguous" | "failed";
 
 export type BrowserMutationReceipt = {
   id: string;
@@ -1075,6 +1178,7 @@ export type BrowserActionRecord = {
   updatedAt: number;
   error: string | null;
   mutationReceipt?: BrowserMutationReceipt | null;
+  transactionResult?: unknown | null;
 };
 
 export type BrowserNavigationRedirect = {
@@ -1116,6 +1220,7 @@ export type BrowserActionOutcome = {
   queued: boolean;
   action: BrowserActionRecord;
   navigationReceipt?: BrowserNavigationReceipt | null;
+  transactionResult?: unknown | null;
 };
 
 export type BrowserPageInspection = {
@@ -2059,6 +2164,7 @@ export type TeamAgent = {
   joinedAt: number | null;
   lastSeenAt: number | null;
   currentTaskId: string | null;
+  manuallyDisconnected?: boolean;
 };
 
 export type TeamCycleRecord = {
@@ -2159,4 +2265,252 @@ export type TeamSessionSummary = {
   doneTaskCount: number;
   createdAt: number;
   updatedAt: number;
+};
+
+export type MissionStatus =
+  | "draft"
+  | "running"
+  | "pausedByHuman"
+  | "replanning"
+  | "humanGateRequired"
+  | "readyForHumanReview"
+  | "completed"
+  | "stoppedByHuman"
+  | "failedUnrecoverable";
+export type MissionAutonomyPolicy = "fullLocal";
+export type MissionAgentStatus = "active" | "idle" | "busy" | "offline" | "retired";
+export type MissionAssignmentKind = "plan" | "implement" | "review" | "deliberate" | "answerHuman" | "audit";
+export type MissionTaskStatus =
+  | "proposed"
+  | "ready"
+  | "inProgress"
+  | "review"
+  | "blockedExternal"
+  | "blockedDependency"
+  | "stale"
+  | "verified"
+  | "integrated"
+  | "cancelled";
+export type MissionVerificationLevel = "changeSpecific" | "subsystemRegression" | "staticTooling" | "integration" | "fullGate";
+export type MissionEvidenceKind = "terminalCommand" | "managedProcess" | "change" | "browserAction" | "taskIntegrityReceipt";
+export type MissionHumanGateKind = "gitStage" | "gitCommit" | "gitPush" | "deployRelease" | "productionMutation" | "externalIntegration" | "irreversibleExternal";
+export type MissionHumanGateStatus = "pending" | "approvedOnce" | "rejected" | "consumed" | "expired";
+export type MissionDecisionSignificance = "routine" | "significant" | "critical";
+export type MissionDecisionStage = "collectingIndependent" | "openDebate" | "experimentRequired" | "readyToAdjudicate" | "finalized";
+
+export type MissionAssignment = {
+  id: string;
+  kind: MissionAssignmentKind;
+  taskId: string | null;
+  decisionId: string | null;
+  questionId: string | null;
+  authorityRevision: number;
+  assignedAt: number;
+  leaseExpiresAt: number;
+};
+
+export type MissionAgentBinding = {
+  missionId: string;
+  agentId: string;
+  principalFingerprint: string;
+  mutationPrincipal: string | null;
+  revoked?: boolean;
+  continuationBindingId: string | null;
+  acknowledgedAuthorityRevision: number;
+  lastSeenAt: number;
+  leaseExpiresAt: number;
+  assignment: MissionAssignment | null;
+};
+
+export type MissionAgent = {
+  id: string;
+  clientLabel: string | null;
+  displayName?: string | null;
+  status: MissionAgentStatus;
+  joinedAt: number;
+  binding: MissionAgentBinding;
+};
+
+export type MissionHumanActionPolicy = {
+  gitStage: boolean;
+  gitCommit: boolean;
+  gitPush: boolean;
+  deployRelease: boolean;
+  productionMutation: boolean;
+  externalIntegration: boolean;
+  irreversibleExternal: boolean;
+};
+
+export type AgentMission = {
+  id: string;
+  workspaceId: string;
+  goal: string;
+  status: MissionStatus;
+  archived?: boolean;
+  autonomyPolicy: MissionAutonomyPolicy;
+  humanActionPolicy: MissionHumanActionPolicy;
+  missionRevision: number;
+  authorityRevision: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type MissionProgress = {
+  registeredAgentCount: number;
+  activeAgentCount: number;
+  knownTaskCount: number;
+  activeTaskCount: number;
+  verifiedTaskCount: number;
+  totalCriterionCount: number;
+  verifiedCriterionCount: number;
+  unresolvedBlockerCount: number;
+  pendingHumanGateCount: number;
+};
+
+export type MissionEvidenceRef = {
+  kind: MissionEvidenceKind;
+  sourceId: string;
+  summary: string;
+  verificationLevel: MissionVerificationLevel;
+  acceptanceIndices: number[];
+  attachedByAgentId: string;
+  authorityRevision: number;
+  attachedAt: number;
+};
+
+export type MissionReviewRecord = {
+  reviewerAgentId: string;
+  accepted: boolean;
+  findings: string;
+  evidenceSourceIds: string[];
+  authorityRevision: number;
+  reviewedAt: number;
+};
+
+export type MissionTask = {
+  id: string;
+  fingerprint: string;
+  kind: string;
+  title: string;
+  acceptance: string[];
+  dependsOn: string[];
+  requestedPaths: string[];
+  authorAgentId: string | null;
+  ownerAgentId: string | null;
+  reviewerAgentId: string | null;
+  evidence: MissionEvidenceRef[];
+  review: MissionReviewRecord | null;
+  baseAuthorityRevision: number;
+  integrationBaseline: number;
+  verifiedAuthorityRevision: number | null;
+  priority: number;
+  status: MissionTaskStatus;
+  createdAt: number;
+  updatedAt: number;
+  lastFailureFingerprint: string | null;
+  repeatedFailureCount: number;
+  needsDiversification: boolean;
+  needsDirectiveRecheck: boolean;
+};
+
+export type MissionDirective = { id: string; text: string; authorityRevision: number; createdAt: number };
+export type MissionAnswer = { questionId: string; text: string; agentId: string; createdAt: number };
+export type MissionQuestion = {
+  id: string;
+  text: string;
+  authorityRevision: number;
+  createdAt: number;
+  assignedAgentId: string | null;
+  contributorAgentIds: string[];
+  answerContributions: MissionAnswer[];
+  synthesizerAgentId: string | null;
+  synthesizedAnswer: string | null;
+  answeredAt: number | null;
+};
+
+export type MissionDecision = {
+  id: string;
+  significance: MissionDecisionSignificance;
+  stage: MissionDecisionStage;
+  problem: string;
+  constraints: string[];
+  evidence: string[];
+  options: string[];
+  proposerAgentId: string;
+  proposedOutcome: string;
+  proposerRationale: string;
+  affectedTasks: string[];
+  independentAssessments: Array<Record<string, unknown>>;
+  challenges: Array<Record<string, unknown>>;
+  experiments: Array<Record<string, unknown>>;
+  debateRoundsWithoutNewEvidence: number;
+  requestedFinalizationBy: string | null;
+  adjudicatorAgentId: string | null;
+  selectedOutcome: string | null;
+  finalRationale: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type MissionHumanGate = {
+  id: string;
+  missionId: string;
+  taskId: string | null;
+  authorityRevision: number;
+  kind: MissionHumanGateKind;
+  status: MissionHumanGateStatus;
+  resource: string;
+  reason: string;
+  requestedByAgentId: string | null;
+  requestedAt: number;
+  expiresAt: number;
+  approvedAt: number | null;
+  resolvedAt: number | null;
+  rejectionReason: string | null;
+};
+
+export type MissionCompletionAudit = {
+  authorityRevision: number;
+  requiredAuditorCount: number;
+  assignedAgentIds: string[];
+  passedAgentIds: string[];
+  findings: Array<{
+    agentId: string;
+    passed: boolean;
+    materialGap: boolean;
+    findings: string;
+    followUpTaskIds: string[];
+    authorityRevision: number;
+    submittedAt: number;
+  }>;
+  startedAt: number;
+  completedAt: number | null;
+};
+
+export type AgentMissionSnapshot = {
+  mission: AgentMission;
+  progress: MissionProgress;
+  agents: MissionAgent[];
+  tasks: MissionTask[];
+  readyTaskIds: string[];
+  planningNoProgressCycles: number;
+  humanDirectives: MissionDirective[];
+  humanQuestions: MissionQuestion[];
+  decisions: MissionDecision[];
+  humanGates: MissionHumanGate[];
+  completionAudit: MissionCompletionAudit | null;
+};
+
+export type AgentMissionSummary = {
+  id: string;
+  workspaceId: string;
+  goal: string;
+  status: MissionStatus;
+  archived?: boolean;
+  autonomyPolicy: MissionAutonomyPolicy;
+  missionRevision: number;
+  authorityRevision: number;
+  createdAt: number;
+  updatedAt: number;
+  progress: MissionProgress;
 };

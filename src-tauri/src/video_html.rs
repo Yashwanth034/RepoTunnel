@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -510,46 +510,23 @@ fn scene_html(spec: &VideoHtmlSceneSpec, width: u32, height: u32) -> Result<Stri
 }
 
 fn find_on_path(names: &[&str]) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    for directory in env::split_paths(&path) {
-        for name in names {
-            let candidate = directory.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            #[cfg(windows)]
-            {
-                let candidate = directory.join(format!("{name}.exe"));
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
+    names
+        .iter()
+        .find_map(|name| crate::browser::find_executable(name))
 }
 
-#[allow(clippy::unnecessary_lazy_evaluations)]
 fn chrome_program() -> Option<PathBuf> {
     find_on_path(&[
         "google-chrome-stable",
         "google-chrome",
         "chromium",
         "chromium-browser",
+        "brave-browser",
+        "brave",
+        "microsoft-edge-stable",
         "msedge",
         "chrome",
     ])
-    .or_else(|| {
-        #[cfg(target_os = "macos")]
-        {
-            let path =
-                PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-        None
-    })
 }
 
 fn node_program() -> Option<PathBuf> {

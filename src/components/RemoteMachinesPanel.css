@@ -1,0 +1,199 @@
+/* Remote Computers: clear, responsive full-width dashboard. All advanced
+   flows remain available on their explicit tabs; only their layout changes. */
+.remote-fleet-page{
+  display:grid;gap:18px;width:100%;min-width:0;max-width:none;
+  margin:0 auto;padding:24px clamp(16px,2.6vw,38px) 64px;color:var(--text-primary);
+}
+.remote-fleet-intro{display:flex;gap:16px;align-items:center;min-width:0}
+.remote-fleet-title-icon{
+  display:grid;place-items:center;width:56px;height:56px;flex-shrink:0;
+  border-radius:14px;background:linear-gradient(140deg,#112b52,#101e34);
+  border:1px solid #253d62;color:#6faeff;font-size:30px;line-height:1;
+}
+.remote-fleet-intro h2{font-size:clamp(22px,2vw,30px);letter-spacing:-.035em;margin:0 0 4px}
+.remote-fleet-intro p,.remote-fleet-card p{
+  margin:0;color:var(--text-secondary);line-height:1.5
+}
+.remote-fleet-intro p{font-size:13px}
+.remote-fleet-page button{
+  background:#1b2c3c;color:#e6f0fb;border:1px solid #30465c;
+  border-radius:9px;padding:9px 14px;cursor:pointer;
+  transition:background .15s ease,border-color .15s ease;
+}
+.remote-fleet-page button:hover:not(:disabled){border-color:#668fbc;background:#213e58}
+.remote-fleet-page button:focus-visible,.remote-fleet-page :is(input,select,textarea,summary):focus-visible{
+  outline:2px solid #61a3ff;outline-offset:2px;
+}
+.remote-fleet-page button:disabled{opacity:.5;cursor:not-allowed}
+.remote-fleet-page button.remote-fleet-danger{background:#331f2b;border-color:#653b50;color:#f2b8c4}
+.remote-fleet-page button.remote-fleet-danger:hover:not(:disabled){background:#522638;border-color:#985067}
+.remote-fleet-tabs{
+  display:flex;gap:6px;align-items:center;min-width:0;
+  overflow-x:auto;padding:0 0 1px;border-bottom:1px solid #283544;scrollbar-width:thin
+}
+.remote-fleet-page .remote-fleet-tab{
+  padding:13px 15px;white-space:nowrap;flex-shrink:0;color:#a7b9cd;
+  background:transparent;border:0;border-bottom:2px solid transparent;
+  border-radius:0;font-size:12px;font-weight:650
+}
+.remote-fleet-page .remote-fleet-tab:hover{color:#ecf3fc;background:#152538}
+.remote-fleet-page .remote-fleet-tab.active{
+  color:#83baff;border-bottom-color:#4294ff;background:transparent
+}
+.remote-fleet-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.remote-fleet-page button.remote-fleet-stat{
+  display:flex;align-items:center;gap:13px;min-width:0;text-align:left;padding:17px;
+  background:linear-gradient(145deg,#121e30,#101a27);border:1px solid #2d3f54;border-radius:14px
+}
+.remote-fleet-stat>span:last-child{display:grid;gap:4px;min-width:0}
+.remote-fleet-stat small{font-size:11px;color:#9aaec5}
+.remote-fleet-stat strong{font-size:28px;line-height:1.15;letter-spacing:-.04em;color:#f6f9ff}
+.remote-fleet-stat-icon{display:grid;place-items:center;width:45px;height:45px;flex-shrink:0;border-radius:11px;font-size:25px}
+.remote-fleet-stat-icon.green{background:#133a34;color:#57ddbd}
+.remote-fleet-stat-icon.blue{background:#173252;color:#69adff}
+.remote-fleet-stat-icon.purple{background:#30204c;color:#b987f9}
+.remote-fleet-stat-icon.amber{background:#3c3222;color:#f7b75c}
+.remote-fleet-layout{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:16px;min-width:0}
+.remote-fleet-card{
+  border:1px solid #293a4e;background:linear-gradient(155deg,#111c2a,#0e1721);
+  border-radius:15px;padding:22px;display:grid;gap:15px;min-width:0;overflow-wrap:anywhere;
+}
+.remote-fleet-card h3{margin:0;font-size:16px;letter-spacing:-.015em;font-weight:700}
+.remote-fleet-card h4{margin:0;font-size:13px}
+.remote-fleet-summary{color:#a9bacb;font-size:12px}
+.remote-fleet-details{font-size:12px;min-width:0;color:#9fb4c8}
+.remote-fleet-details summary{cursor:pointer;color:#8ab7eb;max-width:max-content;font-size:11px}
+.remote-fleet-details[open]{padding:10px 12px;background:#132132;border-radius:8px}
+.remote-fleet-details p{margin:8px 0 0;font-size:12px}
+.remote-fleet-grants{order:2}
+.remote-fleet-connect{order:1}
+.remote-fleet-machines{order:3;grid-column:1/-1}
+.remote-fleet-source{order:4}
+.remote-fleet-activity{order:5}
+.remote-fleet-artifacts{order:6}
+.remote-fleet-identity{
+  display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 8px;
+  align-items:center;padding:11px 12px;border:1px solid #33465a;border-radius:9px;background:#142132;
+}
+.remote-fleet-identity>span{grid-column:1/-1;color:#9faec0;font-size:11px}
+.remote-fleet-identity code{
+  font-size:11px;min-width:0;overflow-wrap:anywhere;color:#d7eaff;line-height:1.4
+}
+.remote-fleet-page button.remote-fleet-copy{font-size:11px;padding:7px 10px}
+.remote-fleet-form{display:grid;gap:12px}
+.remote-fleet-form label,.remote-fleet-card>label,.remote-fleet-credential label{
+  display:grid;gap:7px;color:#d6e0ed;font-size:12px;font-weight:650;min-width:0
+}
+.remote-fleet-card :is(input:not([type="checkbox"]),select,textarea){
+  width:100%;min-width:0;max-width:100%;padding:11px 12px;
+  border:1px solid #38506a;background:#0f1a28;color:#eef5ff;
+  border-radius:9px;font-size:12px
+}
+.remote-fleet-card :is(input,textarea)::placeholder{color:#8797a9}
+.remote-fleet-card fieldset{
+  display:flex;flex-wrap:wrap;gap:8px;padding:0;min-width:0;margin:0;border:0
+}
+.remote-fleet-card fieldset legend{font-size:12px;color:#bccce1;font-weight:650;padding:0 0 10px}
+.remote-fleet-card fieldset label{
+  display:inline-flex;align-items:center;gap:8px;min-height:34px;
+  border:1px solid #34475c;background:#142131;border-radius:8px;padding:7px 10px;
+  font-size:11px;line-height:1.4;cursor:pointer
+}
+.remote-fleet-card input[type="checkbox"]{accent-color:#418ff6;width:14px;height:14px;margin:0;flex-shrink:0}
+.remote-fleet-actions,.remote-fleet-node-header,.remote-fleet-list-heading{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap
+}
+.remote-fleet-page .remote-fleet-form>button,.remote-fleet-grants>.remote-fleet-actions>button:first-child{
+  background:linear-gradient(125deg,#1e62bf,#267ce8);border:1px solid #428eea;
+  color:#fff;font-weight:700;min-height:39px
+}
+.remote-fleet-form>button{width:100%}
+.remote-fleet-grants>.remote-fleet-actions{align-items:stretch}
+.remote-fleet-records,.remote-fleet-remembered{display:grid;gap:12px;padding-top:8px;border-top:1px solid #25384d}
+.remote-fleet-card .remote-fleet-records>p,.remote-fleet-card .remote-fleet-remembered>p{font-size:12px}
+.remote-fleet-node{background:#101d2b;border:1px solid #2b4258;border-radius:10px;padding:13px;display:grid;gap:10px;min-width:0}
+.remote-fleet-node-header>div{display:grid;gap:5px;min-width:0;overflow-wrap:anywhere}
+.remote-fleet-node-header small{font-size:11px;color:#a1b4c8}
+.remote-fleet-credential{
+  background:#152a36;border:1px solid #2a5269;border-radius:10px;padding:15px;
+  display:grid;gap:10px;min-width:0
+}
+.remote-fleet-credential textarea{font-family:monospace;resize:vertical;overflow-wrap:anywhere}
+.remote-fleet-credential p{font-size:12px;margin:0}
+.remote-fleet-notice{border:1px solid #315e84;padding:12px 14px;border-radius:10px;background:#142536}
+.remote-fleet-caution{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 14px;border:1px solid #9a6849;background:#2b211d;border-radius:10px;color:#f6dac6;font-size:12px}
+.remote-fleet-caution strong{font-size:13px}
+.remote-fleet-caution span{flex:1 1 260px}
+.remote-fleet-caution button{border-color:#ba7851;background:#4b3227;color:#fce5cd}
+.remote-fleet-screen{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-top:12px;min-width:0}
+.remote-fleet-screen label{font-size:12px;color:#aec0d3}
+.remote-fleet-screen input{flex:1;min-width:175px}
+.remote-fleet-chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.remote-fleet-chips span{background:#1b3247;border:1px solid #304a60;border-radius:8px;padding:5px 9px;font-size:11px;color:#d4e1ed}
+.remote-fleet-card p.remote-fleet-footnote{font-size:11px}
+.remote-fleet-empty{display:grid;place-items:center;gap:9px;min-height:170px;padding:18px;text-align:center;color:#e1e9f5}
+.remote-fleet-empty-icon{color:#72adfd;font-size:37px;line-height:1}
+.remote-fleet-empty strong{font-size:13px}
+.remote-fleet-empty small{font-size:12px;color:#9baec3}
+.remote-fleet-page .remote-fleet-empty button{font-size:11px;padding:8px 12px}
+.remote-fleet-page[data-view="overview"] .remote-fleet-source,
+.remote-fleet-page[data-view="overview"] .remote-fleet-activity,
+.remote-fleet-page[data-view="overview"] .remote-fleet-artifacts,
+.remote-fleet-page[data-view="overview"] .remote-fleet-records,
+.remote-fleet-page[data-view="overview"] .remote-fleet-remembered,
+.remote-fleet-page[data-view="overview"] .remote-fleet-machines>.remote-fleet-footnote,
+.remote-fleet-page[data-view="overview"] .remote-fleet-machines>.remote-fleet-screen,
+.remote-fleet-page[data-view="overview"] .remote-fleet-machines>.remote-fleet-node{display:none}
+.remote-fleet-page:not([data-view="overview"]) .remote-fleet-machine-preview{display:none}
+.remote-fleet-machine-preview{display:grid;gap:8px}
+.remote-fleet-machine-preview-row{display:flex;gap:11px;align-items:center;min-width:0;padding:10px 12px;border:1px solid #273a50;border-radius:10px;background:#101d2a}
+.remote-fleet-machine-online{font-size:13px;color:#4fe3ab}
+.remote-fleet-machine-preview-row>div{display:grid;gap:4px;flex:1;min-width:0}
+.remote-fleet-machine-preview-row strong{font-size:12px}
+.remote-fleet-machine-preview-row small{font-size:11px;color:#9bacc0;overflow:hidden;text-overflow:ellipsis}
+.remote-fleet-page .remote-fleet-machine-preview-row button{font-size:11px;padding:7px 10px}
+.remote-fleet-page[data-view="connect"] .remote-fleet-grants,
+.remote-fleet-page[data-view="connect"] .remote-fleet-machines,
+.remote-fleet-page[data-view="connect"] .remote-fleet-source,
+.remote-fleet-page[data-view="connect"] .remote-fleet-activity,
+.remote-fleet-page[data-view="connect"] .remote-fleet-artifacts,
+.remote-fleet-page[data-view="credentials"] .remote-fleet-connect,
+.remote-fleet-page[data-view="credentials"] .remote-fleet-machines,
+.remote-fleet-page[data-view="credentials"] .remote-fleet-source,
+.remote-fleet-page[data-view="credentials"] .remote-fleet-activity,
+.remote-fleet-page[data-view="credentials"] .remote-fleet-artifacts,
+.remote-fleet-page[data-view="machines"] .remote-fleet-connect,
+.remote-fleet-page[data-view="machines"] .remote-fleet-grants,
+.remote-fleet-page[data-view="machines"] .remote-fleet-source,
+.remote-fleet-page[data-view="machines"] .remote-fleet-activity,
+.remote-fleet-page[data-view="machines"] .remote-fleet-artifacts,
+.remote-fleet-page[data-view="activity"] .remote-fleet-connect,
+.remote-fleet-page[data-view="activity"] .remote-fleet-grants,
+.remote-fleet-page[data-view="activity"] .remote-fleet-machines,
+.remote-fleet-page[data-view="activity"] .remote-fleet-source,
+.remote-fleet-page[data-view="source"] .remote-fleet-connect,
+.remote-fleet-page[data-view="source"] .remote-fleet-grants,
+.remote-fleet-page[data-view="source"] .remote-fleet-machines,
+.remote-fleet-page[data-view="source"] .remote-fleet-activity,
+.remote-fleet-page[data-view="source"] .remote-fleet-artifacts{display:none}
+.remote-fleet-page:not([data-view="overview"]) .remote-fleet-layout{grid-template-columns:minmax(0,1fr)}
+.remote-fleet-page:not([data-view="overview"]) .remote-fleet-layout>.remote-fleet-card{grid-column:1;max-width:100%}
+.remote-fleet-page[data-view="activity"] .remote-fleet-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
+.remote-fleet-page[data-view="activity"] .remote-fleet-layout>.remote-fleet-card{grid-column:auto}
+@media(max-width:1320px){
+ .remote-fleet-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .remote-fleet-layout{grid-template-columns:minmax(0,1fr)}
+ .remote-fleet-machines{grid-column:1}
+ .remote-fleet-page[data-view="activity"] .remote-fleet-layout{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:700px){
+ .remote-fleet-page{padding:16px 12px 35px;gap:15px}
+ .remote-fleet-card{padding:15px}
+ .remote-fleet-stats{gap:8px}
+ .remote-fleet-page button.remote-fleet-stat{padding:10px;gap:8px}
+ .remote-fleet-stat-icon{width:34px;height:34px;font-size:19px}
+ .remote-fleet-stat strong{font-size:21px}
+ .remote-fleet-actions{align-items:stretch}
+ .remote-fleet-identity{grid-template-columns:minmax(0,1fr)}
+ .remote-fleet-page button.remote-fleet-copy{justify-self:start}
+}

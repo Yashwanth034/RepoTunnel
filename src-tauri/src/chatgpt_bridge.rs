@@ -34,10 +34,11 @@ const MAX_DELIVERY_ATTEMPTS: u32 = 12;
 const MAX_TERMINAL_HISTORY: usize = 200;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_TARGETS: usize = 5;
-// Schema 3 adds at-most-once send state, work/revision identity, bounded stale
-// checkpoint lifetime, and keeps safe schema-2 conversation bindings while
-// deliberately dropping pre-v3 jobs that lack those delivery guarantees.
-const STORE_SCHEMA_VERSION: u32 = 3;
+#[cfg(test)]
+const MAX_STABLE_BINDINGS: usize = 512;
+// Schema 4 adds durable opaque stable target bindings for Mission Control while
+// retaining schema-3 at-most-once job state and safe exact-conversation bindings.
+const STORE_SCHEMA_VERSION: u32 = 4;
 const FALLBACK_MESSAGE_PREFIX: &str =
     "Resume the unfinished work for this workspace from RepoTunnel’s live continuity state.";
 
@@ -48,6 +49,15 @@ pub(crate) struct ChatGptBridgeTarget {
     pub url: String,
     pub title: String,
     pub last_seen_at: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChatGptStableBinding {
+    pub(crate) id: String,
+    pub(crate) workspace_id: String,
+    pub(crate) target_id: String,
+    pub(crate) created_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -112,6 +122,8 @@ struct BridgeStore {
     session_targets: BTreeMap<String, String>,
     #[serde(default)]
     ambiguous_session_keys: BTreeSet<String>,
+    #[serde(default)]
+    stable_bindings: BTreeMap<String, ChatGptStableBinding>,
 }
 
 #[derive(Default)]
@@ -120,6 +132,7 @@ struct BridgeData {
     jobs: Vec<BridgeJobRecord>,
     session_targets: BTreeMap<String, String>,
     ambiguous_session_keys: BTreeSet<String>,
+    stable_bindings: BTreeMap<String, ChatGptStableBinding>,
     paired_origin: Option<String>,
     store_loaded: bool,
 }
@@ -379,6 +392,35 @@ fn load_store(path: &Path) -> Result<BridgeStore, String> {
             jobs: Vec::new(),
             session_targets,
             ambiguous_session_keys,
+            stable_bindings: BTreeMap::new(),
+        });
+    }
+
+    if schema_version == 3 {
+        let jobs = serde_json::from_value(
+            raw.get("jobs")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )
+        .map_err(|_| "Invalid schema-3 ChatGPT bridge jobs.".to_string())?;
+        let session_targets = serde_json::from_value(
+            raw.get("sessionTargets")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+        .map_err(|_| "Invalid schema-3 ChatGPT bridge session bindings.".to_string())?;
+        let ambiguous_session_keys = serde_json::from_value(
+            raw.get("ambiguousSessionKeys")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )
+        .map_err(|_| "Invalid schema-3 ChatGPT bridge ambiguous bindings.".to_string())?;
+        return Ok(BridgeStore {
+            schema_version: STORE_SCHEMA_VERSION,
+            jobs,
+            session_targets,
+            ambiguous_session_keys,
+            stable_bindings: BTreeMap::new(),
         });
     }
 
@@ -391,7 +433,7 @@ fn load_store(path: &Path) -> Result<BridgeStore, String> {
         Ok(store) => Ok(store),
         Err(_) => Ok(quarantine_invalid_store(
             path,
-            "schema-v3 store shape is invalid",
+            "schema-v4 store shape is invalid",
         )),
     }
 }
@@ -415,6 +457,7 @@ fn persist_store_at(path: &Path, data: &BridgeData) -> Result<(), String> {
         jobs: data.jobs.clone(),
         session_targets: data.session_targets.clone(),
         ambiguous_session_keys: data.ambiguous_session_keys.clone(),
+        stable_bindings: data.stable_bindings.clone(),
     })
     .map_err(|error| format!("Could not encode ChatGPT bridge store: {error}"))?;
     let temp = parent.join(format!(
@@ -985,6 +1028,328 @@ pub(crate) fn queue_message_for_identities(
     });
     persist_locked(&data)?;
     Ok(job)
+}
+
+#[cfg(test)]
+pub(crate) fn bind_stable_target_for_identities(
+    workspace_id: &str,
+    session_keys: &[String],
+    target_id: Option<String>,
+) -> Result<ChatGptStableBinding, String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("Continuation workspace ID is required.".to_string());
+    }
+    let normalized_sessions = normalized_session_keys(session_keys);
+    if normalized_sessions.is_empty() {
+        return Err(
+            "ChatGPT conversation identity is unavailable, so RepoTunnel will not guess a continuation target."
+                .to_string(),
+        );
+    }
+    let now = now_millis();
+    let mut data = state()
+        .inner
+        .lock()
+        .map_err(|_| "ChatGPT bridge state is unavailable.".to_string())?;
+    let changed = cleanup_locked(&mut data, now);
+    persist_cleanup_if_needed(&data, changed)?;
+
+    let explicit_target = target_id.is_some();
+    let chosen = if let Some(target_id) = target_id {
+        let chosen = choose_live_target_locked(&data, Some(target_id))?;
+        for session_key in &normalized_sessions {
+            if !explicit_session_rebind_allowed(&data, session_key, &chosen) {
+                return Err(
+                    "This ChatGPT conversation is already bound to a different live target or has unfinished work. RepoTunnel will not rebind it to another chat."
+                        .to_string(),
+                );
+            }
+        }
+        chosen
+    } else {
+        resolve_session_target_locked(&data, &normalized_sessions).ok_or_else(|| {
+            "This ChatGPT conversation has no explicit continuation target binding. List ChatGPT extension targets and specify target_id once; RepoTunnel will not guess even when only one tab is connected."
+                .to_string()
+        })?
+    };
+
+    if data.jobs.iter().any(|record| {
+        record.job.target_id == chosen
+            && matches!(
+                record.job.state,
+                ChatGptBridgeJobState::Pending
+                    | ChatGptBridgeJobState::Claimed
+                    | ChatGptBridgeJobState::Sending
+            )
+            && record.workspace_id.as_deref() != Some(workspace_id)
+    }) {
+        return Err(
+            "That ChatGPT conversation already has an unfinished continuation checkpoint for a different workspace. RepoTunnel will not overwrite or mix workspace continuations."
+                .to_string(),
+        );
+    }
+
+    for session_key in &normalized_sessions {
+        if explicit_target {
+            bind_session_key_explicit_locked(&mut data, session_key, &chosen);
+        } else {
+            bind_session_key_locked(&mut data, session_key, &chosen);
+        }
+    }
+
+    if let Some(existing) = data
+        .stable_bindings
+        .values()
+        .find(|binding| binding.workspace_id == workspace_id && binding.target_id == chosen)
+        .cloned()
+    {
+        persist_locked(&data)?;
+        return Ok(existing);
+    }
+    if data.stable_bindings.len() >= MAX_STABLE_BINDINGS {
+        return Err(format!(
+            "ChatGPT bridge already has the maximum {MAX_STABLE_BINDINGS} stable continuation bindings."
+        ));
+    }
+    let binding = ChatGptStableBinding {
+        id: random_token("chatgpt-binding")?,
+        workspace_id: workspace_id.to_string(),
+        target_id: chosen,
+        created_at: now,
+    };
+    data.stable_bindings
+        .insert(binding.id.clone(), binding.clone());
+    persist_locked(&data)?;
+    Ok(binding)
+}
+
+#[cfg(test)]
+pub(crate) fn queue_message_for_stable_binding(
+    workspace_id: &str,
+    binding_id: &str,
+    message: String,
+    delay_seconds: Option<u64>,
+) -> Result<ChatGptBridgeJob, String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("Continuation workspace ID is required.".to_string());
+    }
+    let binding_id = binding_id.trim();
+    if binding_id.is_empty() || binding_id.len() > 256 || binding_id.chars().any(char::is_control) {
+        return Err("Stable ChatGPT continuation binding ID is invalid.".to_string());
+    }
+    if message.trim().is_empty() {
+        return Err("Continuation message cannot be empty.".to_string());
+    }
+    if message.len() > MAX_MESSAGE_BYTES {
+        return Err(format!(
+            "Continuation message is too large; maximum is {MAX_MESSAGE_BYTES} bytes."
+        ));
+    }
+
+    let now = now_millis();
+    let mut data = state()
+        .inner
+        .lock()
+        .map_err(|_| "ChatGPT bridge state is unavailable.".to_string())?;
+    let changed = cleanup_locked(&mut data, now);
+    persist_cleanup_if_needed(&data, changed)?;
+    let binding = data
+        .stable_bindings
+        .get(binding_id)
+        .cloned()
+        .ok_or_else(|| "Stable ChatGPT continuation binding was not found.".to_string())?;
+    if binding.workspace_id != workspace_id {
+        return Err(
+            "Stable ChatGPT continuation binding belongs to another workspace.".to_string(),
+        );
+    }
+    let chosen = binding.target_id;
+
+    if data.jobs.iter().any(|record| {
+        record.job.target_id == chosen
+            && matches!(
+                record.job.state,
+                ChatGptBridgeJobState::Pending
+                    | ChatGptBridgeJobState::Claimed
+                    | ChatGptBridgeJobState::Sending
+            )
+            && record.workspace_id.as_deref() != Some(workspace_id)
+    }) {
+        return Err(
+            "That ChatGPT conversation already has an unfinished continuation checkpoint for a different workspace. RepoTunnel will not overwrite or mix workspace continuations."
+                .to_string(),
+        );
+    }
+    if data.jobs.iter().rev().any(|record| {
+        record.job.target_id == chosen
+            && record.workspace_id.as_deref() == Some(workspace_id)
+            && record.job.state == ChatGptBridgeJobState::Uncertain
+            && record.job.message == message
+    }) {
+        return Err(
+            "The previous Mission wake has uncertain delivery state; RepoTunnel will not replay the same wake blindly."
+                .to_string(),
+        );
+    }
+
+    let delay_ms = delay_seconds.unwrap_or(0).min(3600).saturating_mul(1000);
+    let pending_indices = data
+        .jobs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| {
+            (record.job.target_id == chosen
+                && record.job.state == ChatGptBridgeJobState::Pending
+                && record.workspace_id.as_deref() == Some(workspace_id))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if let Some(&keep_index) = pending_indices.last() {
+        for &index in pending_indices
+            .iter()
+            .take(pending_indices.len().saturating_sub(1))
+        {
+            let stale = &mut data.jobs[index].job;
+            stale.state = ChatGptBridgeJobState::Cancelled;
+            stale.updated_at = now;
+            stale.error = Some("Replaced by a newer continuation checkpoint.".to_string());
+            data.jobs[index].claim_token = None;
+        }
+        let existing = &mut data.jobs[keep_index];
+        existing.job.message = message;
+        existing.job.revision = existing.job.revision.saturating_add(1);
+        existing.job.not_before_at = now.saturating_add(delay_ms);
+        existing.job.expires_at = Some(now.saturating_add(EXACT_PENDING_TTL_MS));
+        existing.job.updated_at = now;
+        existing.job.error = None;
+        existing.workspace_id = Some(workspace_id.to_string());
+        existing.checkpoint_kind = CheckpointKind::Exact;
+        let result = existing.job.clone();
+        persist_locked(&data)?;
+        return Ok(result);
+    }
+
+    if let Some(existing) = data.jobs.iter().find(|record| {
+        record.job.target_id == chosen
+            && record.workspace_id.as_deref() == Some(workspace_id)
+            && matches!(
+                record.job.state,
+                ChatGptBridgeJobState::Claimed | ChatGptBridgeJobState::Sending
+            )
+            && record.job.message == message
+    }) {
+        return Ok(existing.job.clone());
+    }
+    if data.jobs.iter().any(|record| {
+        record.job.target_id == chosen
+            && record.workspace_id.as_deref() == Some(workspace_id)
+            && matches!(
+                record.job.state,
+                ChatGptBridgeJobState::Claimed | ChatGptBridgeJobState::Sending
+            )
+    }) {
+        return Err(
+            "That ChatGPT continuation is already being delivered and can no longer be updated."
+                .to_string(),
+        );
+    }
+
+    let job = ChatGptBridgeJob {
+        id: random_token("chatgpt-job")?,
+        target_id: chosen,
+        message,
+        state: ChatGptBridgeJobState::Pending,
+        work_id: random_token("chatgpt-work")?,
+        revision: 1,
+        created_at: now,
+        not_before_at: now.saturating_add(delay_ms),
+        expires_at: Some(now.saturating_add(EXACT_PENDING_TTL_MS)),
+        updated_at: now,
+        claim_expires_at: None,
+        attempts: 0,
+        error: None,
+    };
+    data.jobs.push(BridgeJobRecord {
+        job: job.clone(),
+        workspace_id: Some(workspace_id.to_string()),
+        session_key: None,
+        checkpoint_kind: CheckpointKind::Exact,
+        claim_token: None,
+    });
+    persist_locked(&data)?;
+    Ok(job)
+}
+
+#[cfg(test)]
+pub(crate) fn cancel_mission_wakes_for_stable_binding(
+    workspace_id: &str,
+    binding_id: &str,
+    mission_id: &str,
+) -> Result<Vec<ChatGptBridgeJob>, String> {
+    let workspace_id = workspace_id.trim();
+    let binding_id = binding_id.trim();
+    let mission_id = mission_id.trim();
+    if workspace_id.is_empty() {
+        return Err("Continuation workspace ID is required.".to_string());
+    }
+    if binding_id.is_empty() || binding_id.len() > 256 || binding_id.chars().any(char::is_control) {
+        return Err("Stable ChatGPT continuation binding ID is invalid.".to_string());
+    }
+    if mission_id.is_empty() || mission_id.len() > 256 || mission_id.chars().any(char::is_control) {
+        return Err("Agent Mission ID is invalid for wake cancellation.".to_string());
+    }
+
+    let now = now_millis();
+    let mut data = state()
+        .inner
+        .lock()
+        .map_err(|_| "ChatGPT bridge state is unavailable.".to_string())?;
+    let changed = cleanup_locked(&mut data, now);
+    persist_cleanup_if_needed(&data, changed)?;
+    let Some(binding) = data.stable_bindings.get(binding_id).cloned() else {
+        return Ok(Vec::new());
+    };
+    if binding.workspace_id != workspace_id {
+        return Err(
+            "Stable ChatGPT continuation binding belongs to another workspace.".to_string(),
+        );
+    }
+
+    let wake_prefix = format!("RepoTunnel Agent Mission wake. Mission {mission_id}.");
+    let mut cancelled = Vec::new();
+    for record in &mut data.jobs {
+        if record.workspace_id.as_deref() != Some(workspace_id)
+            || record.job.target_id != binding.target_id
+            || !matches!(record.checkpoint_kind, CheckpointKind::Exact)
+            || !record.job.message.starts_with(&wake_prefix)
+            || is_terminal_job_state(&record.job.state)
+        {
+            continue;
+        }
+        let was_sending = record.job.state == ChatGptBridgeJobState::Sending;
+        record.job.state = if was_sending {
+            ChatGptBridgeJobState::Uncertain
+        } else {
+            ChatGptBridgeJobState::Cancelled
+        };
+        record.job.revision = record.job.revision.saturating_add(1);
+        record.job.updated_at = now;
+        record.job.error = Some(if was_sending {
+            "Mission pause/stop arrived after begin-send; delivery may already be in progress and automatic resend is disabled."
+                .to_string()
+        } else {
+            "Mission wake cancelled because the Mission was paused or stopped.".to_string()
+        });
+        record.claim_token = None;
+        record.job.claim_expires_at = None;
+        cancelled.push(record.job.clone());
+    }
+    if !cancelled.is_empty() {
+        persist_locked(&data)?;
+    }
+    Ok(cancelled)
 }
 
 #[cfg(test)]
@@ -1723,6 +2088,7 @@ pub(crate) fn initialize(app: &AppHandle) -> Result<bool, String> {
             data.jobs = store.jobs;
             data.session_targets = store.session_targets;
             data.ambiguous_session_keys = store.ambiguous_session_keys;
+            data.stable_bindings = store.stable_bindings;
             data.store_loaded = true;
             cleanup_locked(&mut data, now_millis());
             // Persist immediately so schema migrations, quarantine recovery, and
@@ -2204,6 +2570,237 @@ mod tests {
             .expect("original job");
         assert_eq!(still_pending.message, "Continue workspace one.");
         assert_eq!(still_pending.state, ChatGptBridgeJobState::Pending);
+    }
+
+    #[test]
+    fn mission_stable_binding_requires_explicit_target_once_then_reuses_exact_conversation() {
+        let _guard = state_test_guard();
+        {
+            let mut data = state().inner.lock().expect("bridge state");
+            data.targets.clear();
+            data.jobs.clear();
+            data.session_targets.clear();
+            data.ambiguous_session_keys.clear();
+        }
+        register_target(
+            "mission_target_a".to_string(),
+            "https://chatgpt.com/c/mission-a".to_string(),
+            Some("Mission A".to_string()),
+        )
+        .expect("register target");
+        let keys = vec!["session-mission-a".to_string()];
+        let error = bind_stable_target_for_identities("workspace-mission", &keys, None)
+            .expect_err("first Mission binding must be explicit");
+        assert!(error.contains("no explicit continuation target binding"));
+
+        let first = bind_stable_target_for_identities(
+            "workspace-mission",
+            &keys,
+            Some("mission_target_a".to_string()),
+        )
+        .expect("bind Mission target");
+        {
+            let mut data = state().inner.lock().expect("bridge state");
+            data.targets.remove("mission_target_a");
+        }
+        let rebound = bind_stable_target_for_identities("workspace-mission", &keys, None)
+            .expect("reuse exact offline conversation binding");
+        assert_eq!(rebound.id, first.id);
+        assert_eq!(rebound.target_id, "mission_target_a");
+    }
+
+    #[test]
+    fn mission_stable_binding_cannot_be_stolen_by_another_live_chat() {
+        let _guard = state_test_guard();
+        {
+            let mut data = state().inner.lock().expect("bridge state");
+            data.targets.clear();
+            data.jobs.clear();
+            data.session_targets.clear();
+            data.ambiguous_session_keys.clear();
+        }
+        for suffix in ["a", "b"] {
+            register_target(
+                format!("mission_steal_{suffix}"),
+                format!("https://chatgpt.com/c/mission-steal-{suffix}"),
+                Some("Mission".to_string()),
+            )
+            .expect("register target");
+        }
+        let keys = vec!["session-mission-steal".to_string()];
+        bind_stable_target_for_identities(
+            "workspace-mission-steal",
+            &keys,
+            Some("mission_steal_a".to_string()),
+        )
+        .expect("initial bind");
+        let error = bind_stable_target_for_identities(
+            "workspace-mission-steal",
+            &keys,
+            Some("mission_steal_b".to_string()),
+        )
+        .expect_err("different live chat must not steal Mission binding");
+        assert!(error.contains("different live target") || error.contains("will not rebind"));
+    }
+
+    #[test]
+    fn mission_stable_wake_replaces_pending_in_place_and_blocks_cross_workspace_or_uncertain_replay(
+    ) {
+        let _guard = state_test_guard();
+        {
+            let mut data = state().inner.lock().expect("bridge state");
+            data.targets.clear();
+            data.jobs.clear();
+            data.session_targets.clear();
+            data.ambiguous_session_keys.clear();
+        }
+        register_target(
+            "mission_wake_target".to_string(),
+            "https://chatgpt.com/c/mission-wake".to_string(),
+            Some("Mission Wake".to_string()),
+        )
+        .expect("register target");
+        let first_binding = bind_stable_target_for_identities(
+            "workspace-wake-one",
+            &["session-wake-one".to_string()],
+            Some("mission_wake_target".to_string()),
+        )
+        .expect("bind first workspace");
+        let first = queue_message_for_stable_binding(
+            "workspace-wake-one",
+            &first_binding.id,
+            "Mission assignment alpha".to_string(),
+            None,
+        )
+        .expect("queue first wake");
+        let updated = queue_message_for_stable_binding(
+            "workspace-wake-one",
+            &first_binding.id,
+            "Mission assignment beta".to_string(),
+            None,
+        )
+        .expect("replace pending wake");
+        assert_eq!(updated.id, first.id);
+        assert!(updated.revision > first.revision);
+
+        let cross_workspace = bind_stable_target_for_identities(
+            "workspace-wake-two",
+            &["session-wake-two".to_string()],
+            Some("mission_wake_target".to_string()),
+        )
+        .expect_err("another workspace cannot bind over active checkpoint");
+        assert!(cross_workspace.contains("different workspace"));
+
+        {
+            let mut data = state().inner.lock().expect("bridge state");
+            let record = data
+                .jobs
+                .iter_mut()
+                .find(|record| record.job.id == updated.id)
+                .expect("wake job");
+            record.job.state = ChatGptBridgeJobState::Uncertain;
+            record.job.updated_at = now_millis();
+        }
+        let error = queue_message_for_stable_binding(
+            "workspace-wake-one",
+            &first_binding.id,
+            "Mission assignment beta".to_string(),
+            None,
+        )
+        .expect_err("uncertain send must not be replayed blindly");
+        assert!(error.contains("uncertain"));
+    }
+
+    #[test]
+    fn mission_wake_cancellation_is_binding_and_mission_scoped() {
+        let _guard = state_test_guard();
+        {
+            let mut data = state().inner.lock().expect("bridge state");
+            data.targets.clear();
+            data.jobs.clear();
+            data.session_targets.clear();
+            data.ambiguous_session_keys.clear();
+            data.stable_bindings.clear();
+        }
+        register_target(
+            "mission_pause_target".to_string(),
+            "https://chatgpt.com/c/mission-pause".to_string(),
+            Some("Mission Pause".to_string()),
+        )
+        .expect("register Mission target");
+        register_target(
+            "other_pause_target".to_string(),
+            "https://chatgpt.com/c/other-pause".to_string(),
+            Some("Other Pause".to_string()),
+        )
+        .expect("register unrelated target");
+        let mission_binding = bind_stable_target_for_identities(
+            "workspace-mission-pause",
+            &["session-mission-pause".to_string()],
+            Some("mission_pause_target".to_string()),
+        )
+        .expect("bind Mission target");
+        let other_binding = bind_stable_target_for_identities(
+            "workspace-mission-pause",
+            &["session-other-pause".to_string()],
+            Some("other_pause_target".to_string()),
+        )
+        .expect("bind unrelated target");
+        let mission_job = queue_message_for_stable_binding(
+            "workspace-mission-pause",
+            &mission_binding.id,
+            "RepoTunnel Agent Mission wake. Mission mission-pause-test. Agent agent-a. Continue assigned work."
+                .to_string(),
+            None,
+        )
+        .expect("queue Mission wake");
+        let other_job = queue_message_for_stable_binding(
+            "workspace-mission-pause",
+            &other_binding.id,
+            "Unrelated exact continuation checkpoint".to_string(),
+            None,
+        )
+        .expect("queue unrelated checkpoint");
+
+        let cancelled = cancel_mission_wakes_for_stable_binding(
+            "workspace-mission-pause",
+            &mission_binding.id,
+            "mission-pause-test",
+        )
+        .expect("cancel Mission wakes");
+
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].id, mission_job.id);
+        assert_eq!(cancelled[0].state, ChatGptBridgeJobState::Cancelled);
+        let jobs = list_jobs().expect("list bridge jobs");
+        assert_eq!(
+            jobs.iter()
+                .find(|job| job.id == other_job.id)
+                .unwrap()
+                .state,
+            ChatGptBridgeJobState::Pending
+        );
+    }
+
+    #[test]
+    fn missing_stable_binding_is_noop_for_mission_wake_cancellation() {
+        let _guard = state_test_guard();
+        {
+            let mut data = state().inner.lock().expect("bridge state");
+            data.targets.clear();
+            data.jobs.clear();
+            data.session_targets.clear();
+            data.ambiguous_session_keys.clear();
+            data.stable_bindings.clear();
+        }
+
+        let cancelled = cancel_mission_wakes_for_stable_binding(
+            "workspace-mission-pause",
+            "missing-stable-binding",
+            "mission-pause-test",
+        )
+        .expect("missing durable binding has no wake left to cancel");
+        assert!(cancelled.is_empty());
     }
 
     #[test]
