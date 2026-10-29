@@ -73,6 +73,7 @@ mod remote_sync;
 mod remote_view;
 mod repository;
 mod secret_guard;
+mod secure_tunnel_keyring;
 mod self_continuation;
 mod semantic;
 mod storage;
@@ -503,6 +504,9 @@ pub fn run() {
                 commands::install_official_tunnel_client,
                 commands::start_chat_connection,
                 commands::stop_chat_connection,
+                commands::pause_chat_connection,
+                commands::resume_chat_connection,
+                commands::remember_chat_connection,
                 commands::get_model_hub,
                 commands::refresh_model_runtime,
                 commands::update_model_runtime_endpoint,

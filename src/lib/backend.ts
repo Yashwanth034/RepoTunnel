@@ -1160,6 +1160,18 @@ export async function stopChatConnection(): Promise<ChatConnectionStatus> {
   return invoke<ChatConnectionStatus>("stop_chat_connection");
 }
 
+export async function pauseChatConnection(): Promise<ChatConnectionStatus> {
+  return invoke<ChatConnectionStatus>("pause_chat_connection");
+}
+
+export async function resumeChatConnection(): Promise<ChatConnectionStatus> {
+  return invoke<ChatConnectionStatus>("resume_chat_connection");
+}
+
+export async function rememberChatConnection(): Promise<ChatConnectionStatus> {
+  return invoke<ChatConnectionStatus>("remember_chat_connection");
+}
+
 
 export async function getVideoToolsStatus(): Promise<VideoToolsStatus> {
   return invoke<VideoToolsStatus>("get_video_tools_status");

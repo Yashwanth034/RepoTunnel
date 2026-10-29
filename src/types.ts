@@ -628,6 +628,9 @@ export type HttpsSetupHostnameVerification = {
 };
 
 export type ChatConnectionStatus = {
+  paused: boolean;
+  remembered: boolean;
+  rememberSupported: boolean;
   clientAvailable: boolean;
   clientVersion: string | null;
   running: boolean;

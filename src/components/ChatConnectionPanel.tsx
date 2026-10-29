@@ -8,6 +8,9 @@ type ChatConnectionPanelProps = {
   aiAccessPaused: boolean;
   onConnect: (tunnelId: string, apiKey: string) => Promise<void>;
   onDisconnect: () => Promise<void>;
+  onPause: () => Promise<void>;
+  onResume: () => Promise<void>;
+  onRemember: () => Promise<void>;
   onInstallClient: () => Promise<void>;
   onOpenGuide: () => void;
 };
@@ -19,6 +22,9 @@ function ChatConnectionPanel({
   aiAccessPaused,
   onConnect,
   onDisconnect,
+  onPause,
+  onResume,
+  onRemember,
   onInstallClient,
   onOpenGuide,
 }: ChatConnectionPanelProps) {
@@ -42,11 +48,13 @@ function ChatConnectionPanel({
     setApiKey("");
   }
 
-  const connectionLabel = status.ready
-    ? "Connected"
-    : status.running
-      ? "Starting"
-      : "Disconnected";
+  const connectionLabel = status.paused
+    ? "Paused"
+    : status.ready
+      ? "Connected"
+      : status.running
+        ? "Starting"
+        : "Disconnected";
 
   return (
     <section className="connection-panel" aria-labelledby="connection-title">
@@ -75,11 +83,11 @@ function ChatConnectionPanel({
       ) : null}
 
       <div className="managed-client-summary">
-        <div><span>OpenAI tunnel</span><strong>{status.ready ? "1 connected" : status.running ? "Starting" : "0 connected"}</strong></div>
+        <div><span>OpenAI tunnel</span><strong>{status.paused ? "Paused" : status.ready ? "1 connected" : status.running ? "Starting" : "0 connected"}</strong></div>
         <div><span>Runtime</span><strong>{status.clientVersion ?? "Not detected"}</strong></div>
       </div>
 
-      {!status.clientAvailable && !status.running ? (
+      {!status.clientAvailable && !status.running && !status.paused ? (
         <div className="connection-callout warning-callout">
           <strong>OpenAI tunnel-client was not detected</strong>
           {macRequiresHomebrew ? (
@@ -144,14 +152,52 @@ function ChatConnectionPanel({
             </p>
           </div>
 
-          <button
-            className="secondary-button danger-outline"
-            type="button"
-            onClick={() => void onDisconnect()}
-            disabled={busy}
-          >
-            {busy ? "Working…" : "Disconnect OpenAI tunnel"}
-          </button>
+          <div className="connection-form-footer">
+            {status.rememberSupported && !status.remembered ? (
+              <button className="secondary-button" type="button" onClick={() => void onRemember()} disabled={busy}>
+                Remember in system keyring
+              </button>
+            ) : status.remembered ? <span>Saved securely in system keyring · reconnect manually after restart</span> : null}
+            <button className="secondary-button" type="button" onClick={() => void onPause()} disabled={busy}>
+              {busy ? "Working…" : "Pause OpenAI tunnel"}
+            </button>
+            <button
+              className="secondary-button danger-outline"
+              type="button"
+              onClick={() => void onDisconnect()}
+              disabled={busy}
+            >
+              Disconnect OpenAI tunnel
+            </button>
+          </div>
+        </div>
+      ) : status.paused ? (
+        <div className="connected-card">
+          <div className="connection-details">
+            <div><span>Tunnel</span><code>{status.tunnelId}</code></div>
+            <div><span>OpenAI tunnel</span><strong>Paused</strong></div>
+            <div><span>Local gateway</span><strong>{gatewayRunning ? "Running" : "Offline"}</strong></div>
+          </div>
+          <p>Only the OpenAI Secure Tunnel client is stopped. Direct HTTPS and the public MCP endpoint are unaffected.</p>
+          <p>{status.remembered
+            ? "The tunnel ID and runtime key are saved only in your Linux system keyring. RepoTunnel starts paused after reopening; Resume reconnects without asking again."
+            : status.rememberSupported
+              ? "This session's tunnel ID and key are in memory only. To reuse after closing RepoTunnel, save them in your Linux system keyring. No key is written to RepoTunnel settings."
+              : "This session's tunnel ID and key are in memory only and are cleared when RepoTunnel closes. Secure keyring persistence is not supported on this platform."}</p>
+          {status.message ? <p className="connection-message">{status.message}</p> : null}
+          <div className="connection-form-footer">
+            {status.rememberSupported && !status.remembered ? (
+              <button className="secondary-button" type="button" onClick={() => void onRemember()} disabled={busy}>
+                Remember in system keyring
+              </button>
+            ) : null}
+            <button className="primary-button" type="button" onClick={() => void onResume()} disabled={busy}>
+              {busy ? "Resuming…" : "Resume OpenAI tunnel"}
+            </button>
+            <button className="secondary-button danger-outline" type="button" onClick={() => void onDisconnect()} disabled={busy}>
+              Disconnect and forget key
+            </button>
+          </div>
         </div>
       ) : (
         <form className="connection-form" onSubmit={handleSubmit}>
@@ -165,7 +211,7 @@ function ChatConnectionPanel({
             <strong>First-time setup</strong>
             <p>
               Create a tunnel in OpenAI Platform and a Runtime API key with Tunnels Read + Use.
-              The API key below stays in memory only and is cleared from this form after launch.
+              The API key stays in memory only unless you later choose Remember in system keyring. After reopening, saved tunnels stay paused until you click Resume.
             </p>
           </div>
 

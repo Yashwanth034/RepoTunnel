@@ -27,6 +27,11 @@ struct GatewayRuntime {
 #[derive(Default)]
 struct TunnelState {
     runtime: Option<connection::TunnelRuntime>,
+    // Kept only in process memory for an explicit Pause -> Resume; never persisted.
+    resume: Option<(String, zeroize::Zeroizing<String>)>,
+    paused: bool,
+    remembered: bool,
+    keyring_checked: bool,
     last_message: Option<String>,
 }
 
@@ -702,6 +707,66 @@ impl AppState {
         secure_tunnel_token_matches(candidate, &runtime.local_mcp_token_hash, process_running)
     }
 
+    /// Read the OS keyring once at startup. A remembered tunnel is always
+    /// restored PAUSED; only a human click can start its outbound client.
+    pub(crate) fn restore_saved_chat_connection_once(&self) -> Result<(), String> {
+        {
+            let mut tunnel = self
+                .tunnel
+                .lock()
+                .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
+            if tunnel.keyring_checked {
+                return Ok(());
+            }
+            tunnel.keyring_checked = true;
+        }
+        let result = crate::secure_tunnel_keyring::load();
+        let mut tunnel = self
+            .tunnel
+            .lock()
+            .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
+        if tunnel.runtime.is_none() && tunnel.resume.is_none() {
+            match result {
+                Ok(Some(saved)) => {
+                    tunnel.resume = Some(saved);
+                    tunnel.paused = true;
+                    tunnel.remembered = true;
+                    tunnel.last_message = Some(
+                        "Saved OpenAI Secure Tunnel is paused. Click Resume to reconnect.".into(),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tunnel.last_message = Some(format!(
+                        "Could not restore saved OpenAI tunnel from system keyring: {error}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remember_chat_connection(&self) -> Result<ChatConnectionStatus, String> {
+        let mut tunnel = self
+            .tunnel
+            .lock()
+            .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
+        let (id, key) = tunnel
+            .resume
+            .as_ref()
+            .ok_or_else(|| "Connect OpenAI Secure Tunnel before saving its key.".to_string())?;
+        if tunnel.runtime.is_none() && !tunnel.paused {
+            return Err("OpenAI Secure Tunnel is not connected.".into());
+        }
+        crate::secure_tunnel_keyring::save(id, key)?;
+        tunnel.remembered = true;
+        tunnel.keyring_checked = true;
+        tunnel.last_message =
+            Some("OpenAI tunnel saved in your system keyring. After restart, click Resume.".into());
+        drop(tunnel);
+        self.chat_connection_status()
+    }
+
     pub(crate) fn chat_connection_status(&self) -> Result<ChatConnectionStatus, String> {
         let client_version = connection::detect_tunnel_client().map(|info| info.version);
         let client_available = client_version.is_some();
@@ -732,6 +797,7 @@ impl AppState {
                             let detail = connection::log_tail(&finished.log_file)
                                 .unwrap_or_else(|| format!("tunnel-client exited with {status}."));
                             connection::cleanup_runtime_files(&finished);
+                            tunnel.paused = tunnel.resume.is_some();
                             tunnel.last_message = Some(detail);
                         }
                     }
@@ -766,7 +832,15 @@ impl AppState {
             };
             let admin_url = health_url.map(|base| format!("{base}/ui"));
 
+            let remembered = self
+                .tunnel
+                .lock()
+                .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?
+                .remembered;
             return Ok(ChatConnectionStatus {
+                paused: false,
+                remembered,
+                remember_supported: cfg!(target_os = "linux"),
                 client_available,
                 client_version,
                 running: true,
@@ -777,12 +851,29 @@ impl AppState {
             });
         }
 
+        let (paused_resume, remembered) = {
+            let tunnel = self
+                .tunnel
+                .lock()
+                .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
+            (
+                if tunnel.paused {
+                    tunnel.resume.as_ref().map(|(id, _)| id.clone())
+                } else {
+                    None
+                },
+                tunnel.remembered,
+            )
+        };
         Ok(ChatConnectionStatus {
+            paused: paused_resume.is_some(),
+            remembered,
+            remember_supported: cfg!(target_os = "linux"),
             client_available,
             client_version,
             running: false,
             ready: false,
-            tunnel_id: None,
+            tunnel_id: paused_resume,
             admin_url: None,
             message: last_message,
         })
@@ -845,8 +936,18 @@ impl AppState {
                 }
             }
 
-            let runtime = connection::spawn_tunnel(tunnel_id, api_key, &endpoint, &client)?;
+            // A newly supplied key must not silently keep a different saved
+            // credential. Explicit Disconnect and switching both revoke it.
+            if tunnel.remembered {
+                crate::secure_tunnel_keyring::forget()?;
+                tunnel.remembered = false;
+            }
+            let runtime =
+                connection::spawn_tunnel(tunnel_id.clone(), api_key.clone(), &endpoint, &client)?;
             tunnel.runtime = Some(runtime);
+            tunnel.resume = Some((tunnel_id, zeroize::Zeroizing::new(api_key)));
+            tunnel.paused = false;
+            tunnel.keyring_checked = true;
             tunnel.last_message = Some("Secure MCP Tunnel is starting.".to_string());
         }
 
@@ -859,12 +960,78 @@ impl AppState {
             .lock()
             .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
 
+        // Fail closed rather than claim "forget" while credentials remain
+        // saved in the OS keyring. This does not alter the public transport.
+        if tunnel.remembered {
+            crate::secure_tunnel_keyring::forget()?;
+        }
         if let Some(mut runtime) = tunnel.runtime.take() {
             connection::stop_runtime(&mut runtime);
         }
+        // Explicit Disconnect forgets the memory and persisted credential.
+        tunnel.resume = None;
+        tunnel.remembered = false;
+        tunnel.keyring_checked = true;
+        tunnel.paused = false;
         tunnel.last_message = None;
 
         Ok(())
+    }
+
+    /// Human-controlled pause: stop only this outbound OpenAI tunnel-client,
+    /// leaving the MCP gateway and all public connection providers untouched.
+    pub(crate) fn pause_chat_connection(&self) -> Result<(), String> {
+        let mut tunnel = self
+            .tunnel
+            .lock()
+            .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
+        if tunnel.resume.is_none() || tunnel.runtime.is_none() {
+            return Err("Connect OpenAI Secure Tunnel before pausing it.".to_string());
+        }
+        if let Some(mut runtime) = tunnel.runtime.take() {
+            connection::stop_runtime(&mut runtime);
+        }
+        tunnel.paused = true;
+        tunnel.last_message = Some(
+            "OpenAI Secure Tunnel paused. Resume to reconnect without re-entering the key."
+                .to_string(),
+        );
+        Ok(())
+    }
+
+    /// Resume a paused OpenAI tunnel with its memory-only runtime credential.
+    /// No Direct HTTPS/public-tunnel state is read or modified.
+    pub(crate) fn resume_chat_connection(
+        &self,
+        app: AppHandle,
+    ) -> Result<ChatConnectionStatus, String> {
+        let client = connection::detect_tunnel_client()
+            .ok_or_else(|| "OpenAI tunnel-client was not found.".to_string())?;
+        let (_, port) = self.start_gateway(app)?;
+        let port = port.ok_or_else(|| "The local MCP gateway did not start.".to_string())?;
+        let endpoint = format!("http://127.0.0.1:{port}/mcp");
+        {
+            let mut tunnel = self
+                .tunnel
+                .lock()
+                .map_err(|_| "ChatGPT connection state is unavailable.".to_string())?;
+            if tunnel.runtime.is_some() {
+                return Err("OpenAI Secure Tunnel is already running.".to_string());
+            }
+            if !tunnel.paused {
+                return Err("OpenAI Secure Tunnel is not paused.".to_string());
+            }
+            let (id, key) = tunnel.resume.as_ref().ok_or_else(|| {
+                "No paused OpenAI tunnel is available. Connect with the runtime key again."
+                    .to_string()
+            })?;
+            let runtime =
+                connection::spawn_tunnel(id.clone(), key.to_string(), &endpoint, &client)?;
+            tunnel.runtime = Some(runtime);
+            tunnel.paused = false;
+            tunnel.last_message = Some("Secure MCP Tunnel is reconnecting.".to_string());
+        }
+        self.chat_connection_status()
     }
 }
 

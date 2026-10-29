@@ -12,10 +12,16 @@ let root: Root | null = null;
 let host: HTMLDivElement | null = null;
 const onConnect = vi.fn(async (_tunnelId: string, _apiKey: string) => undefined);
 const onDisconnect = vi.fn(async () => undefined);
+const onPause = vi.fn(async () => undefined);
+const onResume = vi.fn(async () => undefined);
+const onRemember = vi.fn(async () => undefined);
 const onInstallClient = vi.fn(async () => undefined);
 const onOpenGuide = vi.fn();
 
 const unavailableStatus: ChatConnectionStatus = {
+  paused: false,
+  remembered: false,
+  rememberSupported: true,
   clientAvailable: false,
   clientVersion: null,
   running: false,
@@ -38,6 +44,9 @@ async function renderPanel(status: ChatConnectionStatus = unavailableStatus) {
         aiAccessPaused={false}
         onConnect={onConnect}
         onDisconnect={onDisconnect}
+        onPause={onPause}
+        onResume={onResume}
+        onRemember={onRemember}
         onInstallClient={onInstallClient}
         onOpenGuide={onOpenGuide}
       />,
@@ -126,6 +135,91 @@ describe("ChatConnectionPanel Secure Tunnel entry", () => {
 
     expect(host?.textContent).not.toContain("OpenAI tunnel-client was not detected");
     expect(host?.textContent).toContain("Disconnect OpenAI tunnel");
+  });
+
+  it("only pauses the active OpenAI tunnel and still offers full disconnect", async () => {
+    await renderPanel({
+      ...unavailableStatus,
+      clientAvailable: true,
+      running: true,
+      ready: true,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    });
+    const pause = Array.from(host?.querySelectorAll("button") ?? [])
+      .find(button => button.textContent?.includes("Pause OpenAI tunnel"));
+    expect(pause).toBeTruthy();
+    await act(async () => pause?.click());
+    expect(onPause).toHaveBeenCalledTimes(1);
+    expect(onResume).not.toHaveBeenCalled();
+    expect(onDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("resumes a paused tunnel without exposing saved credentials or touching public providers", async () => {
+    await renderPanel({
+      ...unavailableStatus,
+      clientAvailable: true,
+      paused: true,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    });
+    expect(host?.textContent).toContain("Direct HTTPS and the public MCP endpoint are unaffected");
+    expect(host?.textContent).toContain("No key is written to RepoTunnel settings");
+    expect(host?.textContent).not.toContain("Runtime API key");
+    const resume = Array.from(host?.querySelectorAll("button") ?? [])
+      .find(button => button.textContent?.includes("Resume OpenAI tunnel"));
+    await act(async () => resume?.click());
+    expect(onResume).toHaveBeenCalledTimes(1);
+    expect(onConnect).not.toHaveBeenCalled();
+    expect(onDisconnect).not.toHaveBeenCalled();
+    const forget = Array.from(host?.querySelectorAll("button") ?? [])
+      .find(button => button.textContent?.includes("Disconnect and forget key"));
+    await act(async () => forget?.click());
+    expect(onDisconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets the user explicitly save the connected key in the OS keyring", async () => {
+    await renderPanel({
+      ...unavailableStatus,
+      clientAvailable: true,
+      running: true,
+      ready: true,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    });
+    const remember = Array.from(host?.querySelectorAll("button") ?? [])
+      .find(button => button.textContent?.includes("Remember in system keyring"));
+    expect(remember).toBeTruthy();
+    await act(async () => remember?.click());
+    expect(onRemember).toHaveBeenCalledTimes(1);
+    expect(onConnect).not.toHaveBeenCalled();
+  });
+
+  it("does not offer OS keyring saving on unsupported platforms", async () => {
+    await renderPanel({
+      ...unavailableStatus,
+      clientAvailable: true,
+      running: true,
+      ready: true,
+      rememberSupported: false,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    });
+    expect(host?.textContent).not.toContain("Remember in system keyring");
+    expect(onRemember).not.toHaveBeenCalled();
+  });
+
+  it("reopens a saved tunnel paused and offers Resume without a secret input", async () => {
+    await renderPanel({
+      ...unavailableStatus,
+      clientAvailable: true,
+      paused: true,
+      remembered: true,
+      tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+    });
+    expect(host?.textContent).toContain("saved only in your Linux system keyring");
+    expect(host?.querySelector('input[type="password"]')).toBeNull();
+    const resume = Array.from(host?.querySelectorAll("button") ?? [])
+      .find(button => button.textContent?.includes("Resume OpenAI tunnel"));
+    await act(async () => resume?.click());
+    expect(onResume).toHaveBeenCalledTimes(1);
+    expect(onConnect).not.toHaveBeenCalled();
   });
 
   it("explains tunnel-local token authentication without directing users to public HTTPS OAuth", async () => {

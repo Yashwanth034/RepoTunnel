@@ -4967,9 +4967,13 @@ pub async fn clear_public_tunnel(app: AppHandle) -> Result<PublicTunnelStatus, S
 
 #[tauri::command]
 pub async fn get_chat_connection_status(app: AppHandle) -> Result<ChatConnectionStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<AppState>().chat_connection_status())
-        .await
-        .map_err(|error| format!("OpenAI Secure Tunnel status check could not complete: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.restore_saved_chat_connection_once()?;
+        state.chat_connection_status()
+    })
+    .await
+    .map_err(|error| format!("OpenAI Secure Tunnel status check could not complete: {error}"))?
 }
 
 /// Explicit human-only Connect UI action. Never called by AI/MCP tooling.
@@ -5018,6 +5022,51 @@ pub async fn stop_chat_connection(app: AppHandle) -> Result<ChatConnectionStatus
     })
     .await
     .map_err(|error| format!("OpenAI Secure Tunnel stop task could not complete: {error}"))?
+}
+
+/// Human-only opt-in. Only the Linux OS keyring stores the runtime key;
+/// no plaintext key is persisted in settings or workspace files.
+#[tauri::command]
+pub async fn remember_chat_connection(app: AppHandle) -> Result<ChatConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let result = state.remember_chat_connection()?;
+        hardening::log_event(
+            &app,
+            "INFO",
+            "chat.remember",
+            "OpenAI Secure Tunnel saved in OS keyring.",
+        );
+        Ok(result)
+    })
+    .await
+    .map_err(|error| format!("OpenAI Secure Tunnel keyring task could not complete: {error}"))?
+}
+
+/// Explicitly pause only OpenAI's outbound tunnel-client, not the public endpoint.
+#[tauri::command]
+pub async fn pause_chat_connection(app: AppHandle) -> Result<ChatConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.pause_chat_connection()?;
+        hardening::log_event(&app, "INFO", "chat.pause", "OpenAI Secure Tunnel paused.");
+        state.chat_connection_status()
+    })
+    .await
+    .map_err(|error| format!("OpenAI Secure Tunnel pause task could not complete: {error}"))?
+}
+
+/// Resume only a previously paused tunnel using its memory-only credential.
+#[tauri::command]
+pub async fn resume_chat_connection(app: AppHandle) -> Result<ChatConnectionStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let status = state.resume_chat_connection(app.clone())?;
+        hardening::log_event(&app, "INFO", "chat.resume", "OpenAI Secure Tunnel resumed.");
+        Ok(status)
+    })
+    .await
+    .map_err(|error| format!("OpenAI Secure Tunnel resume task could not complete: {error}"))?
 }
 
 #[tauri::command]

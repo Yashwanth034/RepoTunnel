@@ -324,6 +324,9 @@ pub(crate) struct PublicTunnelStatus {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChatConnectionStatus {
+    pub(crate) paused: bool,
+    pub(crate) remembered: bool,
+    pub(crate) remember_supported: bool,
     pub(crate) client_available: bool,
     pub(crate) client_version: Option<String>,
     pub(crate) running: bool,

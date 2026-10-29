@@ -70,6 +70,9 @@ import {
   startChatConnection,
   startGateway,
   stopChatConnection,
+  pauseChatConnection,
+  resumeChatConnection,
+  rememberChatConnection,
   stopGateway,
   setAiAccessPaused,
   updateWorkspaceAccess,
@@ -146,6 +149,9 @@ const initialPublicTunnelStatus: PublicTunnelStatus = {
 };
 
 const initialConnectionStatus: ChatConnectionStatus = {
+  paused: false,
+  remembered: false,
+  rememberSupported: false,
   clientAvailable: false,
   clientVersion: null,
   running: false,
@@ -1071,6 +1077,43 @@ function App() {
     }
   }
 
+  async function handleChatPause() {
+    setNotice(null);
+    setConnectionBusy(true);
+    try {
+      setConnectionStatus(await pauseChatConnection());
+    } catch (error) {
+      setNotice(`Could not pause OpenAI Secure Tunnel: ${errorMessage(error)}`);
+    } finally {
+      setConnectionBusy(false);
+    }
+  }
+
+  async function handleChatResume() {
+    setNotice(null);
+    setConnectionBusy(true);
+    try {
+      setConnectionStatus(await resumeChatConnection());
+    } catch (error) {
+      setNotice(`Could not resume OpenAI Secure Tunnel: ${errorMessage(error)}`);
+    } finally {
+      setConnectionBusy(false);
+    }
+  }
+
+  async function handleChatRemember() {
+    setNotice(null);
+    setConnectionBusy(true);
+    try {
+      setConnectionStatus(await rememberChatConnection());
+      setNotice("OpenAI Secure Tunnel saved in the system keyring. It will reopen paused, ready for Resume.");
+    } catch (error) {
+      setNotice(`Could not save OpenAI tunnel in the system keyring: ${errorMessage(error)}`);
+    } finally {
+      setConnectionBusy(false);
+    }
+  }
+
   async function handleChatDisconnect() {
     setNotice(null);
     setConnectionBusy(true);
@@ -1662,6 +1705,9 @@ function App() {
             aiAccessPaused={aiAccessPaused}
             onConnect={handleChatConnect}
             onDisconnect={handleChatDisconnect}
+            onPause={handleChatPause}
+            onResume={handleChatResume}
+            onRemember={handleChatRemember}
             onInstallClient={handleChatClientInstall}
             onOpenGuide={() => setActiveView("httpsSetup")}
           />
