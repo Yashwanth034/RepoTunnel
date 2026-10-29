@@ -2814,6 +2814,20 @@ fn read_verified_private_source_bytes(
         {
             return false;
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            // Timestamps and lengths do not authenticate a Windows file.
+            // Compare its kernel-backed volume and file index against the
+            // metadata captured before the task writer could replace it.
+            if expected.file_index().is_none()
+                || expected.volume_serial_number().is_none()
+                || metadata.file_index() != expected.file_index()
+                || metadata.volume_serial_number() != expected.volume_serial_number()
+            {
+                return false;
+            }
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;

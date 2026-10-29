@@ -2617,8 +2617,7 @@ mod platform {
              (deny default)\n\
              (allow process*)\n\
              (allow signal (target self))\n\
-             (allow sysctl-read)\n\
-             (allow file-read-metadata (literal \"/\"))\n",
+             (allow sysctl-read)\n",
         );
 
         for root in safe_read_roots(
@@ -4665,7 +4664,11 @@ mod platform {
             "original"
         );
 
-        let hidden = run("type .git\\config").expect("launch protected Git read denial case");
+        // cmd.exe's TYPE may report a zero exit status even when its stream
+        // cannot be opened. FindStr succeeds only when the protected fixture
+        // contents were actually read, so it provides a stronger leak check.
+        let hidden = run("findstr /C:hidden .git\\config >NUL")
+            .expect("launch protected Git read denial case");
         assert_ne!(hidden, 0, "AppContainer must deny Git metadata reads");
         assert_eq!(
             std::fs::read_to_string(git.join("config")).unwrap(),
