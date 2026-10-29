@@ -545,6 +545,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("Readme.md"), "first").unwrap();
         fs::write(dir.path().join("README.md"), "second").unwrap();
+        // macOS defaults to a case-insensitive filesystem. In that case two
+        // conflicting names cannot coexist, so prove the fixture cannot
+        // represent a collision rather than asserting one was observed.
+        if fs::read_to_string(dir.path().join("Readme.md")).unwrap() == "second" {
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+            return;
+        }
         let result = manifest(&workspace(dir.path())).unwrap();
         assert!(result.incomplete);
         assert!(result

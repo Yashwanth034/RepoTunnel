@@ -1807,7 +1807,10 @@ mod native_wake_tests {
         let watched = ["future/deep/file.txt".to_string()];
         let mut watcher = NativeMonitorWake::new(root, watched.iter())
             .expect("missing nested paths must watch their existing ancestor");
-        assert!(!watcher.wait(Duration::from_millis(80)).unwrap());
+        // macOS FSEvents may deliver an initial directory registration event
+        // even before the watched descendant exists. Drain that optional
+        // initial wake; the test's actual requirement is the future creation.
+        let _ = watcher.wait(Duration::from_millis(80)).unwrap();
         fs::create_dir(root.join("future")).unwrap();
         assert!(watcher.wait(Duration::from_secs(5)).unwrap());
     }

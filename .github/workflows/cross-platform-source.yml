@@ -84,6 +84,17 @@ jobs:
       - name: Link native RepoTunnel desktop executable (no installer)
         run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin repotunnel
 
+      - name: Prepare Windows native test fixture directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Windows runners may expose TEMP as an 8.3 alias (RUNNER~1);
+          # native junction and scoped-source tests need a stable long path.
+          $fixture = Join-Path $env:RUNNER_TEMP 'RepoTunnelNativeFixtures'
+          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
+          "TEMP=$fixture" >> $env:GITHUB_ENV
+          "TMP=$fixture" >> $env:GITHUB_ENV
+
       - name: Windows native Rust tests
         if: runner.os == 'Windows'
         env:
@@ -102,4 +113,7 @@ jobs:
           fi
           export DYLD_LIBRARY_PATH="$swift_runtime_paths${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           export DYLD_FALLBACK_LIBRARY_PATH="$swift_runtime_paths${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+          # macOS exposes /var as a symlink to /private/var; native sandbox
+          # tests compare fully resolved paths, so use a canonical temp root.
+          export TMPDIR="$(cd "$TMPDIR" && pwd -P)/"
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1

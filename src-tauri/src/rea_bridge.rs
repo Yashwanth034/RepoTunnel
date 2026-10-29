@@ -706,7 +706,13 @@ fn looks_like_windows_absolute_path(value: &str) -> bool {
 }
 
 fn looks_like_absolute_host_path(value: &str) -> bool {
-    Path::new(value).is_absolute() || looks_like_windows_absolute_path(value)
+    // Rust's host-specific Path parser does not recognize POSIX root paths on
+    // Windows (or Windows root-relative paths on Unix). Block both spellings
+    // before interpreting arbitrary arguments on any supported host.
+    value.starts_with('/')
+        || value.starts_with('\\')
+        || Path::new(value).is_absolute()
+        || looks_like_windows_absolute_path(value)
 }
 
 fn is_path_key(key: &str) -> bool {
