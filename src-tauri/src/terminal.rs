@@ -2068,7 +2068,13 @@ fn prepare_windows_private_source_projection(
         let relative = Path::new(&mount.relative_path);
         reject_task_path_alias_components(&base, relative)?;
         let target = projected_root.join(relative);
-        let private = &mount.private_path;
+        // Use the same canonical root spelling for the private source and
+        // for the copy routine's strip_prefix containment check. On Windows,
+        // canonicalize produces an extended-length (\\?\) root even when
+        // the original tempfile mount was built using a normal drive root.
+        // Mixing these paths silently excluded all prefix-scope children.
+        let private = private_view.join(relative);
+        reject_task_path_alias_components(&private_view, relative)?;
         let private_parent = private
             .parent()
             .ok_or_else(|| "Windows source scope has no private parent.".to_string())?;
@@ -2091,12 +2097,14 @@ fn prepare_windows_private_source_projection(
             fs::create_dir_all(parent)
                 .map_err(|error| format!("Could not stage Windows scope parent: {error}"))?;
         }
-        match fs::symlink_metadata(private) {
-            Ok(metadata) if metadata.is_dir() => {
+        match fs::symlink_metadata(&private) {
+            Ok(metadata) if metadata.is_dir() && !task_source_metadata_is_alias(&metadata) => {
                 let mut budget = SourceMutationViewBudget::default();
-                copy_source_mutation_directory(&private_view, private, &target, &mut budget)?;
+                copy_source_mutation_directory(&private_view, &private, &target, &mut budget)?;
             }
-            Ok(metadata) if metadata.is_file() => copy_source_mutation_file(private, &target)?,
+            Ok(metadata) if metadata.is_file() && !task_source_metadata_is_alias(&metadata) => {
+                copy_source_mutation_file(&private, &target)?
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             _ => return Err("Windows private scope contains an invalid source entry.".into()),
         }

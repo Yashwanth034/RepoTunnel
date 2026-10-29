@@ -3813,6 +3813,18 @@ mod platform {
         let executable = std::env::current_exe().map_err(|error| {
             format!("Could not resolve RepoTunnel's Windows executable: {error}")
         })?;
+        // Native cargo test --lib uses a Rust harness which rejects the
+        // production helper flag. Test the linked desktop binary instead,
+        // without disabling AppContainer. Production uses current_exe.
+        #[cfg(test)]
+        let executable = executable
+            .parent()
+            .and_then(Path::parent)
+            .map(|debug_root| debug_root.join("repotunnel.exe"))
+            .filter(|path| path.is_file())
+            .ok_or_else(|| {
+                "Windows native AppContainer tests require the linked RepoTunnel desktop executable; run cargo build --bin repotunnel before cargo test.".to_string()
+            })?;
         let mut command = Command::new(executable);
         command
             .arg(HELPER_ARG)
