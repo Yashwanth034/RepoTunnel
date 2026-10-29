@@ -75,7 +75,7 @@ jobs:
             build-essential curl file libayatana-appindicator3-dev \
             librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
             patchelf wget xvfb xserver-xephyr xauth bubblewrap \
-            metacity zenity dbus-daemon x11-utils
+            metacity zenity dbus-daemon x11-utils python3-xlib python3-pil
 
       - name: Enable distro-scoped Bubblewrap user namespaces for isolated GUI tests
         shell: bash
