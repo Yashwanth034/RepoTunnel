@@ -1863,7 +1863,12 @@ mod native_wake_tests {
         let watched = ["src".to_string()];
         let mut watcher =
             NativeMonitorWake::new(root, watched.iter()).expect("native OS monitoring watcher");
-        assert!(!watcher.wait(Duration::from_millis(100)).expect("idle wait"));
+        // A newly registered native watcher (notably macOS FSEvents) may
+        // report its own initial directory snapshot as a wake. Drain it
+        // before asserting that the actual file write is observable.
+        let _ = watcher
+            .wait(Duration::from_millis(100))
+            .expect("registration wait");
         fs::write(root.join("src/file.txt"), b"native monitored write").expect("write file");
         assert!(watcher
             .wait(Duration::from_secs(5))

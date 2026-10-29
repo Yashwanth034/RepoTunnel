@@ -2564,7 +2564,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             prepared["path"],
-            serde_json::json!(root.join("src/app.bin").to_string_lossy())
+            serde_json::json!(root
+                .canonicalize()
+                .unwrap()
+                .join("src/app.bin")
+                .to_string_lossy())
         );
         assert_eq!(
             prepared["url"],

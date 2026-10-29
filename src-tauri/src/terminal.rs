@@ -15599,7 +15599,9 @@ mod tests {
             schema_version: super::PROCESS_SUPERVISOR_STATE_SCHEMA_VERSION,
             process_id: stored.record.id.clone(),
             supervisor_pid: pid,
-            supervisor_identity: None,
+            // Windows and macOS require the kernel creation identity of both
+            // supervisor and child before accepting a durable live process.
+            supervisor_identity: super::process_identity(pid),
             child_pid: Some(pid),
             process_identity: super::process_identity(pid),
             status: crate::models::ManagedProcessStatus::Running,
