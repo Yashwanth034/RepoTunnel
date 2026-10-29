@@ -37,6 +37,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Repeated analysis polls often return a freshly decoded copy of an unchanged job. */
+export function sameVideoAnalysisJob(left: VideoAnalysisJob, right: VideoAnalysisJob): boolean {
+  const keys = Object.keys(left) as Array<keyof VideoAnalysisJob>;
+  return keys.length === Object.keys(right).length
+    && keys.every((key) => left[key] === right[key]);
+}
+
+/** Keep React state stable while preserving real progress changes and recent-job order. */
+export function mergePolledVideoJobs(current: VideoAnalysisJob[], next: VideoAnalysisJob): VideoAnalysisJob[] {
+  const reordered = [next, ...current.filter((item) => item.id !== next.id)].slice(0, 10);
+  return reordered.length === current.length
+    && reordered.every((job, index) => sameVideoAnalysisJob(job, current[index]))
+    ? current
+    : reordered;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024 ** 2) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
@@ -174,8 +190,11 @@ function VideoPanel({
   }, [workspaceId]);
 
   useEffect(() => {
+    // Only Analyze displays helper readiness. Avoid spawning helper-version
+    // probes and walking the video cache when opening Video Projects.
+    if (section !== "understand") return;
     void refreshTools();
-  }, [refreshTools]);
+  }, [section, refreshTools]);
 
   useEffect(() => {
     setResult(null);
@@ -194,8 +213,8 @@ function VideoPanel({
       try {
         const next = await getVideoAnalysisJob(activeJob.id);
         if (disposed) return;
-        setActiveJob(next);
-        setRecentJobs((current) => [next, ...current.filter((item) => item.id !== next.id)].slice(0, 10));
+        setActiveJob((current) => current && sameVideoAnalysisJob(current, next) ? current : next);
+        setRecentJobs((current) => mergePolledVideoJobs(current, next));
         if (next.status === "completed") {
           const analysis = await getVideoAnalysisResult(next.id);
           if (!disposed) {

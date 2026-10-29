@@ -158,6 +158,23 @@ fn detected_application(application_id: &str) -> Option<crate::models::LaunchApp
         .find(|application| application.id == application_id)
 }
 
+pub(crate) fn action_uses_project_command(integration_id: &str, action: &str) -> bool {
+    !matches!(
+        (integration_id, action),
+        ("android-studio", "open_project")
+            | ("unity", "open")
+            | ("blender", "open")
+            | ("godot", "open_project")
+    )
+}
+
+pub(crate) fn action_requires_source_mutation_transaction(
+    integration_id: &str,
+    action: &str,
+) -> bool {
+    matches!((integration_id, action), ("blender", "run_script"))
+}
+
 fn is_enabled(app: &AppHandle, _workspace_id: &str, integration_id: &str) -> Result<bool, String> {
     let _guard = STORE_LOCK
         .lock()
@@ -295,6 +312,7 @@ fn validated_directory_target(
     Ok(Some(target.replace('\\', "/")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn command_result_at(
     app: &AppHandle,
     workspace: &Workspace,
@@ -303,8 +321,9 @@ fn command_result_at(
     command: String,
     timeout_seconds: u64,
     cwd: Option<String>,
+    task_binding: Option<&crate::task_integrity::command::TaskCommandBinding>,
 ) -> Result<IntegrationActionResult, String> {
-    let outcome = terminal::request_terminal_command(
+    let outcome = terminal::request_terminal_command_with_task(
         app,
         workspace,
         command,
@@ -313,6 +332,7 @@ fn command_result_at(
         BTreeMap::new(),
         true,
         false,
+        task_binding.cloned(),
     )?;
     Ok(IntegrationActionResult {
         integration_id: integration_id.to_string(),
@@ -331,6 +351,7 @@ fn command_result(
     action: &str,
     command: String,
     timeout_seconds: u64,
+    task_binding: Option<&crate::task_integrity::command::TaskCommandBinding>,
 ) -> Result<IntegrationActionResult, String> {
     command_result_at(
         app,
@@ -340,6 +361,7 @@ fn command_result(
         command,
         timeout_seconds,
         None,
+        task_binding,
     )
 }
 
@@ -364,6 +386,7 @@ pub(crate) fn run_action(
     integration_id: &str,
     action: &str,
     target: Option<&str>,
+    task_binding: Option<crate::task_integrity::command::TaskCommandBinding>,
 ) -> Result<IntegrationActionResult, String> {
     let integration = spec(integration_id)?;
     let application = detected_application(integration.application_id).ok_or_else(|| {
@@ -411,6 +434,7 @@ pub(crate) fn run_action(
                 .to_string(),
             3600,
             validated_directory_target(workspace, target)?,
+            task_binding.as_ref(),
         ),
         ("android-studio", "test") => command_result_at(
             app,
@@ -420,6 +444,7 @@ pub(crate) fn run_action(
             "if [ -x ./gradlew ]; then ./gradlew test; else gradle test; fi".to_string(),
             3600,
             validated_directory_target(workspace, target)?,
+            task_binding.as_ref(),
         ),
         ("android-studio", "lint") => command_result_at(
             app,
@@ -429,6 +454,7 @@ pub(crate) fn run_action(
             "if [ -x ./gradlew ]; then ./gradlew lint; else gradle lint; fi".to_string(),
             3600,
             validated_directory_target(workspace, target)?,
+            task_binding.as_ref(),
         ),
         ("android-studio", "devices") => command_result(
             app,
@@ -437,6 +463,7 @@ pub(crate) fn run_action(
             action,
             "adb devices -l".to_string(),
             30,
+            task_binding.as_ref(),
         ),
         ("unity", "open") => {
             let outcome = launcher::request_launch_application(app, workspace, application.id)?;
@@ -464,6 +491,7 @@ pub(crate) fn run_action(
                     shell_quote(&script)
                 ),
                 3600,
+                task_binding.as_ref(),
             )
         }
         ("blender", "render") => {
@@ -479,6 +507,7 @@ pub(crate) fn run_action(
                     shell_quote(&blend)
                 ),
                 3600,
+                task_binding.as_ref(),
             )
         }
         ("godot", "open_project") => {
@@ -505,6 +534,7 @@ pub(crate) fn run_action(
                 shell_quote(&application.executable)
             ),
             300,
+            task_binding.as_ref(),
         ),
         ("docker", "version") => command_result(
             app,
@@ -513,6 +543,7 @@ pub(crate) fn run_action(
             action,
             format!("{} version", shell_quote(&application.executable)),
             30,
+            task_binding.as_ref(),
         ),
         ("docker", "ps") => command_result(
             app,
@@ -521,6 +552,7 @@ pub(crate) fn run_action(
             action,
             format!("{} ps", shell_quote(&application.executable)),
             30,
+            task_binding.as_ref(),
         ),
         ("docker", "compose_config") => command_result(
             app,
@@ -529,6 +561,7 @@ pub(crate) fn run_action(
             action,
             format!("{} compose config", shell_quote(&application.executable)),
             60,
+            task_binding.as_ref(),
         ),
         ("docker", "compose_up") => command_result(
             app,
@@ -537,6 +570,7 @@ pub(crate) fn run_action(
             action,
             format!("{} compose up -d", shell_quote(&application.executable)),
             900,
+            task_binding.as_ref(),
         ),
         ("docker", "compose_down") => command_result(
             app,
@@ -545,6 +579,7 @@ pub(crate) fn run_action(
             action,
             format!("{} compose down", shell_quote(&application.executable)),
             300,
+            task_binding.as_ref(),
         ),
         ("docker", "compose_logs") => command_result(
             app,
@@ -556,6 +591,7 @@ pub(crate) fn run_action(
                 shell_quote(&application.executable)
             ),
             60,
+            task_binding.as_ref(),
         ),
         _ => Err("That integration action is not implemented.".to_string()),
     }
@@ -563,7 +599,47 @@ pub(crate) fn run_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{shell_quote, IntegrationStore, INTEGRATIONS};
+    use super::{action_uses_project_command, shell_quote, IntegrationStore, INTEGRATIONS};
+
+    #[test]
+    fn task9_deep_integration_launch_only_actions_stay_on_fast_path() {
+        for (integration, action) in [
+            ("android-studio", "open_project"),
+            ("unity", "open"),
+            ("blender", "open"),
+            ("godot", "open_project"),
+        ] {
+            assert!(!action_uses_project_command(integration, action));
+        }
+        for (integration, action) in [
+            ("android-studio", "build"),
+            ("blender", "run_script"),
+            ("godot", "check"),
+            ("docker", "compose_up"),
+        ] {
+            assert!(action_uses_project_command(integration, action));
+        }
+    }
+
+    #[test]
+    fn task9_arbitrary_blender_script_requires_source_mutation_transaction() {
+        assert!(super::action_requires_source_mutation_transaction(
+            "blender",
+            "run_script"
+        ));
+        for (integration, action) in [
+            ("android-studio", "build"),
+            ("android-studio", "test"),
+            ("godot", "check"),
+            ("docker", "compose_up"),
+            ("blender", "render"),
+        ] {
+            assert!(!super::action_requires_source_mutation_transaction(
+                integration,
+                action
+            ));
+        }
+    }
 
     #[test]
     fn exposes_exactly_five_integrations() {

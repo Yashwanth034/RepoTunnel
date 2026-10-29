@@ -1,7 +1,7 @@
 {
   "name": "repotunnel",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,8 @@
     "release:check": "bash scripts/check-release.sh",
     "release:deb": "bash scripts/build-linux-deb.sh",
     "release:linux": "bash scripts/build-linux.sh",
-    "test:frontend": "vitest run"
+    "test:frontend": "vitest run",
+    "test:browser": "node --test src-tauri/tests/browser_transaction_runtime.test.cjs src-tauri/tests/browser_fastpath.test.cjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.0",

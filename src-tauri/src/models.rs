@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +44,45 @@ pub(crate) struct Workspace {
     pub(crate) command_policy: CommandPolicy,
 }
 
+/// Durable project knowledge belongs to the EXISTING project-memory store.
+/// This is a reusable instruction, test procedure, test-resource *reference*,
+/// known pitfall, or capability route — never a credential or blanket approval.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProjectKnowledgeKind {
+    Instruction,
+    TestProcedure,
+    ResourceReference,
+    KnownPitfall,
+    CapabilityRoute,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, schemars::JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProjectKnowledgeState {
+    /// Knowledge was recorded, not freshly checked in this AI session.
+    Recorded,
+    /// Resource/procedure should be verified against live state before reuse.
+    NeedsRecheck,
+    /// Do not reapply until the human explicitly revisits this information.
+    Retired,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectKnowledgeEntry {
+    /// Stable project-local key; upserts replace only the matching entry.
+    pub(crate) key: String,
+    pub(crate) kind: ProjectKnowledgeKind,
+    pub(crate) state: ProjectKnowledgeState,
+    pub(crate) title: String,
+    /// Reusable, non-secret steps or explanation, not executable authorization.
+    pub(crate) guidance: String,
+    /// Optional factual test/observation source reference; not certification.
+    pub(crate) evidence: Option<String>,
+    pub(crate) updated_at: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectMemory {
@@ -53,6 +93,10 @@ pub(crate) struct ProjectMemory {
     pub(crate) decisions: Vec<String>,
     pub(crate) preferences: Vec<String>,
     pub(crate) next_steps: Vec<String>,
+    /// Stable, reusable non-secret project knowledge; defaults empty for old
+    /// project-memory.json files, requiring no migration or parallel store.
+    #[serde(default)]
+    pub(crate) knowledge: Vec<ProjectKnowledgeEntry>,
     pub(crate) updated_at: u64,
     #[serde(default)]
     pub(crate) git_head_at_update: Option<String>,
@@ -280,6 +324,9 @@ pub(crate) struct PublicTunnelStatus {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChatConnectionStatus {
+    pub(crate) paused: bool,
+    pub(crate) remembered: bool,
+    pub(crate) remember_supported: bool,
     pub(crate) client_available: bool,
     pub(crate) client_version: Option<String>,
     pub(crate) running: bool,
@@ -460,6 +507,14 @@ pub(crate) struct VersionRestoreResult {
     pub(crate) removed_files: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChangeTaskBinding {
+    pub(crate) task_id: String,
+    pub(crate) scope_revision: u64,
+    pub(crate) principal_fingerprint: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChangeRecord {
@@ -471,6 +526,10 @@ pub(crate) struct ChangeRecord {
     pub(crate) secondary_path: Option<String>,
     pub(crate) summary: String,
     pub(crate) diff: Option<String>,
+    #[serde(default)]
+    pub(crate) changed_lines: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_binding: Option<ChangeTaskBinding>,
     pub(crate) status: ChangeStatus,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
@@ -591,6 +650,8 @@ pub(crate) struct GitActionRecord {
     pub(crate) kind: GitActionKind,
     pub(crate) summary: String,
     pub(crate) detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_binding: Option<ChangeTaskBinding>,
     pub(crate) status: GitActionStatus,
     pub(crate) created_at: u64,
     pub(crate) updated_at: u64,
@@ -847,6 +908,7 @@ pub(crate) enum BrowserActionStatus {
 pub(crate) enum BrowserMutationCompletion {
     Applied,
     Ambiguous,
+    Failed,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -915,6 +977,8 @@ pub(crate) struct BrowserActionRecord {
     pub(crate) error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) mutation_receipt: Option<BrowserMutationReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transaction_result: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -965,6 +1029,8 @@ pub(crate) struct BrowserActionOutcome {
     pub(crate) action: BrowserActionRecord,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) navigation_receipt: Option<BrowserNavigationReceipt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) transaction_result: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1466,6 +1532,13 @@ pub(crate) struct TeamAgent {
     pub(crate) joined_at: Option<u64>,
     pub(crate) last_seen_at: Option<u64>,
     pub(crate) current_task_id: Option<String>,
+    /// Manual recovery only: does not change the saved Team membership or work.
+    #[serde(default)]
+    pub(crate) manually_disconnected: bool,
+    /// Incremented when the user disconnects a stale AI so previously issued
+    /// file-mutation preflight receipts cannot authorize later writes.
+    #[serde(default)]
+    pub(crate) binding_revocation: u64,
     /// Internal AI-resume context. Persisted for MCP handoff continuity; the desktop UI does not surface it.
     #[serde(default)]
     pub(crate) resume_checkpoint: Option<String>,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getMonitoringSnapshot,
   getMonitoringStatus,
@@ -38,54 +38,101 @@ function MonitoringPanel({ workspace, gatewayRunning, onError }: MonitoringPanel
   const [snapshot, setSnapshot] = useState<MonitoringSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const latestRefreshRef = useRef(0);
+  const foregroundRefreshRef = useRef<number | null>(null);
 
   const refresh = useCallback(async (quiet = false) => {
+    const requestId = ++latestRefreshRef.current;
     if (!workspace) {
+      foregroundRefreshRef.current = null;
       setStatus(null);
       setSnapshot(null);
+      setLoading(false);
       return;
     }
-    if (!quiet) setLoading(true);
+    if (!quiet) {
+      foregroundRefreshRef.current = requestId;
+      setLoading(true);
+    }
     try {
       const [nextStatus, nextSnapshot] = await Promise.all([
         getMonitoringStatus(workspace.id),
         getMonitoringSnapshot(workspace.id),
       ]);
+      // Never display a result for an older project or a superseded refresh.
+      if (requestId !== latestRefreshRef.current) return;
       setStatus(nextStatus);
       setSnapshot(nextSnapshot);
     } catch (error) {
-      if (!quiet) onError(error instanceof Error ? error.message : String(error));
+      if (!quiet && requestId === latestRefreshRef.current) {
+        onError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      if (!quiet) setLoading(false);
+      if (foregroundRefreshRef.current === requestId) foregroundRefreshRef.current = null;
+      if (!quiet && requestId === latestRefreshRef.current) setLoading(false);
     }
   }, [onError, workspace]);
 
   useEffect(() => {
     void refresh();
+    return () => { latestRefreshRef.current++; };
   }, [refresh]);
 
   useEffect(() => {
     if (!workspace) return;
+    let active = true;
+    let pending = false;
+    const poll = async () => {
+      // A filesystem/port/browser snapshot may exceed its polling interval.
+      if (!active || pending || foregroundRefreshRef.current !== null) return;
+      pending = true;
+      try {
+        await refresh(true);
+      } finally {
+        pending = false;
+      }
+    };
     const timer = window.setInterval(
-      () => void refresh(true),
+      () => void poll(),
       status?.running ? 2500 : gatewayRunning ? 5000 : 7000,
     );
-    return () => window.clearInterval(timer);
+    return () => {
+      active = false;
+      // A polling cadence change (monitor off -> on) must not invalidate a
+      // pending explicit user start/stop operation.
+      if (pending && foregroundRefreshRef.current === null) latestRefreshRef.current++;
+      window.clearInterval(timer);
+    };
   }, [gatewayRunning, refresh, status?.running, workspace]);
+
+  useEffect(() => {
+    // A previous project's start/stop operation must not leave its successor
+    // showing a busy indicator.
+    setBusy(false);
+  }, [workspace?.id]);
 
   async function toggleMonitoring() {
     if (!workspace) return;
+    // Start/stop is explicit user intent. Give it priority over any previously
+    // scheduled background snapshot, while preserving the original backend call.
+    const requestId = ++latestRefreshRef.current;
+    foregroundRefreshRef.current = requestId;
     setBusy(true);
     try {
       const next = status?.running
         ? await stopWorkspaceMonitoring(workspace.id)
         : await startWorkspaceMonitoring(workspace.id);
+      if (requestId !== latestRefreshRef.current) return;
       setStatus(next);
-      setSnapshot(await getMonitoringSnapshot(workspace.id));
+      const nextSnapshot = await getMonitoringSnapshot(workspace.id);
+      if (requestId === latestRefreshRef.current) setSnapshot(nextSnapshot);
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
+      if (requestId === latestRefreshRef.current) {
+        onError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setBusy(false);
+      if (foregroundRefreshRef.current === requestId) foregroundRefreshRef.current = null;
+      if (requestId === latestRefreshRef.current) setBusy(false);
     }
   }
 

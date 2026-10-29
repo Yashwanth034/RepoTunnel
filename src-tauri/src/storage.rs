@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 use tauri::{path::BaseDirectory, AppHandle, Manager};
@@ -13,6 +13,58 @@ const AI_ACCESS_FILE: &str = "ai-access.json";
 const HISTORY_SETTINGS_FILE: &str = "history-settings.json";
 
 static WORKSPACES_LOCK: Mutex<()> = Mutex::new(());
+static WORKSPACES_CACHE: OnceLock<Mutex<Option<Vec<Workspace>>>> = OnceLock::new();
+
+fn workspaces_cache() -> &'static Mutex<Option<Vec<Workspace>>> {
+    WORKSPACES_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn load_workspaces_cached_unlocked<F>(loader: F) -> Result<Vec<Workspace>, String>
+where
+    F: FnOnce() -> Result<Vec<Workspace>, String>,
+{
+    if let Some(workspaces) = workspaces_cache()
+        .lock()
+        .map_err(|_| "Workspace registry cache is unavailable.".to_string())?
+        .as_ref()
+        .cloned()
+    {
+        return Ok(workspaces);
+    }
+
+    let workspaces = loader()?;
+    *workspaces_cache()
+        .lock()
+        .map_err(|_| "Workspace registry cache is unavailable.".to_string())? =
+        Some(workspaces.clone());
+    Ok(workspaces)
+}
+
+fn replace_workspaces_cache(workspaces: &[Workspace]) -> Result<(), String> {
+    *workspaces_cache()
+        .lock()
+        .map_err(|_| "Workspace registry cache is unavailable.".to_string())? =
+        Some(workspaces.to_vec());
+    Ok(())
+}
+
+fn persist_workspaces_and_update_cache<F>(
+    workspaces: &[Workspace],
+    persist: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&[Workspace]) -> Result<(), String>,
+{
+    persist(workspaces)?;
+    replace_workspaces_cache(workspaces)
+}
+
+#[cfg(test)]
+fn clear_workspaces_cache_for_tests() {
+    if let Ok(mut cache) = workspaces_cache().lock() {
+        *cache = None;
+    }
+}
 
 fn lock_workspaces() -> Result<MutexGuard<'static, ()>, String> {
     WORKSPACES_LOCK
@@ -74,7 +126,7 @@ fn save_workspaces_unlocked(app: &AppHandle, workspaces: &[Workspace]) -> Result
 
 pub(crate) fn load_workspaces(app: &AppHandle) -> Result<Vec<Workspace>, String> {
     let _guard = lock_workspaces()?;
-    load_workspaces_unlocked(app)
+    load_workspaces_cached_unlocked(|| load_workspaces_unlocked(app))
 }
 
 pub(crate) fn mutate_workspaces<T, F>(app: &AppHandle, mutate: F) -> Result<T, String>
@@ -82,9 +134,9 @@ where
     F: FnOnce(&mut Vec<Workspace>) -> Result<T, String>,
 {
     let _guard = lock_workspaces()?;
-    let mut workspaces = load_workspaces_unlocked(app)?;
+    let mut workspaces = load_workspaces_cached_unlocked(|| load_workspaces_unlocked(app))?;
     let result = mutate(&mut workspaces)?;
-    save_workspaces_unlocked(app, &workspaces)?;
+    persist_workspaces_and_update_cache(&workspaces, |items| save_workspaces_unlocked(app, items))?;
     Ok(result)
 }
 
@@ -165,7 +217,72 @@ pub(crate) fn save_history_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_ai_access_paused;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        clear_workspaces_cache_for_tests, load_workspaces_cached_unlocked, parse_ai_access_paused,
+        persist_workspaces_and_update_cache, replace_workspaces_cache,
+    };
+    use crate::models::Workspace;
+
+    #[test]
+    fn workspace_cache_loads_source_once_and_returns_clones() {
+        // The same global registry cache is exercised by other tests that
+        // use the production workspace lock. Hold that lock throughout this
+        // test rather than clearing another test's live cached state.
+        let _guard = super::lock_workspaces().expect("exclusive workspace test cache");
+        static LOADS: AtomicUsize = AtomicUsize::new(0);
+        clear_workspaces_cache_for_tests();
+        LOADS.store(0, Ordering::SeqCst);
+
+        let first = load_workspaces_cached_unlocked(|| {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+        .expect("first cache load");
+        let second = load_workspaces_cached_unlocked(|| {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            Err("cache miss should not happen".to_string())
+        })
+        .expect("second cache load");
+
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+        assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+        clear_workspaces_cache_for_tests();
+    }
+
+    #[test]
+    fn failed_workspace_save_does_not_publish_new_cache_state() {
+        let _guard = super::lock_workspaces().expect("exclusive workspace test cache");
+        clear_workspaces_cache_for_tests();
+        let old = Workspace {
+            id: "old".to_string(),
+            name: "Old".to_string(),
+            path: "/old".to_string(),
+            added_at: 1,
+            access_mode: Default::default(),
+            change_policy: Default::default(),
+            command_policy: Default::default(),
+        };
+        let new = Workspace {
+            id: "new".to_string(),
+            name: "New".to_string(),
+            ..old.clone()
+        };
+        replace_workspaces_cache(std::slice::from_ref(&old)).expect("seed cache");
+
+        let error = persist_workspaces_and_update_cache(std::slice::from_ref(&new), |_| {
+            Err("disk write failed".to_string())
+        })
+        .expect_err("save must fail");
+        assert_eq!(error, "disk write failed");
+        let cached = load_workspaces_cached_unlocked(|| Err("must remain cached".to_string()))
+            .expect("cached old state");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, "old");
+        clear_workspaces_cache_for_tests();
+    }
 
     #[test]
     fn ai_access_pause_state_accepts_only_explicit_boolean_values() {

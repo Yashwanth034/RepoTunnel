@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent } from "react";
 import {
   approveBrowserAction,
   browserActivateTab,
@@ -89,6 +89,7 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
   const [diagnostics, setDiagnostics] = useState<BrowserDiagnostics>({ consoleEntries: [], networkFailures: [] });
   const [busyId, setBusyId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const latestStatusRequestRef = useRef(0);
 
   const automatic = workspace?.changePolicy === "automatic";
   const selectedTab = useMemo(
@@ -101,6 +102,7 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
   );
 
   const refresh = useCallback(async (quiet = false) => {
+    const requestId = ++latestStatusRequestRef.current;
     if (!workspace) {
       setApplications([]);
       setStatus(null);
@@ -121,6 +123,7 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
         getBrowserAutomationStatus(workspace.id),
         listBrowserHistory(workspace.id, 60),
       ]);
+      if (requestId !== latestStatusRequestRef.current) return;
       setApplications(available);
       setStatus(currentStatus);
       setHistory(actions);
@@ -131,6 +134,7 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
 
       if (currentStatus.running) {
         const currentTabs = await listBrowserTabs(workspace.id);
+        if (requestId !== latestStatusRequestRef.current) return;
         setTabs(currentTabs);
         setSelectedTabId((current) => {
           if (current && currentTabs.some((tab) => tab.id === current)) return current;
@@ -148,34 +152,63 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
         setDiagnostics({ consoleEntries: [], networkFailures: [] });
       }
     } catch (error) {
-      if (!quiet) onError(error instanceof Error ? error.message : String(error));
+      if (!quiet && requestId === latestStatusRequestRef.current) {
+        onError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      if (!quiet) setLoading(false);
+      if (!quiet && requestId === latestStatusRequestRef.current) setLoading(false);
     }
   }, [onError, workspace]);
 
   useEffect(() => {
-    refresh().catch(() => undefined);
+    void refresh();
+    return () => { latestStatusRequestRef.current++; };
   }, [refresh]);
 
   useEffect(() => {
     if (!workspace) return;
-    const timer = window.setInterval(() => {
-      refresh(true).catch(() => undefined);
-    }, gatewayRunning ? 2500 : 4500);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let pending = false;
+    const poll = async () => {
+      if (!active || pending) return;
+      pending = true;
+      try {
+        await refresh(true);
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), gatewayRunning ? 2500 : 4500);
+    return () => {
+      active = false;
+      latestStatusRequestRef.current++;
+      window.clearInterval(timer);
+    };
   }, [gatewayRunning, refresh, workspace]);
 
   useEffect(() => {
     if (!workspace || !status?.running || !selectedTabId) return;
-    const load = () => {
-      getBrowserDiagnostics(workspace.id, selectedTabId, 40)
-        .then(setDiagnostics)
-        .catch(() => undefined);
+    let active = true;
+    let pending = false;
+    const load = async () => {
+      // Slow diagnostics reads must not stack or update a different tab.
+      if (!active || pending) return;
+      pending = true;
+      try {
+        const next = await getBrowserDiagnostics(workspace.id, selectedTabId, 40);
+        if (active) setDiagnostics(next);
+      } catch {
+        // Best-effort inspection must not interrupt normal browser controls.
+      } finally {
+        pending = false;
+      }
     };
-    load();
-    const timer = window.setInterval(load, 2500);
-    return () => window.clearInterval(timer);
+    void load();
+    const timer = window.setInterval(() => void load(), 2500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [selectedTabId, status?.running, workspace]);
 
   useEffect(() => {
@@ -188,9 +221,13 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
   useEffect(() => {
     if (!livePreview || !workspace || !status?.running || !selectedTabId) return;
     let cancelled = false;
+    let pending = false;
 
     const capturePreview = async () => {
-      if (cancelled) return;
+      // A screenshot can take longer than the 1.8s interval. Coalesce polls
+      // rather than piling up expensive backend captures.
+      if (cancelled || pending) return;
+      pending = true;
       setPreviewRefreshing(true);
       try {
         const next = await browserTakeScreenshot(workspace.id, selectedTabId, false);
@@ -198,6 +235,7 @@ function BrowserAutomation({ workspace, gatewayRunning, onError }: BrowserAutoma
       } catch {
         // Background preview refresh is best-effort; normal browser status surfaces failures.
       } finally {
+        pending = false;
         if (!cancelled) setPreviewRefreshing(false);
       }
     };

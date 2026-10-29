@@ -32,10 +32,13 @@ import type {
   LaunchActionOutcome,
   LaunchActionRecord,
   LaunchApplication,
+  CustomApplication,
+  DiscoverableApplication,
   GithubConnectionStatus,
   DeepIntegration,
   DesktopControlApplication,
   AiWorkspaceFrame,
+  AiWorkspaceRecoveryRecord,
   AiWorkspaceStatus,
   BrowserActionOutcome,
   BrowserActionRecord,
@@ -88,8 +91,13 @@ import type {
   UpdateInstallResult,
   ResumeSnapshot,
   SafetyScanResult,
+  AgentMissionSnapshot,
+  AgentMissionSummary,
+  MissionHumanGate,
+  MissionQuestion,
   TeamSessionSummary,
   TeamSnapshot,
+  TaskIntegrityLocalStatus,
   VideoAnalysisJob,
   VideoAnalysisMode,
   VideoAnalysisResult,
@@ -209,6 +217,37 @@ export async function getProjectMemory(workspaceId: string): Promise<ProjectMemo
 
 export async function getResumeSnapshot(workspaceId: string): Promise<ResumeSnapshot> {
   return invoke<ResumeSnapshot>("get_resume_snapshot", { workspaceId });
+}
+
+export async function getTaskIntegrityStatus(workspaceId: string): Promise<TaskIntegrityLocalStatus> {
+  return invoke<TaskIntegrityLocalStatus>("get_task_integrity_status", { workspaceId });
+}
+
+export async function approveTaskIntegrityExpansion(
+  workspaceId: string,
+  expansionId: string,
+): Promise<TaskIntegrityLocalStatus> {
+  return invoke<TaskIntegrityLocalStatus>("approve_task_integrity_expansion", {
+    workspaceId,
+    expansionId,
+  });
+}
+
+export async function rejectTaskIntegrityExpansion(
+  workspaceId: string,
+  expansionId: string,
+): Promise<TaskIntegrityLocalStatus> {
+  return invoke<TaskIntegrityLocalStatus>("reject_task_integrity_expansion", {
+    workspaceId,
+    expansionId,
+  });
+}
+
+export async function cancelTaskIntegrity(
+  workspaceId: string,
+  taskId: string,
+): Promise<TaskIntegrityLocalStatus> {
+  return invoke<TaskIntegrityLocalStatus>("cancel_task_integrity", { workspaceId, taskId });
 }
 
 export async function updateProjectMemory(
@@ -442,6 +481,30 @@ export async function listLaunchableApplications(workspaceId: string): Promise<L
   return invoke<LaunchApplication[]>("list_launchable_applications", { workspaceId });
 }
 
+export async function listCustomApplications(): Promise<CustomApplication[]> {
+  return invoke<CustomApplication[]>("list_custom_applications");
+}
+
+export async function discoverCustomApplications(): Promise<DiscoverableApplication[]> {
+  return invoke<DiscoverableApplication[]>("discover_custom_applications");
+}
+
+export async function addDiscoveredCustomApplication(applicationId: string): Promise<CustomApplication> {
+  return invoke<CustomApplication>("add_discovered_custom_application", { applicationId });
+}
+
+export async function launchDiscoveredDesktopApplication(workspaceId: string, applicationId: string): Promise<LaunchActionOutcome> {
+  return invoke<LaunchActionOutcome>("launch_discovered_desktop_application", { workspaceId, applicationId });
+}
+
+export async function pickCustomApplication(): Promise<CustomApplication | null> {
+  return invoke<CustomApplication | null>("pick_custom_application");
+}
+
+export async function removeCustomApplication(applicationId: string): Promise<CustomApplication[]> {
+  return invoke<CustomApplication[]>("remove_custom_application", { applicationId });
+}
+
 export async function getGithubConnectionStatus(): Promise<GithubConnectionStatus> {
   return invoke<GithubConnectionStatus>("get_github_connection_status");
 }
@@ -498,6 +561,19 @@ export async function setGmailAccessEnabled(
 
 export async function getAiWorkspaceStatus(workspaceId: string): Promise<AiWorkspaceStatus> {
   return invoke<AiWorkspaceStatus>("get_ai_workspace_status", { workspaceId });
+}
+
+export async function listAiWorkspaceRecoveryEvidence(
+  workspaceId: string,
+): Promise<AiWorkspaceRecoveryRecord[]> {
+  return invoke<AiWorkspaceRecoveryRecord[]>("list_ai_workspace_recovery_evidence", { workspaceId });
+}
+
+export async function queueAiWorkspaceRecoveryForReview(
+  workspaceId: string,
+  receiptId: string,
+): Promise<string[]> {
+  return invoke<string[]>("queue_ai_workspace_recovery_for_review", { workspaceId, receiptId });
 }
 
 export async function startAiWorkspace(
@@ -1069,6 +1145,10 @@ export async function getChatConnectionStatus(): Promise<ChatConnectionStatus> {
   return invoke<ChatConnectionStatus>("get_chat_connection_status");
 }
 
+export async function installOfficialTunnelClient(): Promise<string> {
+  return invoke<string>("install_official_tunnel_client");
+}
+
 export async function startChatConnection(
   tunnelId: string,
   apiKey: string,
@@ -1078,6 +1158,18 @@ export async function startChatConnection(
 
 export async function stopChatConnection(): Promise<ChatConnectionStatus> {
   return invoke<ChatConnectionStatus>("stop_chat_connection");
+}
+
+export async function pauseChatConnection(): Promise<ChatConnectionStatus> {
+  return invoke<ChatConnectionStatus>("pause_chat_connection");
+}
+
+export async function resumeChatConnection(): Promise<ChatConnectionStatus> {
+  return invoke<ChatConnectionStatus>("resume_chat_connection");
+}
+
+export async function rememberChatConnection(): Promise<ChatConnectionStatus> {
+  return invoke<ChatConnectionStatus>("remember_chat_connection");
 }
 
 
@@ -1745,6 +1837,74 @@ export async function installUpdateAndRestart(): Promise<UpdateInstallResult> {
   return invoke<UpdateInstallResult>("install_update_and_restart");
 }
 
+export async function listAgentMissions(workspaceId?: string): Promise<AgentMissionSummary[]> {
+  return invoke<AgentMissionSummary[]>("list_agent_missions", { workspaceId: workspaceId ?? null });
+}
+
+export async function getAgentMission(missionId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("get_agent_mission", { missionId });
+}
+
+export async function createAgentMission(workspaceId: string, goal: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("create_agent_mission", { workspaceId, goal, autonomyPolicy: "fullLocal" });
+}
+
+export async function submitAgentMissionDirective(missionId: string, text: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("submit_agent_mission_directive", { missionId, text });
+}
+
+export async function submitAgentMissionQuestion(missionId: string, text: string): Promise<MissionQuestion> {
+  return invoke<MissionQuestion>("submit_agent_mission_question", { missionId, text });
+}
+
+export async function pauseAgentMission(missionId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("pause_agent_mission", { missionId });
+}
+
+export async function resumeAgentMission(missionId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("resume_agent_mission", { missionId });
+}
+
+export async function stopAgentMission(missionId: string, reason?: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("stop_agent_mission", { missionId, reason: reason ?? null });
+}
+
+export async function renameMissionAgent(missionId: string, agentId: string, name: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("rename_mission_agent", { missionId, agentId, name });
+}
+
+export async function removeMissionAgent(missionId: string, agentId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("remove_mission_agent", { missionId, agentId });
+}
+
+export async function restoreMissionAgent(missionId: string, agentId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("restore_mission_agent", { missionId, agentId });
+}
+
+export async function archiveAgentMission(missionId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("archive_agent_mission", { missionId });
+}
+
+export async function restoreArchivedAgentMission(missionId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("restore_archived_agent_mission", { missionId });
+}
+
+export async function deleteAgentMission(missionId: string): Promise<void> {
+  return invoke<void>("delete_agent_mission", { missionId });
+}
+
+export async function approveAgentMissionGate(gateId: string): Promise<MissionHumanGate> {
+  return invoke<MissionHumanGate>("approve_agent_mission_gate", { gateId });
+}
+
+export async function rejectAgentMissionGate(gateId: string, reason?: string): Promise<MissionHumanGate> {
+  return invoke<MissionHumanGate>("reject_agent_mission_gate", { gateId, reason: reason ?? null });
+}
+
+export async function acceptAgentMissionResult(missionId: string): Promise<AgentMissionSnapshot> {
+  return invoke<AgentMissionSnapshot>("accept_agent_mission_result", { missionId });
+}
+
 export async function listTeamSessions(workspaceId?: string): Promise<TeamSessionSummary[]> {
   return invoke<TeamSessionSummary[]>("list_team_sessions", { workspaceId: workspaceId ?? null });
 }
@@ -1775,6 +1935,10 @@ export async function createTeamSession(
 
 export async function postTeamUserMessage(sessionId: string, text: string): Promise<TeamSnapshot> {
   return invoke<TeamSnapshot>("post_team_user_message", { sessionId, text });
+}
+
+export async function disconnectTeamAgent(sessionId: string, agentId: string): Promise<TeamSnapshot> {
+  return invoke<TeamSnapshot>("disconnect_team_agent", { sessionId, agentId });
 }
 
 export async function pauseTeamSession(sessionId: string): Promise<TeamSnapshot> {

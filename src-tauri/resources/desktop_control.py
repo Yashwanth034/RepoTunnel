@@ -842,6 +842,8 @@ def screenshot(entry, win):
 
 def main(req):
     operation = req.get("operation")
+    if operation == "ping":
+        return {"ready": True}
     if operation == "list":
         apps = [public_app(v) for v in discover().values()]
         apps.sort(key=lambda item: item["name"].lower())
@@ -889,9 +891,31 @@ def main(req):
     raise RuntimeError("Unsupported desktop control operation.")
 
 
+def serve_stream(source, sink, dispatch):
+    for raw_line in source:
+        line = raw_line.strip()
+        if not line:
+            continue
+        request_id = None
+        try:
+            envelope = json.loads(line)
+            request_id = envelope.get("id")
+            request = envelope.get("request")
+            if not isinstance(request, dict):
+                raise RuntimeError("Persistent helper request must contain an object request.")
+            payload = {"id": request_id, "ok": True, "result": dispatch(request)}
+        except Exception as exc:
+            payload = {"id": request_id, "ok": False, "error": str(exc)}
+        sink.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sink.flush()
+
+
 if __name__ == "__main__":
-    try:
-        request = json.loads(sys.stdin.read() or "{}")
-        reply(main(request))
-    except Exception as exc:
-        reply(error=exc)
+    if "--serve" in sys.argv[1:]:
+        serve_stream(sys.stdin, sys.stdout, main)
+    else:
+        try:
+            request = json.loads(sys.stdin.read() or "{}")
+            reply(main(request))
+        except Exception as exc:
+            reply(error=exc)

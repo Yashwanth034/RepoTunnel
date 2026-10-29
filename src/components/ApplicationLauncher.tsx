@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   approveLaunchAction,
   cancelGithubConnection,
@@ -19,6 +19,7 @@ import {
   setGmailAccessEnabled,
 } from "../lib/backend";
 import { detectedProductivityFamilies, isProductivityApplication } from "../lib/applicationFamilies";
+import { reconcilePolledRecords } from "../lib/commandPolling";
 import type { DeepIntegration, GithubConnectionStatus, LaunchActionRecord, LaunchActionStatus, LaunchApplication, Workspace } from "../types";
 import AIWorkspacePanel from "./ai-workspace/AIWorkspacePanel";
 import ConfirmationDialog from "./ConfirmationDialog";
@@ -109,6 +110,16 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
   const [desktopBusyId, setDesktopBusyId] = useState<string | null>(null);
   const [gmailBusy, setGmailBusy] = useState(false);
   const [loading, setLoading] = useState(false);
+  const currentWorkspaceIdRef = useRef(workspace?.id ?? null);
+  const workspaceGenerationRef = useRef(0);
+  // A -> B -> A still invalidates a delayed response from the first A.
+  if (currentWorkspaceIdRef.current !== (workspace?.id ?? null)) {
+    currentWorkspaceIdRef.current = workspace?.id ?? null;
+    workspaceGenerationRef.current++;
+  }
+  const refreshRevisionRef = useRef(0);
+  const historyRevisionRef = useRef(0);
+  const visibleWorkspaceIdRef = useRef<string | null>(null);
 
   const rememberGithub = useCallback((next: GithubConnectionStatus) => {
     cachedGithubStatus = next;
@@ -137,61 +148,115 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     [history, workspace],
   );
 
+  // Every history fetch carries a workspace and a monotonic revision.
+  // A manual action always supersedes any slower background history poll.
+  const readHistory = useCallback(async () => {
+    const id = workspace?.id;
+    if (!id) return;
+    const revision = ++historyRevisionRef.current;
+    const next = await listLaunchHistory(id, 60);
+    if (currentWorkspaceIdRef.current !== id || revision !== historyRevisionRef.current) return;
+    setHistory((current) => reconcilePolledRecords(current, next));
+  }, [workspace?.id]);
+
   const refresh = useCallback(async () => {
-    if (!workspace) {
+    const revision = ++refreshRevisionRef.current;
+    const id = workspace?.id;
+    if (!id) {
+      historyRevisionRef.current++;
+      visibleWorkspaceIdRef.current = null;
       setApplications([]);
       setIntegrations([]);
       setDesktopEnabled(false);
       setGmailEnabled(false);
       setHistory([]);
+      setIntegrationBusyId(null);
+      setDesktopBusyId(null);
+      setGmailBusy(false);
+      setBusyId(null);
+      setLoading(false);
       return;
     }
 
+    const current = () => currentWorkspaceIdRef.current === id
+      && revision === refreshRevisionRef.current;
+    if (visibleWorkspaceIdRef.current !== id) {
+      visibleWorkspaceIdRef.current = id;
+      setApplications([]);
+      setIntegrations([]);
+      setDesktopEnabled(false);
+      setGmailEnabled(false);
+      setHistory([]);
+      // Pending operations belong to the old project, not this one.
+      setIntegrationBusyId(null);
+      setDesktopBusyId(null);
+      setGmailBusy(false);
+      setBusyId(null);
+    }
     const reportError = (error: unknown) => {
-      onError(error instanceof Error ? error.message : String(error));
+      if (current()) onError(error instanceof Error ? error.message : String(error));
     };
 
     setLoading(true);
-    const applicationsTask = listLaunchableApplications(workspace.id)
-      .then(setApplications)
+    const applicationsTask = listLaunchableApplications(id)
+      .then((next) => { if (current()) setApplications(next); })
       .catch(reportError);
-    const integrationsTask = listDeepIntegrations(workspace.id)
-      .then(setIntegrations)
+    const integrationsTask = listDeepIntegrations(id)
+      .then((next) => { if (current()) setIntegrations(next); })
       .catch(reportError);
 
-    void getDesktopControlEnabled(workspace.id)
-      .then(setDesktopEnabled)
+    void getDesktopControlEnabled(id)
+      .then((next) => { if (current()) setDesktopEnabled(next); })
       .catch(reportError);
-    void getGmailAccessEnabled(workspace.id)
-      .then(setGmailEnabled)
+    void getGmailAccessEnabled(id)
+      .then((next) => { if (current()) setGmailEnabled(next); })
       .catch(reportError);
+    // GitHub authorization is global, not scoped to this workspace.
     void getGithubConnectionStatus()
       .then(rememberGithub)
       .catch(reportError);
-    void listLaunchHistory(workspace.id, 60)
-      .then(setHistory)
-      .catch(reportError);
+    void readHistory().catch(reportError);
 
     try {
       await Promise.all([applicationsTask, integrationsTask]);
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
-  }, [onError, rememberGithub, workspace]);
+  }, [onError, rememberGithub, readHistory, workspace?.id]);
 
   useEffect(() => {
-    refresh().catch(() => undefined);
+    void refresh();
+    const onAppsChanged = () => void refresh();
+    window.addEventListener("repotunnel:applications-updated", onAppsChanged);
+    return () => {
+      window.removeEventListener("repotunnel:applications-updated", onAppsChanged);
+      refreshRevisionRef.current++;
+      historyRevisionRef.current++;
+    };
   }, [refresh]);
 
   useEffect(() => {
     if (!workspace) return;
-    const timer = window.setInterval(() => {
-      listLaunchHistory(workspace.id, 60)
-        .then(setHistory)
-        .catch(() => undefined);
-    }, gatewayRunning ? 3000 : 6000);
-    return () => window.clearInterval(timer);
-  }, [gatewayRunning, workspace]);
+    let active = true;
+    let inFlight = false;
+    const poll = async () => {
+      if (!active || inFlight) return;
+      inFlight = true;
+      try {
+        await readHistory();
+      } catch {
+        // Background launch-history checks are best-effort.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), gatewayRunning ? 3000 : 6000);
+    return () => {
+      active = false;
+      historyRevisionRef.current++;
+      window.clearInterval(timer);
+    };
+  }, [gatewayRunning, readHistory, workspace?.id]);
 
   useEffect(() => {
     if (!github?.connecting) return;
@@ -213,7 +278,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     try {
       await openUrl(workspace.id, url.trim(), browserId || undefined);
       setUrl("");
-      setHistory(await listLaunchHistory(workspace.id, 60));
+      await readHistory();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -226,7 +291,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     setBusyId("open-path");
     try {
       await openWorkspacePath(workspace.id, relativePath.trim(), pathApplicationId || undefined);
-      setHistory(await listLaunchHistory(workspace.id, 60));
+      await readHistory();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -239,7 +304,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
     setBusyId(application.id);
     try {
       await launchApplication(workspace.id, application.id);
-      setHistory(await listLaunchHistory(workspace.id, 60));
+      await readHistory();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -314,37 +379,52 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
 
   async function toggleIntegration(integration: DeepIntegration) {
     if (!workspace || !integration.available || integrationBusyId) return;
+    const id = workspace.id;
+    const generation = workspaceGenerationRef.current;
+    const stillCurrent = () => currentWorkspaceIdRef.current === id
+      && workspaceGenerationRef.current === generation;
     setIntegrationBusyId(integration.id);
     try {
-      setIntegrations(await setDeepIntegrationEnabled(workspace.id, integration.id, !integration.enabled));
+      const next = await setDeepIntegrationEnabled(id, integration.id, !integration.enabled);
+      if (stillCurrent()) setIntegrations(next);
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
+      if (stillCurrent()) onError(error instanceof Error ? error.message : String(error));
     } finally {
-      setIntegrationBusyId(null);
+      if (stillCurrent()) setIntegrationBusyId(null);
     }
   }
 
   async function toggleDesktopControl() {
     if (!workspace || desktopBusyId) return;
+    const id = workspace.id;
+    const generation = workspaceGenerationRef.current;
+    const stillCurrent = () => currentWorkspaceIdRef.current === id
+      && workspaceGenerationRef.current === generation;
     setDesktopBusyId("desktop");
     try {
-      setDesktopEnabled(await setDesktopControlEnabled(workspace.id, !desktopEnabled));
+      const next = await setDesktopControlEnabled(id, !desktopEnabled);
+      if (stillCurrent()) setDesktopEnabled(next);
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
+      if (stillCurrent()) onError(error instanceof Error ? error.message : String(error));
     } finally {
-      setDesktopBusyId(null);
+      if (stillCurrent()) setDesktopBusyId(null);
     }
   }
 
   async function toggleGmailAccess() {
     if (!workspace || gmailBusy) return;
+    const id = workspace.id;
+    const generation = workspaceGenerationRef.current;
+    const stillCurrent = () => currentWorkspaceIdRef.current === id
+      && workspaceGenerationRef.current === generation;
     setGmailBusy(true);
     try {
-      setGmailEnabled(await setGmailAccessEnabled(workspace.id, !gmailEnabled));
+      const next = await setGmailAccessEnabled(id, !gmailEnabled);
+      if (stillCurrent()) setGmailEnabled(next);
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
+      if (stillCurrent()) onError(error instanceof Error ? error.message : String(error));
     } finally {
-      setGmailBusy(false);
+      if (stillCurrent()) setGmailBusy(false);
     }
   }
 
@@ -356,7 +436,7 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
       } else {
         await rejectLaunchAction(action.id);
       }
-      if (workspace) setHistory(await listLaunchHistory(workspace.id, 60));
+      if (workspace) await readHistory();
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -366,6 +446,9 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
 
   const enabled = launchEnabled(workspace);
   const automatic = workspace?.changePolicy === "automatic" || workspace?.commandPolicy === "automatic";
+  // Render permission-gated controls fail-closed even during the single render
+  // before the selected project's refresh effect clears the previous state.
+  const permissionsReady = !!workspace && visibleWorkspaceIdRef.current === workspace.id;
 
   return (
     <div className="application-launcher-section">
@@ -436,12 +519,12 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
           </div>
 
           <div className="launcher-integration-row" aria-label="AI application integrations">
-            {integrations.map((integration) => (
+            {(permissionsReady ? integrations : []).map((integration) => (
               <button
                 key={integration.id}
                 type="button"
                 className={`launcher-integration-name ${integration.enabled ? "enabled" : ""} ${!integration.available ? "unavailable" : ""}`}
-                disabled={!integration.available || integrationBusyId !== null}
+                disabled={!permissionsReady || !integration.available || integrationBusyId !== null}
                 onClick={() => void toggleIntegration(integration)}
                 title={integration.message ?? integration.name}
                 aria-pressed={integration.enabled}
@@ -452,38 +535,40 @@ function ApplicationLauncher({ workspace, gatewayRunning, onError }: Application
             ))}
             <button
               type="button"
-              className={`launcher-integration-name ${gmailEnabled ? "enabled" : ""}`}
-              disabled={gmailBusy}
+              className={`launcher-integration-name ${permissionsReady && gmailEnabled ? "enabled" : ""}`}
+              disabled={!permissionsReady || gmailBusy}
               onClick={() => void toggleGmailAccess()}
               title={gmailEnabled
                 ? "Gmail and Google Sign-In access enabled for all approved projects"
                 : "Allow AI browser workflows to reuse the managed Google session and read Gmail for sign-in and verification flows"}
-              aria-pressed={gmailEnabled}
+              aria-pressed={permissionsReady && gmailEnabled}
             >
               <i aria-hidden="true" />
               <span>Gmail</span>
             </button>
             <button
               type="button"
-              className={`launcher-integration-name ${desktopEnabled ? "enabled" : ""}`}
-              disabled={desktopBusyId !== null}
+              className={`launcher-integration-name ${permissionsReady && desktopEnabled ? "enabled" : ""}`}
+              disabled={!permissionsReady || desktopBusyId !== null}
               onClick={() => void toggleDesktopControl()}
               title={desktopEnabled
                 ? "ChatGPT desktop control enabled for all approved projects"
                 : "Allow ChatGPT to inspect and control desktop applications for all approved projects"}
-              aria-pressed={desktopEnabled}
+              aria-pressed={permissionsReady && desktopEnabled}
             >
               <i aria-hidden="true" />
               <span>Desktop</span>
             </button>
           </div>
 
-          <AIWorkspacePanel
-            workspace={workspace}
-            applications={applications}
-            desktopEnabled={desktopEnabled}
-            onError={onError}
-          />
+          <div id="commands-ai-workspace" role="region" aria-label="AI Workspace" tabIndex={-1}>
+            <AIWorkspacePanel
+              workspace={workspace}
+              applications={applications}
+              desktopEnabled={permissionsReady && desktopEnabled}
+              onError={onError}
+            />
+          </div>
 
           <div className="launcher-apps">
             <div className="launcher-subheading">

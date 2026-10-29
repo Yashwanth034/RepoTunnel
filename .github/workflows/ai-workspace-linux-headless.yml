@@ -1,0 +1,133 @@
+name: AI Workspace Linux off-screen acceptance
+
+# Tests the real nested X11 helper without starting RepoTunnel, an IDE,
+# or any of the CI runner's desktop applications.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nested-x11:
+    name: Nested Xvfb + Xephyr helper acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install isolated-display test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xserver-xephyr xauth python3-xlib python3-pil \
+            metacity zenity bubblewrap dbus-daemon
+
+      - name: Enable distro-scoped Bubblewrap user namespaces for isolated GUI tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 may block unprivileged bwrap even on otherwise
+          # supported runners. Use the distro's restrictive per-binary
+          # AppArmor profile, NOT a system-wide userns sysctl relaxation.
+          if /usr/bin/bwrap --ro-bind / / -- /usr/bin/true; then
+            echo "Unprivileged Bubblewrap is already permitted."
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends apparmor-profiles apparmor-utils
+          source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          target=/etc/apparmor.d/bwrap-userns-restrict
+          test -f "$source" || {
+            echo "STOP: Distribution-restricted Bubblewrap AppArmor profile is unavailable." >&2
+            exit 1
+          }
+          sudo install -m 0644 "$source" "$target"
+          sudo apparmor_parser -r "$target"
+          # The exact unprivileged mount isolation used by the native tests
+          # must now work; otherwise preserve the failure rather than fall
+          # back to an unrestricted host process.
+          /usr/bin/bwrap --ro-bind / / -- /usr/bin/true
+
+      - name: Validate mocked semantic-owner protections
+        run: /usr/bin/python3 -m unittest -q src-tauri/resources/ai_workspace/test_ai_workspace_security.py
+
+      - name: Exercise the real off-screen nested X11 display
+        run: /usr/bin/python3 scripts/test-ai-workspace-headless.py
+
+  native-rust-sandbox:
+    name: Native Rust task-scoped GUI acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux Tauri and isolated GUI test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential curl file libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+            patchelf wget xvfb xserver-xephyr xauth bubblewrap \
+            metacity zenity dbus-daemon x11-utils python3-xlib python3-pil
+
+      - name: Enable distro-scoped Bubblewrap user namespaces for isolated GUI tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 may block unprivileged bwrap even on otherwise
+          # supported runners. Use the distro's restrictive per-binary
+          # AppArmor profile, NOT a system-wide userns sysctl relaxation.
+          if /usr/bin/bwrap --ro-bind / / -- /usr/bin/true; then
+            echo "Unprivileged Bubblewrap is already permitted."
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends apparmor-profiles apparmor-utils
+          source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          target=/etc/apparmor.d/bwrap-userns-restrict
+          test -f "$source" || {
+            echo "STOP: Distribution-restricted Bubblewrap AppArmor profile is unavailable." >&2
+            exit 1
+          }
+          sudo install -m 0644 "$source" "$target"
+          sudo apparmor_parser -r "$target"
+          # The exact unprivileged mount isolation used by the native tests
+          # must now work; otherwise preserve the failure rather than fall
+          # back to an unrestricted host process.
+          /usr/bin/bwrap --ro-bind / / -- /usr/bin/true
+
+      - name: Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Rust 1.97.1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache Rust compilation
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Prepare frontend assets for Tauri build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Real sandbox private overlay isolation
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib task9_scoped_application_runtime_writes_only_private_overlay -- --ignored --test-threads=1
+
+      - name: Production Rust launcher with real isolated GTK, X11 and D-Bus
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib task9_real_gui_uses_production_scoped_application_wrapper -- --ignored --test-threads=1
+
+      - name: Real Tauri live task GUI and crash-restart private source recovery
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib task9_real_tauri_apphandle_preserves_task_overlay_and_unreadable_recovery_across_process_exit -- --ignored --test-threads=1

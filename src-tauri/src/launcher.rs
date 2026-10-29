@@ -47,6 +47,9 @@ enum StoredLaunchRequest {
     Application {
         application_id: String,
     },
+    DesktopApplication {
+        application_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -71,7 +74,11 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "google-chrome",
         name: "Google Chrome",
         category: "browser",
-        executables: &["google-chrome-stable", "google-chrome"],
+        executables: &[
+            "google-chrome-stable",
+            "google-chrome",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ],
         supports_urls: true,
         supports_paths: true,
     },
@@ -79,7 +86,11 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "chromium",
         name: "Chromium",
         category: "browser",
-        executables: &["chromium", "chromium-browser"],
+        executables: &[
+            "chromium",
+            "chromium-browser",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ],
         supports_urls: true,
         supports_paths: true,
     },
@@ -87,7 +98,11 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "brave",
         name: "Brave",
         category: "browser",
-        executables: &["brave-browser", "brave"],
+        executables: &[
+            "brave-browser",
+            "brave",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ],
         supports_urls: true,
         supports_paths: true,
     },
@@ -95,7 +110,11 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "microsoft-edge",
         name: "Microsoft Edge",
         category: "browser",
-        executables: &["microsoft-edge-stable", "microsoft-edge"],
+        executables: &[
+            "microsoft-edge-stable",
+            "microsoft-edge",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ],
         supports_urls: true,
         supports_paths: true,
     },
@@ -103,7 +122,10 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "firefox",
         name: "Firefox",
         category: "browser",
-        executables: &["firefox"],
+        executables: &[
+            "firefox",
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
+        ],
         supports_urls: true,
         supports_paths: true,
     },
@@ -111,7 +133,10 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "vscode",
         name: "Visual Studio Code",
         category: "editor",
-        executables: &["code"],
+        executables: &[
+            "code",
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+        ],
         supports_urls: false,
         supports_paths: true,
     },
@@ -119,7 +144,10 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "vscodium",
         name: "VSCodium",
         category: "editor",
-        executables: &["codium"],
+        executables: &[
+            "codium",
+            "/Applications/VSCodium.app/Contents/MacOS/Electron",
+        ],
         supports_urls: false,
         supports_paths: true,
     },
@@ -127,7 +155,7 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "cursor",
         name: "Cursor",
         category: "editor",
-        executables: &["cursor"],
+        executables: &["cursor", "/Applications/Cursor.app/Contents/MacOS/Cursor"],
         supports_urls: false,
         supports_paths: true,
     },
@@ -135,7 +163,7 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "zed",
         name: "Zed",
         category: "editor",
-        executables: &["zed"],
+        executables: &["zed", "/Applications/Zed.app/Contents/MacOS/zed"],
         supports_urls: false,
         supports_paths: true,
     },
@@ -143,7 +171,11 @@ const APPLICATION_CATALOG: &[CatalogApplication] = &[
         id: "sublime-text",
         name: "Sublime Text",
         category: "editor",
-        executables: &["subl", "sublime_text"],
+        executables: &[
+            "subl",
+            "sublime_text",
+            "/Applications/Sublime Text.app/Contents/MacOS/sublime_text",
+        ],
         supports_urls: false,
         supports_paths: true,
     },
@@ -586,8 +618,10 @@ fn find_windows_office_executable(name: &str) -> Option<PathBuf> {
             continue;
         };
         for directory in office_dirs {
-            let candidate = PathBuf::from(&root).join(directory).join(&executable);
-            if candidate.is_file() {
+            let relative = format!("{directory}/{executable}");
+            if let Some(candidate) =
+                verified_windows_installed_executable(Path::new(&root), &relative)
+            {
                 return Some(candidate);
             }
         }
@@ -595,11 +629,63 @@ fn find_windows_office_executable(name: &str) -> Option<PathBuf> {
     None
 }
 
+// The catalog intentionally uses executable stems such as "code" across
+// operating systems. On Windows, CreateProcessW needs the actual .exe path;
+// never silently resolve .bat/.cmd scripts as GUI applications.
+#[cfg(any(windows, test))]
+fn windows_direct_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x0400 != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(any(windows, test))]
+fn find_windows_exe_in_directories(
+    name: &str,
+    directories: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    if name.is_empty()
+        || name.contains(['/', '\\'])
+        || name == "."
+        || name == ".."
+        || Path::new(name).components().count() != 1
+    {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".bat") || lower.ends_with(".cmd") {
+        return None;
+    }
+    let lookup = if lower.ends_with(".exe") {
+        name.to_string()
+    } else if !name.contains('.') {
+        format!("{name}.exe")
+    } else {
+        return None;
+    };
+    directories
+        .into_iter()
+        .map(|directory| directory.join(&lookup))
+        .find(|candidate| windows_direct_executable_file(candidate))
+}
+
 fn find_executable(name: &str) -> Option<PathBuf> {
     if name.contains('/') || name.contains('\\') {
         let path = PathBuf::from(name);
         return path.is_file().then_some(path);
     }
+    #[cfg(not(windows))]
     if let Some(path_value) = env::var_os("PATH") {
         if let Some(candidate) = env::split_paths(&path_value)
             .map(|directory| directory.join(name))
@@ -609,8 +695,19 @@ fn find_executable(name: &str) -> Option<PathBuf> {
         }
     }
     #[cfg(windows)]
-    if let Some(candidate) = find_windows_office_executable(name) {
-        return Some(candidate);
+    {
+        // Prefer a concrete Windows .exe even if a same-stem shell script
+        // or extensionless file happens to exist earlier on PATH.
+        if let Some(path_value) = env::var_os("PATH") {
+            if let Some(candidate) =
+                find_windows_exe_in_directories(name, env::split_paths(&path_value))
+            {
+                return Some(candidate);
+            }
+        }
+        if let Some(candidate) = find_windows_office_executable(name) {
+            return Some(candidate);
+        }
     }
     None
 }
@@ -642,20 +739,150 @@ fn catalog_entry(application_id: &str) -> Option<CatalogApplication> {
         .find(|application| application.id == application_id)
 }
 
+#[cfg(any(windows, test))]
+fn verified_windows_installed_executable(base: &Path, relative: &str) -> Option<PathBuf> {
+    // Windows directory junctions and reparse points can redirect an apparently
+    // fixed ProgramFiles/AppData location outside its approved install root.
+    // Never treat a matching .exe filename alone as proof of installation.
+    let canonical_base = fs::canonicalize(base).ok()?;
+    let mut candidate = base.to_path_buf();
+    for component in Path::new(relative).components() {
+        let std::path::Component::Normal(segment) = component else {
+            return None;
+        };
+        candidate.push(segment);
+        let metadata = fs::symlink_metadata(&candidate).ok()?;
+        if metadata.file_type().is_symlink() {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            // FILE_ATTRIBUTE_REPARSE_POINT catches junctions, mount points
+            // and other reparse types not reported as ordinary symlinks.
+            if metadata.file_attributes() & 0x0400 != 0 {
+                return None;
+            }
+        }
+    }
+    let resolved = fs::canonicalize(&candidate).ok()?;
+    (resolved.starts_with(canonical_base) && resolved.is_file()).then_some(resolved)
+}
+
+#[cfg(any(windows, test))]
+fn find_windows_installed_gui_in_roots(
+    application_id: &str,
+    roots: &[(String, PathBuf)],
+) -> Option<PathBuf> {
+    // Only fixed catalog-derived native executable paths are accepted. Do not
+    // search arbitrary filenames, wrappers, scripts or untrusted directories.
+    let locations: &[(&str, &str)] = match application_id {
+        "google-chrome" => &[
+            ("ProgramFiles", "Google/Chrome/Application/chrome.exe"),
+            ("ProgramFiles(x86)", "Google/Chrome/Application/chrome.exe"),
+            ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe"),
+        ],
+        "chromium" => &[("LOCALAPPDATA", "Chromium/Application/chrome.exe")],
+        "brave" => &[
+            (
+                "ProgramFiles",
+                "BraveSoftware/Brave-Browser/Application/brave.exe",
+            ),
+            (
+                "LOCALAPPDATA",
+                "BraveSoftware/Brave-Browser/Application/brave.exe",
+            ),
+        ],
+        "microsoft-edge" => &[
+            ("ProgramFiles(x86)", "Microsoft/Edge/Application/msedge.exe"),
+            ("ProgramFiles", "Microsoft/Edge/Application/msedge.exe"),
+        ],
+        "firefox" => &[
+            ("ProgramFiles", "Mozilla Firefox/firefox.exe"),
+            ("ProgramFiles(x86)", "Mozilla Firefox/firefox.exe"),
+        ],
+        "vscode" => &[
+            ("LOCALAPPDATA", "Programs/Microsoft VS Code/Code.exe"),
+            ("ProgramFiles", "Microsoft VS Code/Code.exe"),
+        ],
+        "vscodium" => &[
+            ("LOCALAPPDATA", "Programs/VSCodium/VSCodium.exe"),
+            ("ProgramFiles", "VSCodium/VSCodium.exe"),
+        ],
+        "cursor" => &[
+            ("LOCALAPPDATA", "Programs/cursor/Cursor.exe"),
+            ("ProgramFiles", "Cursor/Cursor.exe"),
+        ],
+        "sublime-text" => &[("ProgramFiles", "Sublime Text/sublime_text.exe")],
+        _ => &[],
+    };
+    locations.iter().find_map(|(root_name, relative)| {
+        let base = roots
+            .iter()
+            .find(|(name, _)| name == root_name)?
+            .1
+            .as_path();
+        verified_windows_installed_executable(base, relative)
+    })
+}
+
+#[cfg(windows)]
+fn find_windows_installed_gui(application_id: &str) -> Option<PathBuf> {
+    let roots = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+        .into_iter()
+        .filter_map(|name| env::var_os(name).map(|path| (name.to_string(), PathBuf::from(path))))
+        .collect::<Vec<_>>();
+    find_windows_installed_gui_in_roots(application_id, &roots)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_catalog_executable_with_lookup(
+    candidates: &[&str],
+    mut lookup: impl FnMut(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    // Shell shims such as 'code', 'cursor' and 'subl' may immediately hand
+    // off to a different GUI process. Prefer the bundle's real executable
+    // whenever present, so native PID-scoped UI access does not accidentally
+    // attach to a short-lived command-line launcher.
+    let is_bundle =
+        |name: &&str| name.starts_with("/Applications/") && name.contains(".app/Contents/MacOS/");
+    candidates
+        .iter()
+        .filter(|name| is_bundle(name))
+        .chain(candidates.iter().filter(|name| !is_bundle(name)))
+        .find_map(|name| lookup(name))
+}
+
+fn find_catalog_executable(application: &CatalogApplication) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_catalog_executable_with_lookup(application.executables, find_executable)
+    }
+    #[cfg(not(target_os = "macos"))]
+    let found = application
+        .executables
+        .iter()
+        .find_map(|candidate| find_executable(candidate));
+    #[cfg(windows)]
+    {
+        found.or_else(|| find_windows_installed_gui(application.id))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        found
+    }
+}
+
 fn resolve_application(application_id: &str) -> Result<(CatalogApplication, PathBuf), String> {
     let application = catalog_entry(application_id).ok_or_else(|| {
         "That application is not in RepoTunnel's allowed launcher catalog.".to_string()
     })?;
-    let executable = application
-        .executables
-        .iter()
-        .find_map(|candidate| find_executable(candidate))
-        .ok_or_else(|| {
-            format!(
-                "{} is not installed or is not available on PATH.",
-                application.name
-            )
-        })?;
+    let executable = find_catalog_executable(&application).ok_or_else(|| {
+        format!(
+            "{} is not installed or is not available on PATH.",
+            application.name
+        )
+    })?;
     Ok((application, executable))
 }
 
@@ -663,10 +890,7 @@ pub(crate) fn list_applications() -> Vec<LaunchApplication> {
     APPLICATION_CATALOG
         .iter()
         .filter_map(|application| {
-            let executable = application
-                .executables
-                .iter()
-                .find_map(|candidate| find_executable(candidate))?;
+            let executable = find_catalog_executable(application)?;
             Some(LaunchApplication {
                 id: application.id.to_string(),
                 name: application.name.to_string(),
@@ -895,6 +1119,9 @@ fn execute_request(workspace: &Workspace, request: &StoredLaunchRequest) -> Resu
             let args = application_args(application_id, None);
             spawn_detached(&executable, &args)
         }
+        StoredLaunchRequest::DesktopApplication { application_id } => {
+            crate::custom_applications::launch_desktop_application(application_id)
+        }
     }
 }
 
@@ -1036,6 +1263,27 @@ pub(crate) fn request_open_workspace_path(
     )
 }
 
+pub(crate) fn request_launch_desktop_application(
+    app: &AppHandle,
+    workspace: &Workspace,
+    application_id: String,
+) -> Result<LaunchActionOutcome, String> {
+    let name = crate::custom_applications::desktop_application_name(&application_id)?;
+    let record = pending_record(
+        workspace,
+        LaunchActionKind::Application,
+        name.clone(),
+        Some(application_id.clone()),
+        Some(name),
+    );
+    request_action(
+        app,
+        workspace,
+        record,
+        StoredLaunchRequest::DesktopApplication { application_id },
+    )
+}
+
 pub(crate) fn request_launch_application(
     app: &AppHandle,
     workspace: &Workspace,
@@ -1151,7 +1399,194 @@ pub(crate) fn reject_action(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_url;
+    use super::{find_windows_exe_in_directories, validate_url};
+    use std::{fs, path::PathBuf};
+
+    #[test]
+    fn packaged_desktop_launch_request_survives_review_history_serialization() {
+        let request = super::StoredLaunchRequest::DesktopApplication {
+            application_id: "desktop-deadbeefcafebabe".to_string(),
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["kind"], "desktopApplication");
+        let restored: super::StoredLaunchRequest = serde_json::from_value(encoded).unwrap();
+        match restored {
+            super::StoredLaunchRequest::DesktopApplication { application_id } => {
+                assert_eq!(application_id, "desktop-deadbeefcafebabe");
+            }
+            _ => panic!("Packaged desktop request lost its exact approval scope"),
+        }
+    }
+
+    #[test]
+    fn windows_gui_executable_discovery_finds_real_exe_not_scripts_or_path_escape() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = fixture.path();
+        let executable = directory.join("code.exe");
+        fs::write(&executable, b"fixture only; never executed").unwrap();
+        fs::write(directory.join("code.cmd"), b"script must not be selected").unwrap();
+        fs::write(
+            directory.join("code"),
+            b"extensionless wrapper is not a GUI exe",
+        )
+        .unwrap();
+        let scan = |name| find_windows_exe_in_directories(name, vec![PathBuf::from(directory)]);
+        assert_eq!(scan("code"), Some(executable.clone()));
+        assert_eq!(scan("code.exe"), Some(executable.clone()));
+        assert!(scan("code.cmd").is_none());
+        assert!(scan("code.bat").is_none());
+        assert!(scan("../code").is_none());
+        assert!(scan("nested\\code").is_none());
+        assert!(scan("script.ps1").is_none());
+        assert!(scan("").is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let external = fixture.path().join("other-program.exe");
+            fs::write(&external, b"outside fixture").unwrap();
+            fs::remove_file(&executable).unwrap();
+            symlink(&external, &executable).unwrap();
+            assert!(
+                scan("code").is_none(),
+                "a Windows PATH executable alias must not bypass direct native GUI program validation"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_installed_gui_discovery_uses_only_known_catalog_paths() {
+        let fixture = tempfile::tempdir().unwrap();
+        let program_files = fixture.path().join("Program Files");
+        let user_local = fixture.path().join("AppData/Local");
+        let editor = user_local.join("Programs/Microsoft VS Code/Code.exe");
+        let browser = program_files.join("Google/Chrome/Application/chrome.exe");
+        fs::create_dir_all(editor.parent().unwrap()).unwrap();
+        fs::create_dir_all(browser.parent().unwrap()).unwrap();
+        fs::write(&editor, b"fake native editor executable").unwrap();
+        fs::write(&browser, b"fake native browser executable").unwrap();
+        let roots = vec![
+            ("ProgramFiles".to_string(), program_files.clone()),
+            ("LOCALAPPDATA".to_string(), user_local.clone()),
+        ];
+        assert_eq!(
+            super::find_windows_installed_gui_in_roots("vscode", &roots),
+            Some(editor.canonicalize().unwrap())
+        );
+        assert_eq!(
+            super::find_windows_installed_gui_in_roots("google-chrome", &roots),
+            Some(browser.canonicalize().unwrap())
+        );
+        assert!(super::find_windows_installed_gui_in_roots("../vscode", &roots).is_none());
+        assert!(super::find_windows_installed_gui_in_roots("powershell", &roots).is_none());
+        assert!(super::find_windows_installed_gui_in_roots("cmd", &roots).is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let outside = fixture.path().join("outside-unapproved");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("Cursor.exe"), b"outside fixture").unwrap();
+            fs::create_dir_all(user_local.join("Programs")).unwrap();
+            symlink(&outside, user_local.join("Programs/cursor")).unwrap();
+            assert!(
+                super::find_windows_installed_gui_in_roots("cursor", &roots).is_none(),
+                "a link under the known install root must not redirect to another tree"
+            );
+            let source = user_local.join("Programs/Microsoft VS Code/Code.exe");
+            let fake = outside.join("Code.exe");
+            fs::write(&fake, b"outside fixture").unwrap();
+            fs::remove_file(&source).unwrap();
+            symlink(&fake, &source).unwrap();
+            assert!(
+                super::find_windows_installed_gui_in_roots("vscode", &roots).is_none(),
+                "a symlinked GUI executable must not bypass the fixed install path"
+            );
+            fs::remove_file(&source).unwrap();
+            fs::write(&source, b"valid executable fixture").unwrap();
+        }
+        fs::write(
+            user_local.join("Programs/Microsoft VS Code/Code.cmd"),
+            b"script",
+        )
+        .unwrap();
+        fs::remove_file(user_local.join("Programs/Microsoft VS Code/Code.exe")).unwrap();
+        assert!(
+            super::find_windows_installed_gui_in_roots("vscode", &roots).is_none(),
+            "a script with the catalog app's name must never replace the actual exe"
+        );
+    }
+
+    #[test]
+    fn macos_gui_prefers_app_bundle_over_short_lived_shell_shim() {
+        let shim = "/usr/local/bin/code";
+        let bundle = "/Applications/Visual Studio Code.app/Contents/MacOS/Electron";
+        let matches = |name: &str| match name {
+            "code" => Some(PathBuf::from(shim)),
+            name if name == bundle => Some(PathBuf::from(bundle)),
+            _ => None,
+        };
+        assert_eq!(
+            super::macos_catalog_executable_with_lookup(&["code", bundle], matches),
+            Some(PathBuf::from(bundle)),
+            "native AI Workspace should identify the real GUI process, not its CLI shim"
+        );
+        assert_eq!(
+            super::macos_catalog_executable_with_lookup(&["code", bundle], |name| {
+                (name == "code").then(|| PathBuf::from(shim))
+            }),
+            Some(PathBuf::from(shim)),
+            "a shell launcher remains available when the app bundle is not installed"
+        );
+    }
+
+    #[test]
+    fn macos_gui_catalog_has_explicit_app_bundle_executables() {
+        let expected = [
+            (
+                "google-chrome",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            ),
+            (
+                "chromium",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            ),
+            (
+                "brave",
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            ),
+            (
+                "microsoft-edge",
+                "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            ),
+            (
+                "firefox",
+                "/Applications/Firefox.app/Contents/MacOS/firefox",
+            ),
+            (
+                "vscode",
+                "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+            ),
+            (
+                "vscodium",
+                "/Applications/VSCodium.app/Contents/MacOS/Electron",
+            ),
+            ("cursor", "/Applications/Cursor.app/Contents/MacOS/Cursor"),
+            ("zed", "/Applications/Zed.app/Contents/MacOS/zed"),
+            (
+                "sublime-text",
+                "/Applications/Sublime Text.app/Contents/MacOS/sublime_text",
+            ),
+        ];
+        for (id, macos_executable) in expected {
+            let entry = super::catalog_entry(id).expect("approved native GUI application");
+            assert!(
+                entry.executables.contains(&macos_executable),
+                "{id} must be discoverable even when its shell alias is absent from PATH"
+            );
+            assert!(macos_executable.starts_with("/Applications/"));
+            assert!(macos_executable.contains(".app/Contents/MacOS/"));
+            assert!(!macos_executable.ends_with('/'));
+        }
+    }
 
     #[test]
     fn launcher_accepts_web_urls() {

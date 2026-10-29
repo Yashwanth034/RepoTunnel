@@ -3,20 +3,27 @@ mod activity;
 mod ai_resources;
 mod ai_workspace;
 mod app_state;
+mod ast_grep;
 mod browser;
+mod browser_transaction;
 mod changes;
 mod chatgpt_bridge;
 mod checkpoint;
 mod commands;
+mod completion_proof;
 mod connection;
 mod continuity;
 mod conversation;
+mod custom_applications;
+mod design_intelligence;
+mod design_quality;
 mod desktop_control;
 mod direct_https;
 mod environment;
 mod execution;
 mod external_access;
 mod filesystem;
+mod free_website_templates;
 mod gateway;
 mod git;
 mod github;
@@ -25,12 +32,17 @@ mod hardening;
 mod https_setup;
 mod integrations;
 mod large_project_read;
+mod latency;
 mod launcher;
 #[cfg(any(target_os = "macos", test))]
 mod macos_ax;
+mod managed_capabilities;
 mod mcp_auth;
+mod mcp_flight_recorder;
+mod mcp_registry;
 mod mcp_server;
 mod media_inspection;
+mod mission;
 mod model_hub;
 mod model_trial;
 mod models;
@@ -42,15 +54,60 @@ mod project_index;
 mod project_memory;
 mod project_setup;
 mod public_tunnel;
+mod rea_bridge;
+mod recovery_store;
+mod remote_access;
+mod remote_artifact;
+mod remote_artifact_fetch;
+mod remote_fleet;
+mod remote_matrix;
+#[cfg(test)]
+mod remote_project_integration_tests;
+mod remote_project_sync;
+mod remote_snapshot;
+mod remote_source_intent;
+mod remote_source_receiver;
+mod remote_source_review_proof;
+mod remote_source_stage;
+mod remote_sync;
+mod remote_view;
 mod repository;
 mod secret_guard;
+mod secure_tunnel_keyring;
 mod self_continuation;
 mod semantic;
 mod storage;
 mod system_resources;
 mod team;
+mod team_comms;
+mod test_impact;
+mod tunnel_client_setup;
+// Task Integrity lands in tested layers; later tasks wire these foundation APIs
+// into production mutation surfaces. Remove this temporary allowance at the
+// final integration gate once every layer has a production caller.
+#[cfg(any(target_os = "macos", test))]
+mod macos_window_capture;
+#[allow(dead_code)]
+mod task_integrity;
 mod temp_workspace;
 mod terminal;
+
+// Test-only native junction fixture. PowerShell receives paths through two
+// environment variables, never shell interpolation. No production sandbox or
+// reparse-point security rules are changed.
+#[cfg(all(test, windows))]
+fn windows_test_create_junction(
+    link: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<std::process::Output> {
+    let script = "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:REPOTUNNEL_TEST_JUNCTION_LINK -Target $env:REPOTUNNEL_TEST_JUNCTION_TARGET | Out-Null";
+    std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("REPOTUNNEL_TEST_JUNCTION_LINK", link)
+        .env("REPOTUNNEL_TEST_JUNCTION_TARGET", target)
+        .output()
+}
+mod ui_transaction;
 mod updates;
 mod versioning;
 mod video;
@@ -65,6 +122,9 @@ mod video_qa;
 mod video_render;
 mod video_scene;
 mod video_story_render;
+mod visual_regression;
+#[cfg(windows)]
+mod windows_human_source;
 #[cfg(any(windows, test))]
 mod windows_uia;
 mod workflow;
@@ -127,6 +187,9 @@ fn initialize_local_runtime(app: &tauri::AppHandle) {
     if let Err(error) = monitoring::initialize(app) {
         hardening::log_event(app, "WARN", "monitoring.initialize", &error);
     }
+    if let Err(error) = task_integrity::drift::initialize(app) {
+        hardening::log_event(app, "WARN", "task_integrity.watch_initialize", &error);
+    }
 }
 
 fn initialize_connection_runtime(app: &tauri::AppHandle) {
@@ -165,6 +228,43 @@ pub fn run() {
             let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
                 commands::select_workspace,
                 commands::list_workspaces,
+                commands::issue_remote_machine_access,
+                commands::revoke_remote_machine_access,
+                commands::list_remote_machine_access_grants,
+                commands::revoke_remote_machine_access_grant,
+                commands::rotate_remote_machine_access_grant,
+                commands::connect_remote_machine,
+                commands::disconnect_remote_machine,
+                commands::reconnect_remote_machine,
+                commands::list_remote_machines,
+                commands::list_remembered_remote_machines,
+                commands::get_local_remote_machine_identity,
+                commands::remember_remote_machine,
+                commands::forget_remembered_remote_machine,
+                commands::probe_remote_machine,
+                commands::inspect_remote_machine_capacity,
+                commands::inspect_remote_machine_browser,
+                commands::inspect_remote_machine_jobs,
+                commands::preview_remote_source_diff_desktop,
+                commands::preflight_remote_create_only_desktop,
+                commands::record_remote_source_review_intent_desktop,
+                commands::list_remote_source_review_intents_desktop,
+                commands::withdraw_remote_source_review_intent_desktop,
+                commands::reconcile_remote_source_review_intent_desktop,
+                commands::inspect_remote_receiver_source_approval_desktop,
+                commands::import_approved_remote_source_desktop,
+                commands::reconcile_verified_remote_source_import_desktop,
+                commands::export_signed_incoming_source_review_desktop,
+                commands::approve_incoming_source_review_desktop,
+                commands::withdraw_incoming_source_approval_desktop,
+                commands::list_incoming_source_approvals_desktop,
+                commands::inspect_incoming_source_approval_desktop,
+                commands::list_remote_native_test_runs_desktop,
+                commands::reconcile_remote_native_test_job_desktop,
+                commands::cancel_remote_native_test_job_desktop,
+                commands::view_remote_machine_screen,
+                commands::list_downloaded_remote_artifacts,
+                commands::export_remote_artifact,
                 commands::get_workspace_health,
                 commands::relocate_workspace,
                 commands::add_workspace,
@@ -175,6 +275,7 @@ pub fn run() {
                 commands::update_workspace_command_policy,
                 commands::check_workspace_access,
                 commands::list_directory,
+                commands::list_directory_page,
                 commands::read_file,
                 commands::search_files,
                 commands::editor_save_file,
@@ -188,6 +289,13 @@ pub fn run() {
                 commands::prepare_project,
                 commands::get_project_memory,
                 commands::get_resume_snapshot,
+                commands::get_task_integrity_status,
+                commands::approve_task_integrity_expansion,
+                commands::reject_task_integrity_expansion,
+                commands::cancel_task_integrity,
+                commands::list_scope_expansions,
+                commands::approve_scope_expansion,
+                commands::reject_scope_expansion,
                 commands::update_project_memory,
                 commands::inspect_project,
                 commands::get_workflow_readiness,
@@ -253,6 +361,11 @@ pub fn run() {
                 commands::stop_managed_process,
                 commands::restart_managed_process,
                 commands::list_launchable_applications,
+                custom_applications::list_custom_applications,
+                custom_applications::pick_custom_application,
+                custom_applications::discover_custom_applications,
+                custom_applications::add_discovered_custom_application,
+                custom_applications::remove_custom_application,
                 commands::get_github_connection_status,
                 commands::connect_github,
                 commands::cancel_github_connection,
@@ -265,6 +378,8 @@ pub fn run() {
                 commands::get_gmail_access_enabled,
                 commands::set_gmail_access_enabled,
                 commands::get_ai_workspace_status,
+                commands::list_ai_workspace_recovery_evidence,
+                commands::queue_ai_workspace_recovery_for_review,
                 commands::start_ai_workspace,
                 commands::stop_ai_workspace,
                 commands::get_ai_workspace_frame,
@@ -273,6 +388,7 @@ pub fn run() {
                 commands::open_url,
                 commands::open_workspace_path,
                 commands::launch_application,
+                commands::launch_discovered_desktop_application,
                 commands::list_launch_history,
                 commands::approve_launch_action,
                 commands::reject_launch_action,
@@ -401,8 +517,12 @@ pub fn run() {
                 commands::clear_public_tunnel,
                 commands::revoke_mcp_access,
                 commands::get_chat_connection_status,
+                commands::install_official_tunnel_client,
                 commands::start_chat_connection,
                 commands::stop_chat_connection,
+                commands::pause_chat_connection,
+                commands::resume_chat_connection,
+                commands::remember_chat_connection,
                 commands::get_model_hub,
                 commands::refresh_model_runtime,
                 commands::update_model_runtime_endpoint,
@@ -425,8 +545,26 @@ pub fn run() {
                 commands::set_auto_update_checks,
                 commands::defer_update,
                 commands::install_update_and_restart,
+                commands::create_agent_mission,
+                commands::list_agent_missions,
+                commands::get_agent_mission,
+                commands::submit_agent_mission_directive,
+                commands::submit_agent_mission_question,
+                commands::pause_agent_mission,
+                commands::resume_agent_mission,
+                commands::stop_agent_mission,
+                commands::rename_mission_agent,
+                commands::remove_mission_agent,
+                commands::restore_mission_agent,
+                commands::archive_agent_mission,
+                commands::restore_archived_agent_mission,
+                commands::delete_agent_mission,
+                commands::approve_agent_mission_gate,
+                commands::reject_agent_mission_gate,
+                commands::accept_agent_mission_result,
                 commands::list_team_sessions,
                 commands::get_team_session,
+                commands::disconnect_team_agent,
                 commands::create_team_session,
                 commands::post_team_user_message,
                 commands::pause_team_session,
@@ -460,13 +598,16 @@ pub fn run() {
         .expect("failed to build RepoTunnel")
         .run(|app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
+                task_integrity::drift::stop_all_task_watches();
                 monitoring::stop_all_activity();
                 terminal::stop_transient_activity_for_shutdown();
                 browser::stop_all_activity();
+                desktop_control::shutdown_helper();
                 video::stop_all_activity();
                 video_production::stop_all_activity();
                 video_preview::clear_all(app_handle);
                 model_hub::stop_owned_local_runtimes();
+                rea_bridge::shutdown();
                 chatgpt_bridge::shutdown();
                 let state = app_handle.state::<AppState>();
                 state.ai_workspace.shutdown(app_handle);

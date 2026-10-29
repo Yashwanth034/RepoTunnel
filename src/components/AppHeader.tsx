@@ -13,6 +13,7 @@ type AppHeaderProps = {
 const titles: Record<AppView, string> = {
   overview: "Home",
   projects: "Projects",
+  agents: "Agents",
   team: "Team",
   models: "Model Hub",
   editor: "Editor",
@@ -22,7 +23,8 @@ const titles: Record<AppView, string> = {
   connections: "Connect",
   commands: "Commands",
   phone: "Phone",
-  httpsSetup: "HTTPS Setup",
+  remoteMachines: "Remote Computers",
+  httpsSetup: "Guide",
   video: "Video",
   system: "Settings",
   help: "Help",
@@ -31,6 +33,7 @@ const titles: Record<AppView, string> = {
 const icons: Record<AppView, Parameters<typeof NavIcon>[0]["name"]> = {
   overview: "home",
   projects: "folder",
+  agents: "team",
   team: "team",
   models: "model",
   editor: "folder",
@@ -40,6 +43,7 @@ const icons: Record<AppView, Parameters<typeof NavIcon>[0]["name"]> = {
   connections: "link",
   commands: "terminal",
   phone: "phone",
+  remoteMachines: "remote",
   httpsSetup: "shield",
   video: "video",
   system: "settings",

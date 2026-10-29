@@ -147,12 +147,26 @@ def active_title(d):
         return ""
 
 
-def target_window(d, requested=None):
+def target_window(d, requested=None, allowed_pids=None):
     windows = client_windows(d)
+    owned = None
+    if allowed_pids is not None:
+        owned = {
+            int(pid) for pid in allowed_pids
+            if not isinstance(pid, bool) and str(pid).isdigit() and int(pid) > 0
+        }
+        if not owned or not requested:
+            raise RuntimeError(
+                "RepoTunnel refused an app-session operation without a verified window and process."
+            )
     if requested:
         wanted = str(requested).lower()
         for win, title in windows:
             if f"0x{int(win.id):x}".lower() == wanted:
+                if owned is not None and window_info(d, win, title).get("pid") not in owned:
+                    raise RuntimeError(
+                        "RepoTunnel refused a window whose current process no longer belongs to this AI's app session."
+                    )
                 return win, title
         raise RuntimeError("That AI Workspace window is no longer available. Inspect the workspace again.")
     active = active_window(d)
@@ -248,10 +262,33 @@ def semantic_element_id(path, node):
     return f"{path}#{semantic_signature(path, node)}"
 
 
+def application_process_id(application):
+    """Resolve a genuine AT-SPI application PID; unknown identity fails closed."""
+    if application is None:
+        return None
+    try:
+        value = getattr(application, "get_process_id", None)
+        value = value() if callable(value) else value
+        if isinstance(value, bool):
+            return None
+        pid = int(value)
+        return pid if pid > 0 else None
+    except (TypeError, ValueError, AttributeError, RuntimeError):
+        return None
+
+
+def semantic_element_application_pid(node):
+    try:
+        return application_process_id(node.getApplication())
+    except (AttributeError, TypeError, RuntimeError):
+        return None
+
+
 def inspect_semantics(limit, allowed_pids=None):
+    scoped = allowed_pids is not None
     allowed_pids = {
         int(pid) for pid in (allowed_pids or [])
-        if isinstance(pid, int) or str(pid).isdigit()
+        if not isinstance(pid, bool) and str(pid).isdigit() and int(pid) > 0
     }
     if pyatspi is None or not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
         return {
@@ -274,8 +311,13 @@ def inspect_semantics(limit, allowed_pids=None):
     elements = []
     truncated = False
 
-    def walk(node, path, depth):
+    def walk(node, path, depth, app_pid):
         nonlocal truncated
+        # AT-SPI trees can expose proxy/embedded nodes from other processes.
+        # Validate each accessible node, not merely the parent app in the
+        # desktop registry, before collecting names, text or action IDs.
+        if app_pid is None or semantic_element_application_pid(node) != app_pid:
+            return
         if len(elements) >= wanted:
             truncated = True
             return
@@ -305,6 +347,7 @@ def inspect_semantics(limit, allowed_pids=None):
         if useful:
             elements.append({
                 "id": semantic_element_id(path, node),
+                "pid": app_pid,
                 "role": role,
                 "name": name,
                 "description": description,
@@ -325,7 +368,7 @@ def inspect_semantics(limit, allowed_pids=None):
                 truncated = True
                 return
             try:
-                walk(node.getChildAtIndex(index), f"{path}.{index}", depth + 1)
+                walk(node.getChildAtIndex(index), f"{path}.{index}", depth + 1, app_pid)
             except Exception:
                 continue
 
@@ -342,15 +385,8 @@ def inspect_semantics(limit, allowed_pids=None):
             app_name = clean(getattr(app, "name", "")).lower()
             if "repotunnel" in app_name or app_name == "metacity":
                 continue
-            app_pid = None
-            try:
-                app_pid = int(app.get_process_id())
-            except Exception:
-                try:
-                    app_pid = int(app.get_process_id)
-                except Exception:
-                    pass
-            if allowed_pids and app_pid not in allowed_pids:
+            app_pid = application_process_id(app)
+            if scoped and app_pid not in allowed_pids:
                 continue
             window_count = min(int(app.childCount), 80)
         except Exception:
@@ -364,6 +400,7 @@ def inspect_semantics(limit, allowed_pids=None):
                     app.getChildAtIndex(window_index),
                     f"a{app_index}.w{window_index}",
                     0,
+                    app_pid,
                 )
             except Exception:
                 continue
@@ -403,10 +440,24 @@ def resolve_semantic_element(encoded):
     return node
 
 
-def semantic_allowed_window(node, allowed_window_ids):
+def semantic_allowed_window(node, allowed_window_ids, allowed_pids=None):
     allowed = {str(value) for value in (allowed_window_ids or []) if str(value)}
-    if not allowed:
-        return None
+    allowed_pid_set = {
+        int(pid) for pid in (allowed_pids or [])
+        if isinstance(pid, int) or str(pid).isdigit()
+    }
+    if not allowed or not allowed_pid_set:
+        raise RuntimeError(
+            "RepoTunnel refused semantic access without a verified app-session window and process."
+        )
+    # Geometry overlap does not prove accessibility ownership: another app
+    # can have an element at exactly the same screen position. Verify the
+    # AT-SPI *application* identity before invoking any accessibility action.
+    app_pid = semantic_element_application_pid(node)
+    if app_pid not in allowed_pid_set:
+        raise RuntimeError(
+            "RepoTunnel blocked a semantic action on an element owned by another application."
+        )
     bounds = semantic_bounds(node)
     if not bounds:
         raise RuntimeError(
@@ -419,6 +470,8 @@ def semantic_allowed_window(node, allowed_window_ids):
         for win, title in client_windows(d):
             window_id = f"0x{int(win.id):x}"
             if window_id not in allowed:
+                continue
+            if window_info(d, win, title).get("pid") != app_pid:
                 continue
             wb = window_bounds(win)
             if not wb:
@@ -435,9 +488,9 @@ def semantic_allowed_window(node, allowed_window_ids):
     )
 
 
-def semantic_click_element(encoded, allowed_window_ids=None):
+def semantic_click_element(encoded, allowed_window_ids=None, allowed_pids=None):
     node = resolve_semantic_element(encoded)
-    allowed_owned = semantic_allowed_window(node, allowed_window_ids)
+    allowed_owned = semantic_allowed_window(node, allowed_window_ids, allowed_pids)
     actions = semantic_actions(node)
     if actions:
         preferred = ("click", "press", "activate", "open", "toggle", "select")
@@ -491,9 +544,9 @@ def semantic_click_element(encoded, allowed_window_ids=None):
     return {"detail": "Clicked the verified semantic element inside the isolated application window."}
 
 
-def semantic_type_element(encoded, text, clear_first, allowed_window_ids=None):
+def semantic_type_element(encoded, text, clear_first, allowed_window_ids=None, allowed_pids=None):
     node = resolve_semantic_element(encoded)
-    semantic_allowed_window(node, allowed_window_ids)
+    semantic_allowed_window(node, allowed_window_ids, allowed_pids)
     if semantic_sensitive(node):
         raise RuntimeError(
             "RepoTunnel blocks semantic typing into password, PIN, credential, token, and other sensitive fields."
@@ -528,7 +581,7 @@ def semantic_type_element(encoded, text, clear_first, allowed_window_ids=None):
     return {"characters": len(text), "semantic": True}
 
 
-def semantic_sequence(steps, allowed_window_ids=None):
+def semantic_sequence(steps, allowed_window_ids=None, allowed_pids=None):
     if not isinstance(steps, list) or not 1 <= len(steps) <= 64:
         raise RuntimeError("AI Workspace semantic sequence requires 1..64 steps.")
 
@@ -581,6 +634,7 @@ def semantic_sequence(steps, allowed_window_ids=None):
                 result = semantic_click_element(
                     step.get("elementId"),
                     allowed_window_ids,
+                    allowed_pids,
                 )
             elif operation == "type":
                 text = str(step.get("text") or "")
@@ -592,6 +646,7 @@ def semantic_sequence(steps, allowed_window_ids=None):
                     text,
                     bool(step.get("clearFirst", False)),
                     allowed_window_ids,
+                    allowed_pids,
                 )
             else:
                 raise RuntimeError(
@@ -615,9 +670,10 @@ def semantic_sequence(steps, allowed_window_ids=None):
 
 
 def inspect_windows(limit=300, allowed_pids=None):
+    scoped = allowed_pids is not None
     allowed_pids = {
         int(pid) for pid in (allowed_pids or [])
-        if isinstance(pid, int) or str(pid).isdigit()
+        if not isinstance(pid, bool) and str(pid).isdigit() and int(pid) > 0
     }
     d = open_display()
     try:
@@ -627,17 +683,17 @@ def inspect_windows(limit=300, allowed_pids=None):
         windows = []
         for win, title in client_windows(d):
             info = window_info(d, win, title)
-            if allowed_pids and info.get("pid") not in allowed_pids:
+            if scoped and info.get("pid") not in allowed_pids:
                 continue
             info["active"] = int(win.id) == active_id
             windows.append(info)
-        if allowed_pids and not any(item.get("active") for item in windows):
+        if scoped and not any(item.get("active") for item in windows):
             active_id = None
             active_name = ""
     finally:
         d.close()
 
-    semantic = inspect_semantics(limit, allowed_pids)
+    semantic = inspect_semantics(limit, allowed_pids if scoped else None)
     return {
         "activeWindowId": f"0x{active_id:x}" if active_id is not None else None,
         "activeTitle": active_name,
@@ -721,12 +777,15 @@ def frame(req):
     try:
         window_id = req.get("windowId")
         if window_id:
-            target, _ = target_window(d, window_id)
+            target, target_title = target_window(d, window_id, req.get("allowedPids"))
             geom = target.get_geometry()
             width, height = int(geom.width), int(geom.height)
             raw = target.get_image(0, 0, width, height, X.ZPixmap, 0xFFFFFFFF)
         else:
+            if req.get("allowedPids") is not None:
+                raise RuntimeError("App-session screenshot requires a verified owned window.")
             target = d.screen().root
+            target_title = active_title(d)
             width, height = root_size(d)
             raw = target.get_image(0, 0, width, height, X.ZPixmap, 0xFFFFFFFF)
         if raw is None or not raw.data:
@@ -759,15 +818,15 @@ def frame(req):
             "sourceHeight": height,
             "sizeBytes": len(data),
             "data": base64.b64encode(data).decode("ascii"),
-            "activeTitle": active_title(d),
+            "activeTitle": target_title,
             "windowId": window_id,
         }
     finally:
         d.close()
 
 
-def focus_target(d, requested=None):
-    win, title = target_window(d, requested)
+def focus_target(d, requested=None, allowed_pids=None):
+    win, title = target_window(d, requested, allowed_pids)
     bounds = ensure_window_visible(d, win)
     root = d.screen().root
     atom = d.intern_atom("_NET_ACTIVE_WINDOW")
@@ -780,6 +839,71 @@ def focus_target(d, requested=None):
     d.sync()
     time.sleep(0.02)
     return win, title, window_bounds(win) or bounds
+
+
+def fit_owned_windows(req):
+    # Only resize windows with a live, positively verified app-session PID.
+    # Shared AI Workspace windows belonging to other AIs are never touched.
+    raw_pids = req.get("allowedPids")
+    if not isinstance(raw_pids, list):
+        raise RuntimeError("Window fitting requires verified application ownership.")
+    allowed = {
+        int(pid) for pid in raw_pids
+        if not isinstance(pid, bool) and str(pid).isdigit() and int(pid) > 0
+    }
+    if not allowed:
+        raise RuntimeError("Window fitting requires a nonempty owned PID set.")
+    d = open_display()
+    try:
+        width, height = root_size(d)
+        fitted = []
+        for win, title in client_windows(d):
+            info = window_info(d, win, title)
+            if info.get("pid") not in allowed:
+                continue
+            bounds = info.get("bounds")
+            if not bounds:
+                continue
+            # Normal windows that already fit are left completely untouched.
+            if (bounds["x"] >= 0 and bounds["y"] >= 0
+                    and bounds["x"] + bounds["width"] <= width
+                    and bounds["y"] + bounds["height"] <= height):
+                continue
+
+            # Ask Metacity to maximize the verified window within its usable
+            # workarea first, including title-bar/decorations.
+            root = d.screen().root
+            state = d.intern_atom("_NET_WM_STATE")
+            horizontal = d.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")
+            vertical = d.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT")
+            event = protocol.event.ClientMessage(
+                window=win, client_type=state,
+                data=(32, [1, horizontal, vertical, 1, 0]),
+            )
+            root.send_event(event, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+            d.sync()
+            time.sleep(0.12)
+            after = window_bounds(win)
+            if after and (after["x"] < 0 or after["y"] < 0
+                    or after["x"] + after["width"] > width
+                    or after["y"] + after["height"] > height):
+                # Some native apps ignore EWMH maximize. Clamp the client
+                # with space for WM borders/titlebar. Never affect host UI.
+                win.configure(x=0, y=0, width=max(240, width - 16),
+                              height=max(160, height - 76))
+                d.sync()
+                time.sleep(0.1)
+                after = window_bounds(win)
+            if not after or (after["x"] < 0 or after["y"] < 0
+                    or after["x"] + after["width"] > width
+                    or after["y"] + after["height"] > height):
+                raise RuntimeError(
+                    "An AI Workspace application window is still outside the isolated screen."
+                )
+            fitted.append({"windowId": info["windowId"], "bounds": after})
+        return {"fitted": fitted, "screenWidth": width, "screenHeight": height}
+    finally:
+        d.close()
 
 
 def place_window(req):
@@ -812,7 +936,7 @@ def place_window(req):
 def activate(req):
     d = open_display()
     try:
-        win, title, bounds = focus_target(d, req.get("windowId"))
+        win, title, bounds = focus_target(d, req.get("windowId"), req.get("allowedPids"))
         return {"activated": True, "title": title, "windowId": f"0x{int(win.id):x}", "bounds": bounds}
     finally:
         d.close()
@@ -828,7 +952,7 @@ def pointer_action(req):
         window_id = req.get("windowId")
         bounds = None
         if window_id:
-            win, _, bounds = focus_target(d, window_id)
+            win, _, bounds = focus_target(d, window_id, req.get("allowedPids"))
             if not bounds:
                 raise RuntimeError("Could not resolve the requested AI Workspace window bounds.")
             local_x = min(bounds["width"] - 1, max(0, int(bounds["width"] * xr)))
@@ -837,6 +961,10 @@ def pointer_action(req):
             x = bounds["x"] + local_x
             y = bounds["y"] + local_y
         else:
+            if req.get("allowedPids") is not None:
+                raise RuntimeError(
+                    "RepoTunnel blocked app-session pointer control without an owned window."
+                )
             x = max(0, min(width - 1, int(width * xr)))
             y = max(0, min(height - 1, int(height * yr)))
             d.screen().root.warp_pointer(x, y)
@@ -892,8 +1020,8 @@ def keycode(d, name):
 def shortcut(req):
     d = open_display()
     try:
-        if req.get("windowId"):
-            focus_target(d, req.get("windowId"))
+        if req.get("windowId") or req.get("allowedPids") is not None:
+            focus_target(d, req.get("windowId"), req.get("allowedPids"))
         mods, key = parse_shortcut(req.get("shortcut"))
         codes = []
         for mod in mods:
@@ -917,8 +1045,8 @@ def type_text(req):
         raise RuntimeError("AI Workspace typing is limited to 32,768 characters per action. Send larger documents in additional type actions; total document length is not limited.")
     d = open_display()
     try:
-        if req.get("windowId"):
-            focus_target(d, req.get("windowId"))
+        if req.get("windowId") or req.get("allowedPids") is not None:
+            focus_target(d, req.get("windowId"), req.get("allowedPids"))
         ensure_non_sensitive(d)
         shift_code = keycode(d, "Shift_L")
 
@@ -988,6 +1116,16 @@ def wait_step(req):
     if min_windows is not None and max_windows is not None and min_windows > max_windows:
         raise RuntimeError("AI Workspace wait window bounds are invalid.")
 
+    allowed_pids = None
+    if req.get("allowedPids") is not None:
+        allowed_pids = {
+            int(pid) for pid in req["allowedPids"]
+            if not isinstance(pid, bool) and str(pid).isdigit() and int(pid) > 0
+        }
+        if not allowed_pids:
+            raise RuntimeError(
+                "RepoTunnel refused an app-session wait without an allowed process."
+            )
     started = time.monotonic()
     if wait_ms:
         time.sleep(wait_ms / 1000.0)
@@ -1001,8 +1139,21 @@ def wait_step(req):
         deadline = started + (timeout_ms / 1000.0)
         while True:
             try:
-                title = active_title(d)
-                count = len(client_windows(d))
+                windows = client_windows(d)
+                if allowed_pids is not None:
+                    windows = [
+                        (win, name) for win, name in windows
+                        if window_info(d, win, name).get("pid") in allowed_pids
+                    ]
+                    active = active_window(d)
+                    title = next(
+                        (name for win, name in windows
+                         if active is not None and int(win.id) == int(active.id)),
+                        "",
+                    )
+                else:
+                    title = active_title(d)
+                count = len(windows)
                 matched = True
                 if title_contains and title_contains not in title.lower():
                     matched = False
@@ -1084,6 +1235,7 @@ def sequence(req):
             raise RuntimeError(
                 f"SEQUENCE_STEP_{index + 1}: RepoTunnel blocked a window outside this AI's app session."
             )
+        item["allowedPids"] = req.get("allowedPids")
         result = wait_step(item) if op == "wait" else main(item)
         results.append({"index": index, "operation": op, "result": result})
 
@@ -1099,20 +1251,32 @@ def main(req):
     if op == "hostHide":
         return hide_host(req)
     if op == "ping":
+        scoped = req.get("allowedPids") is not None
         allowed_pids = {
             int(pid) for pid in (req.get("allowedPids") or [])
-            if isinstance(pid, int) or str(pid).isdigit()
+            if not isinstance(pid, bool) and str(pid).isdigit() and int(pid) > 0
         }
         d = open_display()
         try:
             width, height = root_size(d)
             windows = client_windows(d)
-            if allowed_pids:
+            if scoped:
                 windows = [
                     (win, title) for win, title in windows
                     if window_info(d, win, title).get("pid") in allowed_pids
                 ]
-            return {"width": width, "height": height, "windowCount": len(windows), "activeTitle": active_title(d)}
+                active = active_window(d)
+                active_title_owned = next(
+                    (title for win, title in windows
+                     if active is not None and int(win.id) == int(active.id)),
+                    "",
+                )
+            else:
+                active_title_owned = active_title(d)
+            return {
+                "width": width, "height": height,
+                "windowCount": len(windows), "activeTitle": active_title_owned,
+            }
         finally:
             d.close()
     if op == "frame":
@@ -1123,6 +1287,7 @@ def main(req):
         return semantic_click_element(
             req.get("elementId"),
             req.get("allowedWindowIds"),
+            req.get("allowedPids"),
         )
     if op == "semanticType":
         return semantic_type_element(
@@ -1130,12 +1295,16 @@ def main(req):
             req.get("text") or "",
             bool(req.get("clearFirst", False)),
             req.get("allowedWindowIds"),
+            req.get("allowedPids"),
         )
     if op == "semanticSequence":
         return semantic_sequence(
             req.get("steps"),
             req.get("allowedWindowIds"),
+            req.get("allowedPids"),
         )
+    if op == "fitOwnedWindows":
+        return fit_owned_windows(req)
     if op == "placeWindow":
         return place_window(req)
     if op == "activate":
@@ -1153,8 +1322,30 @@ def main(req):
     raise RuntimeError("Unsupported AI Workspace operation.")
 
 
+def serve_stream(source, sink, dispatch):
+    for raw_line in source:
+        line = raw_line.strip()
+        if not line:
+            continue
+        request_id = None
+        try:
+            envelope = json.loads(line)
+            request_id = envelope.get("id")
+            request = envelope.get("request")
+            if not isinstance(request, dict):
+                raise RuntimeError("Persistent helper request must contain an object request.")
+            payload = {"id": request_id, "ok": True, "result": dispatch(request)}
+        except Exception as exc:
+            payload = {"id": request_id, "ok": False, "error": str(exc)}
+        sink.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        sink.flush()
+
+
 if __name__ == "__main__":
-    try:
-        reply(main(json.loads(sys.stdin.read() or "{}")))
-    except Exception as exc:
-        reply(error=exc)
+    if "--serve" in sys.argv[1:]:
+        serve_stream(sys.stdin, sys.stdout, main)
+    else:
+        try:
+            reply(main(json.loads(sys.stdin.read() or "{}")))
+        except Exception as exc:
+            reply(error=exc)

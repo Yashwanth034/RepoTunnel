@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.2 - 2026-10-28
+
+RepoTunnel v0.4.2 is a reliability and security-focused update across the existing desktop platforms. It continues the RepoTunnel 0.4.x release line without requiring users to reset saved project permissions or reconfigure their existing connections.
+
+### Highlights
+
+- Fixed the managed-process supervisor startup handshake: bounded initialization, resilient helper cleanup, and private, size-capped diagnostics for failures that previously appeared as generic timeouts. Verified on the updated installed Linux build using a real managed-process smoke test.
+- Improved large-project inspection, search and continuation with resumable paged results, longer bounded cursor lifetimes, and more complete fail-closed sensitive-file scanning instead of arbitrary low scanning limits.
+- Expanded guarded AI Workspace, native application selection, browser automation transactions, project continuity, Team Mode direct messaging and remote-machine approval/review workflows.
+- Added guarded official Secure Tunnel client provisioning where supported, preserving the existing Direct HTTPS path; unsupported platforms and unsigned runtime sources remain explicitly blocked.
+- Added human-controlled OpenAI Secure Tunnel Pause/Resume, with optional Linux system-keyring persistence of its tunnel ID and runtime key. On restart, a remembered tunnel remains paused until explicitly resumed. Disconnect removes its saved credential. Direct HTTPS and the public MCP endpoint are unchanged.
+- Added Impeccable to Website Intelligence's source-reviewed design skill catalog and anti-slop review guidance without silently installing or executing third-party tools.
+- Improved process, Git, project, accessibility, video and browser UI reliability with more focused automated coverage.
+- Updated the Rust TLS trust chain dependencies to address the current RustSec advisories and refreshed Vite/Vitest/Undici development dependencies to address npm security advisories.
+- Hardened publication so an explicit immutable matching version tag is required; manual workflow dispatch cannot publish and the workflow cannot force-move or delete release tags.
+- Local release-candidate validation: 1,440 Rust library tests passed (18 intentionally ignored), 258 frontend tests passed, 43 browser tests passed, TypeScript, Clippy, formatting, npm audit and RustSec audit passed. The RustSec audit reported seven non-blocking warnings. Platform-specific GitHub CI, signed package acceptance and real Linux keyring save/restore acceptance are independently required before public publication.
+
 ## 0.4.1 - 2026-10-05
 
 RepoTunnel v0.4.1 is the first public 0.4.x release. It combines the capability work completed during the unpublished v0.4.0 validation build with the final Phone reliability fixes verified before release.

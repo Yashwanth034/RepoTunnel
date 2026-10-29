@@ -8,6 +8,26 @@ export async function listDirectory(
   return invoke<DirectoryEntry[]>("list_directory", { workspaceId, relativePath });
 }
 
+export type DirectoryPage = {
+  entries: DirectoryEntry[];
+  nextCursor: string | null;
+  done: boolean;
+  truncated: boolean;
+  busy: boolean;
+  retryAfterMs: number | null;
+};
+
+export async function listDirectoryPage(
+  workspaceId: string,
+  relativePath = "",
+  cursor: string | null = null,
+  pageSize = 200,
+): Promise<DirectoryPage> {
+  return invoke<DirectoryPage>("list_directory_page", {
+    workspaceId, relativePath, cursor, pageSize,
+  });
+}
+
 export async function readFile(
   workspaceId: string,
   relativePath: string,

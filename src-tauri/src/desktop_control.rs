@@ -2,13 +2,19 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::PathBuf,
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
 };
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 use std::{
-    io::Write,
-    process::{Command, Stdio},
+    collections::HashMap,
+    io::{BufRead, BufReader, Write},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc,
+    },
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -35,6 +41,13 @@ const MAX_SEMANTIC_TOTAL_WAIT_MS: u64 = 10_000;
 const MAX_SEMANTIC_TYPE_BYTES: usize = 32_768;
 const MAX_SEMANTIC_SEQUENCE_TEXT_BYTES: usize = 131_072;
 static STORE_LOCK: Mutex<()> = Mutex::new(());
+static STORE_CACHE: OnceLock<Mutex<Option<PermissionStore>>> = OnceLock::new();
+#[cfg(all(not(windows), not(target_os = "macos")))]
+static DESKTOP_HELPER_RESTART_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(all(not(windows), not(target_os = "macos")))]
+static DESKTOP_HELPER_RUNTIME: OnceLock<Mutex<Option<DesktopHelperRuntime>>> = OnceLock::new();
+#[cfg(all(not(windows), not(target_os = "macos")))]
+static DESKTOP_HELPER_RESOURCE_CACHE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +69,22 @@ struct HelperApplication {
     running: bool,
     accessibility: bool,
     window_count: usize,
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+type DesktopHelperReply = Result<Value, String>;
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+struct DesktopHelperClient {
+    stdin: Mutex<ChildStdin>,
+    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<DesktopHelperReply>>>>,
+    next_id: AtomicU64,
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+struct DesktopHelperRuntime {
+    child: Child,
+    client: Arc<DesktopHelperClient>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,7 +114,7 @@ pub(crate) struct DesktopScreenshot {
     pub(crate) data_base64: String,
 }
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PermissionStore {
     #[serde(default)]
@@ -119,6 +148,53 @@ fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Could not resolve desktop-control settings: {error}"))
 }
 
+fn store_cache() -> &'static Mutex<Option<PermissionStore>> {
+    STORE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn load_store_cached_unlocked<F>(loader: F) -> Result<PermissionStore, String>
+where
+    F: FnOnce() -> Result<PermissionStore, String>,
+{
+    if let Some(store) = store_cache()
+        .lock()
+        .map_err(|_| "Desktop-control settings cache is unavailable.".to_string())?
+        .as_ref()
+        .cloned()
+    {
+        return Ok(store);
+    }
+    let store = loader()?;
+    *store_cache()
+        .lock()
+        .map_err(|_| "Desktop-control settings cache is unavailable.".to_string())? =
+        Some(store.clone());
+    Ok(store)
+}
+
+fn replace_store_cache(store: &PermissionStore) -> Result<(), String> {
+    *store_cache()
+        .lock()
+        .map_err(|_| "Desktop-control settings cache is unavailable.".to_string())? =
+        Some(store.clone());
+    Ok(())
+}
+
+fn persist_store_and_update_cache<F>(store: &PermissionStore, persist: F) -> Result<(), String>
+where
+    F: FnOnce(&PermissionStore) -> Result<(), String>,
+{
+    persist(store)?;
+    replace_store_cache(store)
+}
+
+#[cfg(test)]
+fn clear_permission_store_cache_for_tests() {
+    if let Ok(mut cache) = store_cache().lock() {
+        *cache = None;
+    }
+}
+
 fn load_store_unlocked(app: &AppHandle) -> Result<PermissionStore, String> {
     let path = store_path(app)?;
     if !path.exists() {
@@ -147,7 +223,27 @@ fn save_store_unlocked(app: &AppHandle, store: &PermissionStore) -> Result<(), S
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
+fn helper_resource_cache() -> &'static Mutex<Option<PathBuf>> {
+    DESKTOP_HELPER_RESOURCE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn helper_runtime() -> &'static Mutex<Option<DesktopHelperRuntime>> {
+    DESKTOP_HELPER_RUNTIME.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn helper_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = helper_resource_cache()
+        .lock()
+        .map_err(|_| "Desktop helper resource cache is unavailable.".to_string())?
+        .as_ref()
+        .filter(|path| path.is_file())
+        .cloned()
+    {
+        return Ok(path);
+    }
+
     let path = app
         .path()
         .resolve(HELPER_RELATIVE, BaseDirectory::AppData)
@@ -163,6 +259,10 @@ fn helper_path(app: &AppHandle) -> Result<PathBuf, String> {
         fs::write(&path, HELPER)
             .map_err(|error| format!("Could not install RepoTunnel desktop helper: {error}"))?;
     }
+    *helper_resource_cache()
+        .lock()
+        .map_err(|_| "Desktop helper resource cache is unavailable.".to_string())? =
+        Some(path.clone());
     Ok(path)
 }
 
@@ -176,53 +276,314 @@ fn python_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-fn run_helper(app: &AppHandle, request: Value) -> Result<Value, String> {
+impl DesktopHelperClient {
+    fn new(stdin: ChildStdin, stdout: ChildStdout) -> Arc<Self> {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let client = Arc::new(Self {
+            stdin: Mutex::new(stdin),
+            pending: pending.clone(),
+            next_id: AtomicU64::new(1),
+        });
+        start_helper_reader(stdout, pending);
+        client
+    }
+
+    fn request(&self, operation: &str, request: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = mpsc::channel();
+        self.pending
+            .lock()
+            .map_err(|_| "Persistent desktop helper response registry is unavailable.".to_string())?
+            .insert(id, sender);
+
+        let mut encoded = serde_json::to_vec(&json!({
+            "id": id,
+            "request": request,
+        }))
+        .map_err(|error| format!("Could not encode persistent desktop helper request: {error}"))?;
+        encoded.push(b'\n');
+
+        let write_result = (|| {
+            let mut stdin = self
+                .stdin
+                .lock()
+                .map_err(|_| "Persistent desktop helper input is unavailable.".to_string())?;
+            stdin.write_all(&encoded).map_err(|error| {
+                format!("Could not write to persistent desktop helper: {error}")
+            })?;
+            stdin.flush().map_err(|error| {
+                format!("Could not flush persistent desktop helper request: {error}")
+            })
+        })();
+        if let Err(error) = write_result {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.remove(&id);
+            }
+            return Err(error);
+        }
+
+        match receiver.recv_timeout(Duration::from_secs(30)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&id);
+                }
+                Err(format!(
+                    "Persistent desktop helper timed out during '{operation}'."
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.remove(&id);
+                }
+                Err("Persistent desktop helper response channel closed.".to_string())
+            }
+        }
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn start_helper_reader(
+    stdout: ChildStdout,
+    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<DesktopHelperReply>>>>,
+) {
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => break,
+            };
+            let value = match serde_json::from_str::<Value>(&line) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let Some(id) = value.get("id").and_then(Value::as_u64) else {
+                continue;
+            };
+            let reply = if value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                Ok(value.get("result").cloned().unwrap_or_else(|| json!({})))
+            } else {
+                Err(value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Persistent desktop helper operation failed.")
+                    .to_string())
+            };
+            let sender = pending
+                .lock()
+                .ok()
+                .and_then(|mut entries| entries.remove(&id));
+            if let Some(sender) = sender {
+                let _ = sender.send(reply);
+            }
+        }
+
+        let remaining = pending
+            .lock()
+            .map(|mut entries| {
+                entries
+                    .drain()
+                    .map(|(_, sender)| sender)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for sender in remaining {
+            let _ = sender.send(Err(
+                "Persistent desktop helper exited before completing the request.".to_string(),
+            ));
+        }
+    });
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn stop_helper_runtime(mut runtime: DesktopHelperRuntime) {
+    let _ = runtime.child.kill();
+    let _ = runtime.child.wait();
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn start_persistent_helper(app: &AppHandle) -> Result<DesktopHelperRuntime, String> {
     let helper = helper_path(app)?;
     let mut child = Command::new(python_path()?)
         .arg(helper)
+        .arg("--serve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| format!("Could not start RepoTunnel desktop helper: {error}"))?;
-    let body = serde_json::to_vec(&request)
-        .map_err(|error| format!("Could not encode desktop-control request: {error}"))?;
-    child
+        .map_err(|error| {
+            format!("Could not start persistent RepoTunnel desktop helper: {error}")
+        })?;
+    let stdin = child
         .stdin
-        .as_mut()
-        .ok_or_else(|| "Desktop helper input is unavailable.".to_string())?
-        .write_all(&body)
-        .map_err(|error| format!("Could not send desktop-control request: {error}"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("Desktop helper did not complete: {error}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        .take()
+        .ok_or_else(|| "Persistent desktop helper stdin is unavailable.".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Persistent desktop helper stdout is unavailable.".to_string())?;
+    let client = DesktopHelperClient::new(stdin, stdout);
+    if let Err(error) = client.request("ping", json!({"operation": "ping"})) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "Persistent RepoTunnel desktop helper did not become ready: {error}"
+        ));
     }
-    let response: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("Desktop helper returned invalid JSON: {error}"))?;
-    if !response.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("Desktop control failed.")
-            .to_string());
+    Ok(DesktopHelperRuntime { child, client })
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn helper_operation_safe_to_retry(operation: &str) -> bool {
+    matches!(operation, "ping" | "list" | "inspect" | "screenshot")
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn helper_transport_error(error: &str) -> bool {
+    [
+        "Persistent desktop helper response registry is unavailable.",
+        "Persistent desktop helper input is unavailable.",
+        "Could not write to persistent desktop helper:",
+        "Could not flush persistent desktop helper request:",
+        "Persistent desktop helper timed out during",
+        "Persistent desktop helper response channel closed.",
+        "Persistent desktop helper exited before completing the request.",
+    ]
+    .iter()
+    .any(|prefix| error.starts_with(prefix))
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn ensure_runtime_helper(app: &AppHandle) -> Result<Arc<DesktopHelperClient>, String> {
+    {
+        let mut guard = helper_runtime()
+            .lock()
+            .map_err(|_| "Desktop helper runtime state is unavailable.".to_string())?;
+        if let Some(runtime) = guard.as_mut() {
+            if runtime
+                .child
+                .try_wait()
+                .map_err(|error| format!("Could not read desktop helper process state: {error}"))?
+                .is_none()
+            {
+                return Ok(runtime.client.clone());
+            }
+        }
     }
-    Ok(response.get("result").cloned().unwrap_or_else(|| json!({})))
+
+    let _restart_guard = DESKTOP_HELPER_RESTART_LOCK
+        .lock()
+        .map_err(|_| "Desktop helper restart coordination is unavailable.".to_string())?;
+    let old = {
+        let mut guard = helper_runtime()
+            .lock()
+            .map_err(|_| "Desktop helper runtime state is unavailable.".to_string())?;
+        if let Some(runtime) = guard.as_mut() {
+            if runtime
+                .child
+                .try_wait()
+                .map_err(|error| format!("Could not read desktop helper process state: {error}"))?
+                .is_none()
+            {
+                return Ok(runtime.client.clone());
+            }
+        }
+        guard.take()
+    };
+    if let Some(old) = old {
+        stop_helper_runtime(old);
+    }
+    let runtime = start_persistent_helper(app)?;
+    let client = runtime.client.clone();
+    *helper_runtime()
+        .lock()
+        .map_err(|_| "Desktop helper runtime state is unavailable.".to_string())? = Some(runtime);
+    Ok(client)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn restart_runtime_helper(
+    app: &AppHandle,
+    expected_client: &Arc<DesktopHelperClient>,
+) -> Result<Arc<DesktopHelperClient>, String> {
+    let _restart_guard = DESKTOP_HELPER_RESTART_LOCK
+        .lock()
+        .map_err(|_| "Desktop helper restart coordination is unavailable.".to_string())?;
+    let old = {
+        let mut guard = helper_runtime()
+            .lock()
+            .map_err(|_| "Desktop helper runtime state is unavailable.".to_string())?;
+        if let Some(runtime) = guard.as_mut() {
+            if !Arc::ptr_eq(&runtime.client, expected_client)
+                && runtime
+                    .child
+                    .try_wait()
+                    .map_err(|error| {
+                        format!("Could not read desktop helper process state: {error}")
+                    })?
+                    .is_none()
+            {
+                return Ok(runtime.client.clone());
+            }
+        }
+        guard.take()
+    };
+    if let Some(old) = old {
+        stop_helper_runtime(old);
+    }
+    let runtime = start_persistent_helper(app)?;
+    let client = runtime.client.clone();
+    *helper_runtime()
+        .lock()
+        .map_err(|_| "Desktop helper runtime state is unavailable.".to_string())? = Some(runtime);
+    Ok(client)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn run_helper(app: &AppHandle, request: Value) -> Result<Value, String> {
+    let operation = request
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let client = ensure_runtime_helper(app)?;
+    match client.request(&operation, request.clone()) {
+        Ok(value) => Ok(value),
+        Err(error) if helper_transport_error(&error) => {
+            let replacement = restart_runtime_helper(app, &client).map_err(|restart_error| {
+                format!("{error} Desktop helper restart also failed: {restart_error}")
+            })?;
+            if helper_operation_safe_to_retry(&operation) {
+                replacement.request(&operation, request)
+            } else {
+                Err(format!(
+                    "{error} RepoTunnel restarted the desktop helper but did not replay the '{operation}' mutation because its completion state is ambiguous."
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
 fn run_helper_observation(app: &AppHandle, request: Value) -> Result<Value, String> {
-    match run_helper(app, request.clone()) {
-        Ok(value) => Ok(value),
-        Err(first_error) => {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            run_helper(app, request).map_err(|second_error| {
-                format!("{first_error} Desktop observation retry also failed: {second_error}")
-            })
-        }
+    run_helper(app, request)
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub(crate) fn shutdown_helper() {
+    let runtime = helper_runtime()
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take());
+    if let Some(runtime) = runtime {
+        stop_helper_runtime(runtime);
     }
 }
+
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn shutdown_helper() {}
 
 fn discovered(app: &AppHandle) -> Result<Vec<HelperApplication>, String> {
     #[cfg(windows)]
@@ -280,7 +641,7 @@ pub(crate) fn list(
         let _guard = STORE_LOCK
             .lock()
             .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
-        load_store_unlocked(app)?.enabled()
+        load_store_cached_unlocked(|| load_store_unlocked(app))?.enabled()
     };
     let mut applications = discovered(app)?
         .into_iter()
@@ -313,7 +674,7 @@ pub(crate) fn is_enabled(app: &AppHandle, _workspace_id: &str) -> Result<bool, S
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
-    Ok(load_store_unlocked(app)?.enabled())
+    Ok(load_store_cached_unlocked(|| load_store_unlocked(app))?.enabled())
 }
 
 pub(crate) fn set_global_enabled(
@@ -325,10 +686,10 @@ pub(crate) fn set_global_enabled(
         let _guard = STORE_LOCK
             .lock()
             .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
-        let mut store = load_store_unlocked(app)?;
+        let mut store = load_store_cached_unlocked(|| load_store_unlocked(app))?;
         store.global_enabled = enabled;
         store.workspaces.clear();
-        save_store_unlocked(app, &store)?;
+        persist_store_and_update_cache(&store, |value| save_store_unlocked(app, value))?;
     }
     hardening::log_event(
         app,
@@ -350,7 +711,7 @@ fn require_enabled(
     let _guard = STORE_LOCK
         .lock()
         .map_err(|_| "Desktop-control settings are unavailable.".to_string())?;
-    if !load_store_unlocked(app)?.enabled() {
+    if !load_store_cached_unlocked(|| load_store_unlocked(app))?.enabled() {
         return Err("Desktop control is off. Enable Desktop locally in Commands → Applications & links first.".to_string());
     }
     Ok(())
@@ -998,25 +1359,213 @@ pub(crate) fn forget_workspace(app: &AppHandle, _workspace_id: &str) {
     let Ok(_guard) = STORE_LOCK.lock() else {
         return;
     };
-    let Ok(mut store) = load_store_unlocked(app) else {
+    let Ok(mut store) = load_store_cached_unlocked(|| load_store_unlocked(app)) else {
         return;
     };
     if !store.workspaces.is_empty() {
         store.migrate_to_global();
-        let _ = save_store_unlocked(app, &store);
+        let _ = persist_store_and_update_cache(&store, |value| save_store_unlocked(app, value));
     }
+}
+
+// A signed native Accessibility/UIA window ID is stable only while the
+// corresponding window identity remains unchanged. Never switch the target
+// to the first window when a requested ID disappears or gets reordered.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn select_native_signed_window(
+    window_ids: &[String],
+    requested_window_id: Option<&str>,
+) -> Result<usize, String> {
+    if window_ids.is_empty() {
+        return Err("No native application window is available.".into());
+    }
+    match requested_window_id {
+        Some(id) if !id.is_empty() => window_ids
+            .iter()
+            .position(|candidate| candidate == id)
+            .ok_or_else(|| {
+                "The native window identity is stale or does not belong to this verified app."
+                    .to_string()
+            }),
+        Some(_) => Err("A native window identity cannot be empty.".into()),
+        None => Ok(0),
+    }
+}
+
+// Window-list indices are not stable OS identities. If two top-level
+// windows have identical intrinsic accessibility metadata, the index-derived
+// signed IDs may swap targets after a reorder. Refuse activation of that
+// ambiguous target until native handle/window-number binding is available.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn select_native_unambiguous_window(
+    window_ids: &[String],
+    intrinsic_signatures: &[String],
+    requested_window_id: Option<&str>,
+) -> Result<usize, String> {
+    if window_ids.len() != intrinsic_signatures.len()
+        || intrinsic_signatures.iter().any(String::is_empty)
+    {
+        return Err("Native window ownership metadata is incomplete.".into());
+    }
+    let index = select_native_signed_window(window_ids, requested_window_id)?;
+    validate_native_unique_window_identity(intrinsic_signatures, index)?;
+    Ok(index)
+}
+
+// Click/type elements are rooted under the same indexed native windows as
+// activation. Reuse this guard before traversing a signed semantic element
+// path so indistinguishable windows cannot swap target controls after reorder.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn validate_native_unique_window_identity(
+    intrinsic_signatures: &[String],
+    selected_index: usize,
+) -> Result<(), String> {
+    let Some(signature) = intrinsic_signatures.get(selected_index) else {
+        return Err("Requested native application window is no longer present.".into());
+    };
+    if signature.is_empty()
+        || intrinsic_signatures
+            .iter()
+            .filter(|other| *other == signature)
+            .take(2)
+            .count()
+            != 1
+    {
+        return Err(
+            "Native application windows share an ambiguous accessibility identity; refusing to substitute a different window."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+// Semantic tokens are bound to a specific top-level native window, not just
+// a child list index. Verify both unique ownership and the saved root token
+// immediately before any native click/type traversal.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn validate_native_semantic_window_owner(
+    intrinsic_signatures: &[String],
+    selected_index: usize,
+    expected_root_identity: &str,
+) -> Result<(), String> {
+    validate_native_unique_window_identity(intrinsic_signatures, selected_index)?;
+    if expected_root_identity.is_empty()
+        || intrinsic_signatures[selected_index] != expected_root_identity
+    {
+        return Err(
+            "Native semantic element's owning application window changed since inspection.".into(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    // These two cache tests mutate a shared global cache. Serialize their
+    // fixtures so a parallel full Rust suite cannot clear another fixture
+    // between its seed and assertion.
+    static PERMISSION_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use super::{
-        desktop_document_identity, prepare_semantic_sequence, protected_application,
-        semantic_backend_id, semantic_drafts_from_inspection, DesktopSemanticSequenceStep,
-        PermissionStore, GLOBAL_PERMISSION,
+        clear_permission_store_cache_for_tests, desktop_document_identity,
+        load_store_cached_unlocked, persist_store_and_update_cache, prepare_semantic_sequence,
+        protected_application, replace_store_cache, semantic_backend_id,
+        semantic_drafts_from_inspection, DesktopSemanticSequenceStep, PermissionStore,
+        GLOBAL_PERMISSION, STORE_LOCK,
     };
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    use super::{helper_operation_safe_to_retry, helper_transport_error, DesktopHelperClient};
     use crate::semantic::{self, SemanticNodeDraft, SemanticSnapshotInput};
+
+    #[test]
+    fn native_signed_window_activation_never_substitutes_another_window() {
+        let windows = vec![
+            "uia-window-first".to_string(),
+            "uia-window-second".to_string(),
+        ];
+        let select = super::select_native_signed_window;
+        assert_eq!(select(&windows, None).unwrap(), 0);
+        assert_eq!(select(&windows, Some("uia-window-second")).unwrap(), 1);
+        assert_eq!(select(&windows, Some("uia-window-first")).unwrap(), 0);
+        assert!(select(&windows, Some("uia-window-stale")).is_err());
+        assert!(select(&windows, Some("")).is_err());
+        assert!(select(&[], None).is_err());
+        // A window reorder without a freshly signed ID never permits the
+        // caller to choose a different target by the old index.
+        assert!(select(&["uia-window-replaced".into()], Some("uia-window-first")).is_err());
+    }
+
+    #[test]
+    fn native_window_activation_refuses_identical_intrinsic_identities_even_with_distinct_signed_ids(
+    ) {
+        let indexed = vec![
+            "uia-window-w0-signed".to_string(),
+            "uia-window-w1-signed".to_string(),
+        ];
+        let select = super::select_native_unambiguous_window;
+        assert_eq!(
+            select(
+                &indexed,
+                &["editor-a".into(), "editor-b".into()],
+                Some(&indexed[1])
+            )
+            .unwrap(),
+            1
+        );
+        assert!(
+            select(
+                &indexed,
+                &["same-title-role-id".into(), "same-title-role-id".into()],
+                Some(&indexed[0])
+            )
+            .is_err(),
+            "identical native windows may reorder while preserving an index-derived signature"
+        );
+        assert!(
+            select(
+                &indexed,
+                &["same-title-role-id".into(), "same-title-role-id".into()],
+                Some(&indexed[1])
+            )
+            .is_err(),
+            "the second indistinguishable window is equally unsafe to activate"
+        );
+        assert!(select(&indexed, &["only-one".into()], None).is_err());
+        assert!(select(&indexed, &["".into(), "known".into()], None).is_err());
+        assert!(select(
+            &indexed,
+            &["editor-a".into(), "editor-b".into()],
+            Some("uia-window-stale")
+        )
+        .is_err());
+        let semantic_guard = super::validate_native_unique_window_identity;
+        assert!(semantic_guard(&["editor-a".into(), "editor-b".into()], 1).is_ok());
+        assert!(semantic_guard(&["same".into(), "same".into()], 0).is_err());
+        assert!(semantic_guard(&["same".into(), "same".into()], 1).is_err());
+        assert!(semantic_guard(&["other".into()], 2).is_err());
+        assert!(semantic_guard(&["".into()], 0).is_err());
+    }
+
+    #[test]
+    fn native_semantic_control_id_requires_same_current_window_even_after_reordering() {
+        let guard = super::validate_native_semantic_window_owner;
+        let original = ["root-one".into(), "root-two".into()];
+        assert!(guard(&original, 0, "root-one").is_ok());
+        assert!(guard(&original, 1, "root-two").is_ok());
+        let reordered = ["root-two".into(), "root-one".into()];
+        assert!(
+            guard(&reordered, 0, "root-one").is_err(),
+            "old w0 child token must not act on new w0 after a window reorder"
+        );
+        assert!(
+            guard(&reordered, 1, "root-two").is_err(),
+            "old w1 child token must not act on new w1 after a window reorder"
+        );
+        assert!(guard(&["duplicate".into(), "duplicate".into()], 0, "duplicate").is_err());
+        assert!(guard(&original, 8, "root-one").is_err());
+        assert!(guard(&original, 0, "").is_err());
+    }
 
     #[test]
     fn normalizes_at_spi_elements_into_shared_semantic_drafts() {
@@ -1226,6 +1775,132 @@ mod tests {
         )
         .expect_err("overlong wait must be rejected");
         assert!(long_wait.contains("exceeds 2000 ms"));
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    #[test]
+    fn persistent_helper_client_serves_multiple_requests_over_one_child() {
+        use std::process::{Command, Stdio};
+
+        let script = r#"import json,sys
+for line in sys.stdin:
+    envelope=json.loads(line)
+    request=envelope.get('request') or {}
+    print(json.dumps({'id':envelope.get('id'),'ok':True,'result':{'value':request.get('value')}}), flush=True)
+"#;
+        let mut child = Command::new(super::python_path().expect("python3"))
+            .args(["-u", "-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test helper");
+        let stdin = child.stdin.take().expect("test helper stdin");
+        let stdout = child.stdout.take().expect("test helper stdout");
+        let client = DesktopHelperClient::new(stdin, stdout);
+        let pid = child.id();
+
+        let first = client
+            .request("ping", json!({"value": 1}))
+            .expect("first request");
+        let second = client
+            .request("ping", json!({"value": 2}))
+            .expect("second request");
+
+        assert_eq!(
+            first.get("value").and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(
+            second.get("value").and_then(serde_json::Value::as_i64),
+            Some(2)
+        );
+        assert_eq!(child.id(), pid);
+        assert!(child.try_wait().expect("helper status").is_none());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    #[test]
+    fn persistent_helper_retries_only_read_only_observations() {
+        for operation in ["ping", "list", "inspect", "screenshot"] {
+            assert!(helper_operation_safe_to_retry(operation), "{operation}");
+        }
+        for operation in [
+            "activate",
+            "click",
+            "type",
+            "key",
+            "scroll",
+            "semanticSequence",
+        ] {
+            assert!(!helper_operation_safe_to_retry(operation), "{operation}");
+        }
+    }
+
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    #[test]
+    fn persistent_helper_transport_errors_are_distinct_from_operation_errors() {
+        assert!(helper_transport_error(
+            "Persistent desktop helper response channel closed."
+        ));
+        assert!(helper_transport_error(
+            "Persistent desktop helper timed out during 'inspect'."
+        ));
+        assert!(!helper_transport_error(
+            "Desktop semantic typing is blocked for sensitive fields."
+        ));
+    }
+
+    #[test]
+    fn permission_store_cache_loads_source_once_and_returns_clones() {
+        let _guard = PERMISSION_CACHE_TEST_LOCK.lock().unwrap();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Match production: permission-cache inspection and mutation are
+        // serialized under STORE_LOCK. Parallel tests must not clear each
+        // other's global cache between their read/write assertions.
+        let _guard = STORE_LOCK.lock().expect("exclusive permission-store test");
+        static LOADS: AtomicUsize = AtomicUsize::new(0);
+        clear_permission_store_cache_for_tests();
+        LOADS.store(0, Ordering::SeqCst);
+
+        let first = load_store_cached_unlocked(|| {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            Ok(PermissionStore::default())
+        })
+        .expect("first cache load");
+        let second = load_store_cached_unlocked(|| {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+            Err("cache miss should not happen".to_string())
+        })
+        .expect("second cache load");
+
+        assert!(!first.enabled());
+        assert!(!second.enabled());
+        assert_eq!(LOADS.load(Ordering::SeqCst), 1);
+        clear_permission_store_cache_for_tests();
+    }
+
+    #[test]
+    fn failed_permission_save_does_not_publish_new_cache_state() {
+        let _guard = PERMISSION_CACHE_TEST_LOCK.lock().unwrap();
+        clear_permission_store_cache_for_tests();
+        let old = PermissionStore::default();
+        replace_store_cache(&old).expect("seed cache");
+        let new = PermissionStore {
+            global_enabled: true,
+            ..PermissionStore::default()
+        };
+
+        let error = persist_store_and_update_cache(&new, |_| Err("disk write failed".to_string()))
+            .expect_err("save must fail");
+        assert_eq!(error, "disk write failed");
+        let cached = load_store_cached_unlocked(|| Err("must remain cached".to_string()))
+            .expect("cached old state");
+        assert!(!cached.enabled());
+        clear_permission_store_cache_for_tests();
     }
 
     #[test]

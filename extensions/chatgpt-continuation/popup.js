@@ -4,11 +4,18 @@ const refreshButton = document.getElementById('refreshBridge');
 const urlInput = document.getElementById('targetUrl');
 const targetList = document.getElementById('targetList');
 const targetCount = document.getElementById('targetCount');
+const manualUrlInput = document.getElementById('manualUrl');
+const manualMessageInput = document.getElementById('manualMessage');
+const addManualTargetButton = document.getElementById('addManualTarget');
+const cancelManualEditButton = document.getElementById('cancelManualEdit');
+const manualTargetList = document.getElementById('manualTargetList');
+const manualTargetCount = document.getElementById('manualTargetCount');
 const bridgeState = document.getElementById('bridgeState');
 const status = document.getElementById('status');
 const version = document.getElementById('version');
 
-let state = { targets: [], connected: false, version: '' };
+let state = { targets: [], manualTargets: [], connected: false, version: '' };
+let editingManualTargetId = null;
 
 function setStatus(message, kind = '') {
   status.textContent = message;
@@ -75,9 +82,63 @@ function renderTarget(target, index) {
   return row;
 }
 
+function renderManualTarget(target) {
+  const row = document.createElement('div');
+  row.className = target.paused ? 'target paused' : 'target';
+  row.dataset.targetId = target.id;
+
+  const info = document.createElement('div');
+  info.className = 'target-info';
+
+  const url = document.createElement('strong');
+  url.textContent = shortUrl(target.url);
+  url.title = target.url;
+
+  const message = document.createElement('small');
+  message.className = 'manual-message';
+  message.textContent = target.message;
+  message.title = target.message;
+  info.append(url, message);
+
+  const lastStatus = document.createElement('small');
+  lastStatus.className = `target-status ${target.paused ? 'waiting' : target.lastStatusKind || ''}`.trim();
+  lastStatus.textContent = target.paused ? 'Paused — automatic messages disabled.' : target.lastStatus || '';
+  lastStatus.title = lastStatus.textContent;
+  if (lastStatus.textContent) info.append(lastStatus);
+
+  const actions = document.createElement('div');
+  actions.className = 'target-actions';
+
+  const edit = document.createElement('button');
+  edit.type = 'button';
+  edit.className = 'edit';
+  edit.dataset.action = 'manual-edit';
+  edit.textContent = 'Edit';
+
+  const pause = document.createElement('button');
+  pause.type = 'button';
+  pause.className = 'toggle-paused';
+  pause.dataset.action = 'manual-toggle-pause';
+  pause.textContent = target.paused ? 'Resume' : 'Pause';
+  pause.setAttribute('aria-label', target.paused ? 'Resume automatic messages' : 'Pause automatic messages');
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'remove';
+  remove.dataset.action = 'manual-remove';
+  remove.textContent = 'Remove';
+
+  actions.append(edit, pause, remove);
+  row.append(info, actions);
+  return row;
+}
+
+
 function render() {
   targetList.replaceChildren();
+  manualTargetList.replaceChildren();
   targetCount.textContent = `${state.targets.length}/5`;
+  manualTargetCount.textContent = String(state.manualTargets.length);
   version.textContent = state.version ? `v${state.version}` : '';
 
   if (state.targets.length === 0) {
@@ -99,6 +160,15 @@ function render() {
   } else {
     state.targets.forEach((target, index) => targetList.append(renderTarget(target, index)));
   }
+
+  if (state.manualTargets.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'empty';
+    empty.textContent = 'No default-message chats saved.';
+    manualTargetList.append(empty);
+  } else {
+    state.manualTargets.forEach((target) => manualTargetList.append(renderManualTarget(target)));
+  }
 }
 
 async function refreshState() {
@@ -118,6 +188,44 @@ async function addTarget(url, title = '') {
   urlInput.value = '';
   await refreshState();
   setStatus(response.existed ? 'This chat was already saved.' : 'Chat saved and registered.', 'ok');
+}
+
+function resetManualEdit() {
+  editingManualTargetId = null;
+  manualUrlInput.value = '';
+  manualMessageInput.value = '';
+  addManualTargetButton.textContent = 'Save default-message chat';
+  cancelManualEditButton.hidden = true;
+}
+
+async function addManualTarget(url, message) {
+  const response = await chrome.runtime.sendMessage({
+    type: 'ADD_MANUAL_TARGET',
+    url: normalizeConversationUrl(url),
+    message: String(message || '').trim()
+  });
+  if (!response?.ok) throw new Error(response?.error || 'Could not save this default-message chat.');
+  resetManualEdit();
+  await refreshState();
+  setStatus(response.existed ? 'Default message updated.' : 'Default-message chat saved.', 'ok');
+}
+
+async function saveManualTarget(url, message) {
+  if (!editingManualTargetId) {
+    await addManualTarget(url, message);
+    return;
+  }
+
+  const response = await chrome.runtime.sendMessage({
+    type: 'EDIT_MANUAL_TARGET',
+    targetId: editingManualTargetId,
+    url: normalizeConversationUrl(url),
+    message: String(message || '').trim()
+  });
+  if (!response?.ok) throw new Error(response?.error || 'Could not update this default-message chat.');
+  resetManualEdit();
+  await refreshState();
+  setStatus('Default-message chat updated. The new settings apply to future safe deliveries.', 'ok');
 }
 
 async function currentTab() {
@@ -154,6 +262,24 @@ urlInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') addUrlButton.click();
 });
 
+addManualTargetButton.addEventListener('click', async () => {
+  addManualTargetButton.disabled = true;
+  try {
+    if (!manualUrlInput.value.trim()) throw new Error('Paste an exact ChatGPT conversation URL.');
+    if (!manualMessageInput.value.trim()) throw new Error('Enter the default message for this chat.');
+    await saveManualTarget(manualUrlInput.value, manualMessageInput.value);
+  } catch (error) {
+    setStatus(error?.message || String(error), 'err');
+  } finally {
+    addManualTargetButton.disabled = false;
+  }
+});
+
+cancelManualEditButton.addEventListener('click', () => {
+  resetManualEdit();
+  setStatus('Edit cancelled.');
+});
+
 targetList.addEventListener('click', async (event) => {
   const button = event.target.closest('button[data-action="remove"]');
   if (!button) return;
@@ -175,6 +301,58 @@ targetList.addEventListener('click', async (event) => {
     button.disabled = false;
   }
 });
+
+manualTargetList.addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-action]');
+  if (!button) return;
+  const row = button.closest('.target');
+  const targetId = row?.dataset.targetId;
+  const target = state.manualTargets.find((item) => item.id === targetId);
+  if (!targetId || !target) return;
+
+  if (button.dataset.action === 'manual-edit') {
+    editingManualTargetId = target.id;
+    manualUrlInput.value = target.url;
+    manualMessageInput.value = target.message;
+    addManualTargetButton.textContent = 'Save changes';
+    cancelManualEditButton.hidden = false;
+    manualUrlInput.focus();
+    setStatus('Editing saved chat. Changes will not send a message by themselves.');
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    if (button.dataset.action === 'manual-toggle-pause') {
+      const paused = !target.paused;
+      const response = await chrome.runtime.sendMessage({
+        type: 'SET_MANUAL_TARGET_PAUSED',
+        targetId,
+        paused
+      });
+      if (!response?.ok) throw new Error(response?.error || 'Could not update this chat.');
+      await refreshState();
+      setStatus(paused ? 'Automatic messages paused for this chat.' : 'Automatic messages resumed for this chat.', 'ok');
+      return;
+    }
+
+    if (button.dataset.action === 'manual-remove') {
+      const response = await chrome.runtime.sendMessage({
+        type: 'REMOVE_MANUAL_TARGET',
+        targetId
+      });
+      if (!response?.ok) throw new Error(response?.error || 'Could not remove this default-message chat.');
+      if (editingManualTargetId === targetId) resetManualEdit();
+      await refreshState();
+      setStatus('Default-message chat removed.', 'ok');
+    }
+  } catch (error) {
+    setStatus(error?.message || String(error), 'err');
+  } finally {
+    button.disabled = false;
+  }
+});
+
 
 refreshButton.addEventListener('click', async () => {
   refreshButton.disabled = true;

@@ -3,6 +3,7 @@ import RepoTunnelLogo from "./RepoTunnelLogo";
 export type AppView =
   | "overview"
   | "projects"
+  | "agents"
   | "team"
   | "models"
   | "editor"
@@ -12,6 +13,7 @@ export type AppView =
   | "connections"
   | "commands"
   | "phone"
+  | "remoteMachines"
   | "httpsSetup"
   | "video"
   | "system"
@@ -55,6 +57,7 @@ export type IconName =
 const navItems: Array<{ id: AppView; label: string; icon: IconName }> = [
   { id: "overview", label: "Home", icon: "home" },
   { id: "projects", label: "Projects", icon: "folder" },
+  { id: "agents", label: "Agents", icon: "team" },
   { id: "team", label: "GPT Agents", icon: "team" },
   { id: "video", label: "Video", icon: "video" },
   { id: "changes", label: "History", icon: "changes" },
@@ -63,7 +66,8 @@ const navItems: Array<{ id: AppView; label: string; icon: IconName }> = [
   { id: "connections", label: "Connect", icon: "link" },
   { id: "commands", label: "Commands", icon: "terminal" },
   { id: "phone", label: "Phone", icon: "phone" },
-  { id: "httpsSetup", label: "HTTPS Setup", icon: "shield" },
+  { id: "remoteMachines", label: "Computers", icon: "remote" },
+  { id: "httpsSetup", label: "Guide", icon: "shield" },
 ];
 
 export function NavIcon({ name, size = 17 }: { name: IconName; size?: number }) {

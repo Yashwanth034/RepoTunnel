@@ -12,6 +12,20 @@ After a request is complete, RepoTunnel keeps the Team active in a ready state. 
 
 RepoTunnel then starts the next work cycle in the same Team. No new Team session, kickoff copy/paste or desktop reconfiguration is required. The cycle repeats until the user explicitly ends the Team from RepoTunnel.
 
+## Manual disconnect for a lost AI chat
+
+**Disconnect AI** in an existing AI 1 or AI 2 card is an emergency *desktop-only* fallback for a chat that reached its turn limit, disappeared, or failed to unbind. It does not replace the existing automatic handoff/unbind workflow; do not click it when that workflow already succeeded.
+
+Clicking it prompts for confirmation and revokes the selected agent's previous MCP client binding. It preserves the **same** Team session and agent ID, previous joined membership, tasks, file claims, reviews, messages and resume checkpoint. RepoTunnel records that the role is temporarily disconnected and exposes a **Copy resume prompt** action in the same card. Paste that into a new AI chat; the new connection calls `team_status` then `team_action(action=join)` with those existing IDs and continues previous work, not a new Team.
+
+Old MCP transport keys still known to the running RepoTunnel server are marked revoked. A revoked connection cannot rebind by repeatedly calling `team_status` or `team_action`, and any pre-disconnect file mutation authorization is invalidated using a per-agent generation value. Manual disconnection affects **only** that selected agent's connection; Engineer B remains bound if Engineer A is disconnected, and vice versa. RepoTunnel does not terminate unrelated subprocesses already started by the abandoned chat. The owner must check running commands before resuming. As with any locally scoped transport identity, a wholly new MCP client identity is a new connection, not proof that it is a particular AI conversation.
+
+The status `manuallyDisconnected` and revocation generation are optional backward-compatible fields in the existing saved Team agents. Previous Team records load unchanged, and existing automatic handoff behavior remains unchanged.
+
+**Extra recovery safeguards:** A manually disconnected role cannot perform ordinary Team actions or file edits until it is rebound from a new AI connection. An MCP client already bound as Engineer B cannot silently switch into Engineer A within the same Team. Pre-disconnect file-write authorization is invalidated even after a new chat rejoins. Normal automatic handoff remains unchanged.
+
+**Limit:** Client-key revocations are bounded in-memory tombstones, not cryptographic proofs of a ChatGPT conversation's identity. Server restarts and entirely new/shared MCP transport IDs can defeat old-key identification. Before takeover, make sure the old chat is genuinely abandoned and inspect any external commands already running.
+
 ## Collaboration rules
 
 - Both agents must be joined before planning/tasks/implementation unlock.
@@ -34,18 +48,24 @@ Each work request must have at least two distinct completed cross-reviewed imple
 
 Only the human can permanently end the Team. **Pause** temporarily blocks Team work; **End Team** permanently detaches the A/B identities from the project.
 
-## External chat limitation
+## External chat limitation and automatic inbox surfacing
 
 RepoTunnel can persist shared state and keep active MCP clients synchronized, but MCP cannot force an arbitrary completely idle third-party web chat to begin a new generation. Each external AI is joined once. After that, the user does not need to recreate the Team or copy the kickoff again; any new request given to either active AI chat is registered into the same persistent Team.
 
+Direct A2A messages remain in their existing private, durable, recipient-scoped mailbox. During active work, every normal agent-bound `team_status` or `team_action` MCP response now **automatically includes `directInbox`** when that agent has unacknowledged messages in the current work cycle (up to 10 per response, with `hasMore` and `lastSequence` for pagination). The agent need not issue a separate `team_direct_inbox` call merely to notice its teammate's message during normal collaboration. It should process messages and call `team_ack_direct_message` by exact message ID; otherwise the same message can appear again. For longer backlogs, use the unchanged `team_direct_inbox` cursor.
+
+This is *opportunistic delivery in existing tool responses*, not unsolicited browser-chat injection or a background agent wake-up. An idle chat still cannot receive a forced generation. Anonymous/unbound status requests do not receive any private inbox data, old work cycles remain isolated, and any optional inbox read failure leaves normal Team Mode actions working. The shared Team revision, planning rules, file claims and authentication permissions do not change.
+
 ## MCP surface
 
-Team Mode deliberately uses only two public MCP tools:
+The shared Team board uses two core MCP tools:
 
 - `team_status` — read the persistent Team state and optionally long-poll with `after_revision` + `wait_seconds`.
 - `team_action` — create/join/message/task/claim/handoff/review/verify/phase/complete current request.
 
-Team Mode intentionally remains a two-tool coordination surface: `team_status` and `team_action`. Do not tie this document to a total RepoTunnel MCP tool count; the broader product surface evolves independently, and clients that cache tool discovery should refresh/re-scan after an MCP schema change.
+Optional A2A tools are `team_send_direct_message`, `team_direct_inbox` (including a bounded long poll), and `team_ack_direct_message`. They do not replace or mutate the shared board. The two core Team tools now include pending direct messages when the caller has a verified recipient identity.
+
+Do not tie this document to a total RepoTunnel MCP tool count; the broader product surface evolves independently, and clients that cache tool discovery should refresh/re-scan after an MCP schema change.
 
 ## Balanced two-engineer execution
 

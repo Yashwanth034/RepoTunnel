@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    path::PathBuf,
+    collections::HashMap,
+    path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,7 +17,7 @@ use crate::{
         ManagedProcessStatus, TerminalCommandOutcome, TerminalCommandRecord, TerminalCommandStatus,
         Workspace,
     },
-    storage, terminal, versioning,
+    recovery_store, storage, terminal, versioning,
 };
 
 const ACTIVITY_HISTORY_FILE: &str = "activity-history.json";
@@ -53,41 +53,24 @@ fn path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Could not resolve RepoTunnel activity storage: {error}"))
 }
 
+fn load_path(path: &Path) -> Result<Vec<ActivityGroup>, String> {
+    Ok(
+        recovery_store::load_json::<Vec<ActivityGroup>>(path, "AI activity history")?
+            .value
+            .unwrap_or_default(),
+    )
+}
+
 fn load(app: &AppHandle) -> Result<Vec<ActivityGroup>, String> {
-    let path = path(app)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("Could not read AI activity history: {error}"))?;
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    serde_json::from_str(&text)
-        .map_err(|error| format!("Saved AI activity history is invalid: {error}"))
+    load_path(&path(app)?)
+}
+
+fn save_path(path: &Path, groups: &[ActivityGroup]) -> Result<(), String> {
+    recovery_store::save_json(path, &groups.to_vec(), "AI activity history")
 }
 
 fn save(app: &AppHandle, groups: &[ActivityGroup]) -> Result<(), String> {
-    let path = path(app)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Could not resolve RepoTunnel activity storage directory.".to_string())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not prepare AI activity storage: {error}"))?;
-    let text = serde_json::to_string_pretty(groups)
-        .map_err(|error| format!("Could not serialize AI activity history: {error}"))?;
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(ACTIVITY_HISTORY_FILE);
-    let temporary = parent.join(format!(".{file_name}.{}.tmp", new_id("save")));
-    fs::write(&temporary, text)
-        .map_err(|error| format!("Could not stage AI activity history: {error}"))?;
-    if let Err(error) = fs::rename(&temporary, &path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(format!("Could not save AI activity history: {error}"));
-    }
-    Ok(())
+    save_path(&path(app)?, groups)
 }
 
 fn group_has_inflight(group: &ActivityGroup) -> bool {
@@ -347,37 +330,65 @@ pub(crate) fn latest_workspace_activity_at(
     Ok(continuity::latest_meaningful_activity_at(&groups))
 }
 
-pub(crate) fn timeline(
-    app: &AppHandle,
+/// Reconcile each project's expensive version and process histories once per
+/// timeline request, not once per activity group. Workspace-specific reads
+/// must not perform history I/O for unrelated projects.
+fn reconcile_timeline_groups<FV, FP>(
+    groups: &mut [ActivityGroup],
     workspace_id: Option<&str>,
-) -> Result<ActivityTimeline, String> {
-    let _guard = activity_lock()
-        .lock()
-        .map_err(|_| "RepoTunnel activity history is temporarily unavailable.".to_string())?;
-    let mut groups = load(app)?;
+    mut load_version_links: FV,
+    mut load_processes: FP,
+) -> bool
+where
+    FV: FnMut(&str) -> Option<HashMap<String, Vec<String>>>,
+    FP: FnMut(&str) -> Vec<ManagedProcessRecord>,
+{
+    let mut version_cache: HashMap<String, Option<HashMap<String, Vec<String>>>> = HashMap::new();
+    let mut process_cache: HashMap<String, Vec<ManagedProcessRecord>> = HashMap::new();
     let mut changed = false;
-    for group in &mut groups {
-        refresh_version_links(app, group);
-        let processes =
-            terminal::list_processes(app, Some(&group.workspace_id), 100).unwrap_or_default();
-        for event in &mut group.events {
-            if event.kind != ActivityKind::Process {
-                continue;
+
+    for group in groups {
+        if workspace_id.is_some_and(|id| id != group.workspace_id) {
+            continue;
+        }
+        if let Some(trace_id) = group.trace_group_id.as_deref() {
+            let links = version_cache
+                .entry(group.workspace_id.clone())
+                .or_insert_with(|| load_version_links(&group.workspace_id));
+            if let Some(links) = links {
+                let updated = links.get(trace_id).cloned().unwrap_or_default();
+                if group.version_ids != updated {
+                    group.version_ids = updated;
+                    changed = true;
+                }
             }
-            let process = event
-                .source_id
-                .as_deref()
-                .and_then(|source_id| processes.iter().find(|process| process.id == source_id))
-                .or_else(|| {
-                    processes.iter().find(|process| {
-                        event.summary
-                            == format!("{} · {}", process.label, bounded(&process.command, 160))
-                    })
-                });
-            let Some(process) = process else {
-                continue;
-            };
-            changed |= reconcile_process_event(event, process);
+        }
+        if group
+            .events
+            .iter()
+            .any(|event| event.kind == ActivityKind::Process)
+        {
+            let processes = process_cache
+                .entry(group.workspace_id.clone())
+                .or_insert_with(|| load_processes(&group.workspace_id));
+            for event in &mut group.events {
+                if event.kind != ActivityKind::Process {
+                    continue;
+                }
+                let process = event
+                    .source_id
+                    .as_deref()
+                    .and_then(|source_id| processes.iter().find(|process| process.id == source_id))
+                    .or_else(|| {
+                        processes.iter().find(|process| {
+                            event.summary
+                                == format!("{} · {}", process.label, bounded(&process.command, 160))
+                        })
+                    });
+                if let Some(process) = process {
+                    changed |= reconcile_process_event(event, process);
+                }
+            }
         }
         let factual_updated_at = group
             .events
@@ -390,6 +401,32 @@ pub(crate) fn timeline(
             changed = true;
         }
     }
+    changed
+}
+
+pub(crate) fn timeline(
+    app: &AppHandle,
+    workspace_id: Option<&str>,
+) -> Result<ActivityTimeline, String> {
+    let _guard = activity_lock()
+        .lock()
+        .map_err(|_| "RepoTunnel activity history is temporarily unavailable.".to_string())?;
+    let mut groups = load(app)?;
+    let changed = reconcile_timeline_groups(
+        &mut groups,
+        workspace_id,
+        |workspace| {
+            let timeline = versioning::timeline(app, Some(workspace)).ok()?;
+            let mut links: HashMap<String, Vec<String>> = HashMap::new();
+            for record in timeline.records {
+                if let Some(trace) = record.edit_group_id {
+                    links.entry(trace).or_default().push(record.id);
+                }
+            }
+            Some(links)
+        },
+        |workspace| terminal::list_processes(app, Some(workspace), 100).unwrap_or_default(),
+    );
     if changed {
         save(app, &groups)?;
     }
@@ -913,10 +950,191 @@ pub(crate) fn sync_git(app: &AppHandle, record: &GitActionRecord) {
 
 #[cfg(test)]
 mod tests {
-    use super::reconcile_process_event;
-    use crate::models::{
-        ActivityEvent, ActivityKind, ActivityStatus, ManagedProcessRecord, ManagedProcessStatus,
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
     };
+
+    use super::{reconcile_process_event, reconcile_timeline_groups};
+    use crate::models::{
+        ActivityEvent, ActivityGroup, ActivityKind, ActivityStatus, ManagedProcessRecord,
+        ManagedProcessStatus,
+    };
+
+    fn temp_store(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "repotunnel-activity-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn previous_path(path: &Path) -> PathBuf {
+        let file_name = path.file_name().unwrap().to_string_lossy();
+        path.with_file_name(format!(".{file_name}.previous"))
+    }
+
+    fn activity_group(id: &str, updated_at: u64) -> ActivityGroup {
+        ActivityGroup {
+            id: id.to_string(),
+            workspace_id: "workspace-1".to_string(),
+            workspace_name: "RepoTunnel".to_string(),
+            trace_group_id: None,
+            summary: id.to_string(),
+            version_ids: Vec::new(),
+            events: Vec::new(),
+            created_at: updated_at,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn workspace_timeline_reuses_history_per_project_and_skips_other_projects() {
+        let mut first = activity_group("first", 4);
+        first.trace_group_id = Some("trace-1".into());
+        first.events.push(ActivityEvent {
+            id: "event-1".into(),
+            kind: ActivityKind::Process,
+            action: "start".into(),
+            summary: "process fixture".into(),
+            detail: None,
+            status: ActivityStatus::Running,
+            source_id: None,
+            created_at: 4,
+            updated_at: 4,
+        });
+        let mut second = activity_group("second", 6);
+        second.trace_group_id = Some("trace-2".into());
+        second.events.push(ActivityEvent {
+            id: "event-2".into(),
+            kind: ActivityKind::Process,
+            action: "start".into(),
+            summary: "another fixture".into(),
+            detail: None,
+            status: ActivityStatus::Running,
+            source_id: None,
+            created_at: 6,
+            updated_at: 6,
+        });
+        let mut unrelated = activity_group("unrelated", 8);
+        unrelated.workspace_id = "other-project".into();
+        unrelated.trace_group_id = Some("trace-3".into());
+        unrelated.version_ids.push("keep-unrelated".into());
+
+        let mut versions_loaded = 0;
+        let mut processes_loaded = 0;
+        let mut groups = vec![first, second, unrelated];
+        let changed = reconcile_timeline_groups(
+            &mut groups,
+            Some("workspace-1"),
+            |workspace| {
+                assert_eq!(workspace, "workspace-1");
+                versions_loaded += 1;
+                Some(std::collections::HashMap::from([
+                    ("trace-1".to_string(), vec!["version-1".to_string()]),
+                    ("trace-2".to_string(), vec!["version-2".to_string()]),
+                ]))
+            },
+            |workspace| {
+                assert_eq!(workspace, "workspace-1");
+                processes_loaded += 1;
+                Vec::new()
+            },
+        );
+        assert!(changed);
+        assert_eq!(versions_loaded, 1, "version history should be loaded once");
+        assert_eq!(processes_loaded, 1, "process history should be loaded once");
+        assert_eq!(groups[0].version_ids, vec!["version-1"]);
+        assert_eq!(groups[1].version_ids, vec!["version-2"]);
+        assert_eq!(groups[2].version_ids, vec!["keep-unrelated"]);
+    }
+
+    #[test]
+    fn workspace_timeline_does_not_load_unused_process_or_version_history() {
+        let mut group = activity_group("read-only", 12);
+        group.events.push(ActivityEvent {
+            id: "event-read".into(),
+            kind: ActivityKind::Files,
+            action: "inspect".into(),
+            summary: "read-only observation".into(),
+            detail: None,
+            status: ActivityStatus::Succeeded,
+            source_id: None,
+            created_at: 12,
+            updated_at: 12,
+        });
+        let mut version_calls = 0;
+        let mut process_calls = 0;
+        let mut groups = vec![group];
+        let changed = reconcile_timeline_groups(
+            &mut groups,
+            Some("workspace-1"),
+            |_| {
+                version_calls += 1;
+                None
+            },
+            |_| {
+                process_calls += 1;
+                Vec::new()
+            },
+        );
+        assert!(!changed);
+        assert_eq!(version_calls, 0);
+        assert_eq!(process_calls, 0);
+    }
+
+    #[test]
+    fn activity_history_recovers_previous_good_copy() {
+        let root = temp_store("previous-good");
+        let path = root.join("activity-history.json");
+        let first = vec![activity_group("first", 1)];
+        let second = vec![activity_group("second", 2)];
+
+        super::save_path(&path, &first).expect("save first activity history");
+        super::save_path(&path, &second).expect("save second activity history");
+        fs::write(&path, b"{truncated").expect("corrupt primary");
+
+        let recovered = super::load_path(&path).expect("recover previous-good activity history");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, "first");
+        assert!(previous_path(&path).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn activity_history_corrupt_primary_and_previous_still_returns_direct_api_error() {
+        let root = temp_store("double-corrupt");
+        let path = root.join("activity-history.json");
+        fs::write(&path, b"{bad-primary").unwrap();
+        fs::write(previous_path(&path), b"{bad-previous").unwrap();
+
+        let error = super::load_path(&path).expect_err("both activity copies must fail");
+        assert!(error.contains("AI activity history"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activity_history_symlink_store_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_store("symlink");
+        let path = root.join("activity-history.json");
+        let outside = root.join("outside.json");
+        fs::write(&outside, b"[]").unwrap();
+        symlink(&outside, &path).unwrap();
+
+        let error = super::save_path(&path, &[activity_group("safe", 1)])
+            .expect_err("symlink activity store must be rejected");
+        assert!(error.contains("symbolic link"));
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn process_reconciliation_preserves_factual_timestamp() {

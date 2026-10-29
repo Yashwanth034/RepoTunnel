@@ -17,6 +17,7 @@ use crate::{
         ProjectMemory, Workspace,
     },
     project_memory, secret_guard, terminal,
+    workflow::{self, WorkflowRunReceipt, WorkflowRunStatus},
 };
 
 const CONTINUITY_FILE: &str = "continuity.json";
@@ -26,6 +27,7 @@ const MAX_DETAILED_MILESTONES: usize = 80;
 const MAX_FACTS_PER_MILESTONE: usize = 6;
 const MAX_FACT_CHARS: usize = 320;
 const MAX_BRIEF_ITEMS: usize = 6;
+const MAX_TASK_INTEGRITY_RESUME_FACTS: usize = 8;
 static CONTINUITY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn continuity_lock() -> &'static Mutex<()> {
@@ -498,7 +500,20 @@ pub(crate) struct ResumeGitState {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ResumeKnowledgePreview {
+    pub(crate) key: String,
+    pub(crate) kind: crate::models::ProjectKnowledgeKind,
+    pub(crate) state: crate::models::ProjectKnowledgeState,
+    pub(crate) title: String,
+    pub(crate) hint: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ResumeContextPreview {
+    /// Short previews from existing project memory; full entries are available
+    /// through find_project_knowledge and do not imply current resource access.
+    pub(crate) project_knowledge: Vec<ResumeKnowledgePreview>,
     pub(crate) summary: String,
     pub(crate) goals: Vec<String>,
     pub(crate) decisions: Vec<String>,
@@ -512,8 +527,122 @@ pub(crate) struct ResumeContextPreview {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct TaskIntegrityResumeFact {
+    pub(crate) task_id: String,
+    pub(crate) principal_fingerprint: String,
+    pub(crate) workspace_id: String,
+    pub(crate) status: crate::task_integrity::model::TaskIntegrityStatus,
+    pub(crate) scope_revision: u64,
+    pub(crate) blockers: Vec<String>,
+    pub(crate) remaining_verification: Option<crate::task_integrity::model::VerificationLevel>,
+    pub(crate) safe_next_action: String,
+}
+
+fn task_integrity_resume_fact(
+    contract: &crate::task_integrity::model::TaskContract,
+) -> TaskIntegrityResumeFact {
+    use crate::task_integrity::model::TaskIntegrityStatus as Status;
+
+    let (blockers, safe_next_action) = match contract.status() {
+        Status::Draft => (
+            vec!["taskNotActive".to_string()],
+            "Inspect the recovered task before activating any mutation authority.".to_string(),
+        ),
+        Status::Active => (
+            Vec::new(),
+            "Continue the active task only within its approved Task Integrity scope.".to_string(),
+        ),
+        Status::AwaitingScopeApproval => (
+            vec!["scopeApproval".to_string()],
+            "Wait for local scope approval before continuing mutation work.".to_string(),
+        ),
+        Status::FrozenConflict => (
+            vec!["staleConflict".to_string()],
+            "Resolve the stale conflict before resuming task mutation.".to_string(),
+        ),
+        Status::FrozenIntegrityViolation => (
+            vec!["integrityViolation".to_string()],
+            "Inspect the integrity violation before any task mutation resumes.".to_string(),
+        ),
+        Status::Verifying => (
+            vec!["verificationRemaining".to_string()],
+            "Finish the required factual verification before completing the task.".to_string(),
+        ),
+        Status::AwaitingReview => (
+            vec!["pendingReview".to_string()],
+            "Wait for the pending local review before continuing the task.".to_string(),
+        ),
+        Status::Ambiguous => (
+            vec!["ambiguousMutation".to_string()],
+            "Inspect current factual state and do not replay the ambiguous mutation automatically."
+                .to_string(),
+        ),
+        Status::Failed => (
+            vec!["taskFailed".to_string()],
+            "Inspect the failed task evidence before starting new task work.".to_string(),
+        ),
+        Status::Succeeded => (
+            Vec::new(),
+            "Task is complete; do not resume its mutation authority.".to_string(),
+        ),
+        Status::Cancelled => (
+            vec!["taskCancelled".to_string()],
+            "Task is cancelled; start a new task for additional mutation work.".to_string(),
+        ),
+    };
+    let required = contract.verification_contract.minimum_level;
+    let remaining_verification = if contract.status() == Status::Succeeded
+        || contract
+            .completed_verification_level
+            .is_some_and(|completed| completed >= required)
+    {
+        None
+    } else {
+        Some(required)
+    };
+
+    TaskIntegrityResumeFact {
+        task_id: contract.task_id.as_str().to_string(),
+        principal_fingerprint: contract.principal.as_str().to_string(),
+        workspace_id: contract.workspace_id.clone(),
+        status: contract.status(),
+        scope_revision: contract.scope_revision().get(),
+        blockers,
+        remaining_verification,
+        safe_next_action,
+    }
+}
+
+fn task_integrity_resume_facts_result(
+    result: Result<Vec<crate::task_integrity::model::TaskContract>, String>,
+    workspace_id: &str,
+) -> (Vec<TaskIntegrityResumeFact>, Option<String>) {
+    match result {
+        Ok(mut contracts) => {
+            contracts.retain(|contract| contract.workspace_id == workspace_id);
+            contracts.sort_by_key(|contract| std::cmp::Reverse(contract.updated_at));
+            let facts = contracts
+                .iter()
+                .take(MAX_TASK_INTEGRITY_RESUME_FACTS)
+                .map(task_integrity_resume_fact)
+                .collect();
+            (facts, None)
+        }
+        Err(error) => (
+            Vec::new(),
+            Some(format!(
+                "Task Integrity ledger is unavailable for Resume: {}",
+                bounded(error, 240)
+            )),
+        ),
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ResumeBrief {
     pub(crate) git: ResumeGitState,
+    pub(crate) task_integrity: Vec<TaskIntegrityResumeFact>,
     pub(crate) active: Vec<String>,
     pub(crate) last_completed: Vec<String>,
     pub(crate) last_failed: Vec<String>,
@@ -535,6 +664,36 @@ pub(crate) struct ResumeSnapshot {
     pub(crate) details_available: Vec<&'static str>,
 }
 
+fn resume_knowledge_preview(
+    entries: &[crate::models::ProjectKnowledgeEntry],
+) -> Vec<ResumeKnowledgePreview> {
+    use crate::models::{ProjectKnowledgeKind as K, ProjectKnowledgeState as S};
+    let priority = |item: &crate::models::ProjectKnowledgeEntry| {
+        let kind = match item.kind {
+            K::Instruction => 0,
+            K::KnownPitfall => 1,
+            K::TestProcedure => 2,
+            K::ResourceReference => 3,
+            K::CapabilityRoute => 4,
+        };
+        let retired = usize::from(item.state == S::Retired);
+        (retired, kind, std::cmp::Reverse(item.updated_at))
+    };
+    let mut selected = entries.iter().collect::<Vec<_>>();
+    selected.sort_by_key(|entry| priority(entry));
+    selected
+        .into_iter()
+        .take(8)
+        .map(|item| ResumeKnowledgePreview {
+            key: item.key.clone(),
+            kind: item.kind,
+            state: item.state,
+            title: bounded(&item.title, 120),
+            hint: bounded(&item.guidance, 240),
+        })
+        .collect()
+}
+
 fn memory_state(
     memory: &ProjectMemory,
     current_head: Option<&str>,
@@ -544,7 +703,8 @@ fn memory_state(
         && memory.goals.is_empty()
         && memory.decisions.is_empty()
         && memory.preferences.is_empty()
-        && memory.next_steps.is_empty();
+        && memory.next_steps.is_empty()
+        && memory.knowledge.is_empty();
     if empty {
         return ("empty".to_string(), None);
     }
@@ -611,6 +771,58 @@ fn resume_next_actions(
         return vec![format!("Continue from live state after · {item}")];
     }
     vec!["Continue from the current live project state; saved next steps are stale.".to_string()]
+}
+
+fn task_integrity_fact_requires_attention(fact: &TaskIntegrityResumeFact) -> bool {
+    use crate::task_integrity::model::TaskIntegrityStatus as Status;
+    matches!(
+        fact.status,
+        Status::AwaitingScopeApproval
+            | Status::FrozenConflict
+            | Status::FrozenIntegrityViolation
+            | Status::AwaitingReview
+            | Status::Ambiguous
+            | Status::Failed
+    )
+}
+
+fn resume_next_actions_with_task_integrity(
+    task_integrity: &[TaskIntegrityResumeFact],
+    memory_state: &str,
+    active: &[String],
+    unresolved_failures: &[String],
+    completed: &[String],
+    saved_next_steps: &[String],
+) -> Vec<String> {
+    use crate::task_integrity::model::TaskIntegrityStatus as Status;
+
+    let safety_actions = task_integrity
+        .iter()
+        .filter(|fact| task_integrity_fact_requires_attention(fact))
+        .take(3)
+        .map(|fact| fact.safe_next_action.clone())
+        .collect::<Vec<_>>();
+    if !safety_actions.is_empty() {
+        return safety_actions;
+    }
+
+    let active_task_actions = task_integrity
+        .iter()
+        .filter(|fact| matches!(fact.status, Status::Active | Status::Verifying))
+        .take(3)
+        .map(|fact| fact.safe_next_action.clone())
+        .collect::<Vec<_>>();
+    if !active_task_actions.is_empty() {
+        return active_task_actions;
+    }
+
+    resume_next_actions(
+        memory_state,
+        active,
+        unresolved_failures,
+        completed,
+        saved_next_steps,
+    )
 }
 
 pub(crate) fn latest_meaningful_activity_at(groups: &[ActivityGroup]) -> u64 {
@@ -712,28 +924,164 @@ fn unresolved_failure_summaries(
         .collect()
 }
 
-pub(crate) fn resume_snapshot(
+fn activity_groups_for_resume_result(
+    result: Result<Vec<ActivityGroup>, String>,
+) -> (Vec<ActivityGroup>, Option<String>) {
+    match result {
+        Ok(groups) => (groups, None),
+        Err(error) => (
+            Vec::new(),
+            Some(bounded(
+                format!("AI activity history is unavailable for Resume: {error}"),
+                MAX_FACT_CHARS,
+            )),
+        ),
+    }
+}
+
+fn activity_groups_for_resume(
     app: &AppHandle,
-    workspace: &Workspace,
-) -> Result<ResumeSnapshot, String> {
-    let memory = project_memory::get(app, workspace)?;
-    let git_status = git::repository_status(workspace);
-    let mut process_history =
-        terminal::list_processes(app, Some(&workspace.id), 100).unwrap_or_default();
-    process_history.sort_by_key(|process| std::cmp::Reverse(process.updated_at));
-    let activity_timeline = activity::timeline(app, Some(&workspace.id))?;
-    capture_activity_groups(app, &activity_timeline.groups);
+    workspace_id: &str,
+) -> (Vec<ActivityGroup>, Option<String>) {
+    activity_groups_for_resume_result(
+        activity::timeline(app, Some(workspace_id)).map(|timeline| timeline.groups),
+    )
+}
 
-    let latest_activity_at = latest_meaningful_activity_at(&activity_timeline.groups);
+#[derive(Debug, Default)]
+struct WorkflowResumeFacts {
+    active: Vec<String>,
+    completed: Vec<String>,
+    failed: Vec<String>,
+    attention_required: bool,
+    latest_activity_at: Option<u64>,
+}
 
-    let mut active = Vec::new();
-    let mut completed = Vec::new();
-    let failed = unresolved_failure_summaries(&activity_timeline.groups, &process_history);
+fn workflow_resume_priority(status: WorkflowRunStatus) -> u8 {
+    match status {
+        WorkflowRunStatus::Ambiguous => 0,
+        WorkflowRunStatus::Failed => 1,
+        WorkflowRunStatus::AwaitingApproval => 2,
+        WorkflowRunStatus::Running => 3,
+        WorkflowRunStatus::Succeeded => 4,
+    }
+}
+
+fn workflow_resume_summary(run: &WorkflowRunReceipt) -> String {
+    let status = match run.status {
+        WorkflowRunStatus::Running => "running",
+        WorkflowRunStatus::AwaitingApproval => "awaiting approval",
+        WorkflowRunStatus::Failed => "failed",
+        WorkflowRunStatus::Ambiguous => "ambiguous",
+        WorkflowRunStatus::Succeeded => "succeeded",
+    };
+    bounded(
+        format!(
+            "Workflow {} · {} · {} · Next: {}",
+            run.id, status, run.intent, run.safe_next_action
+        ),
+        MAX_FACT_CHARS,
+    )
+}
+
+fn workflow_resume_facts(runs: &[WorkflowRunReceipt]) -> WorkflowResumeFacts {
+    let mut ordered = runs.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        workflow_resume_priority(left.status)
+            .cmp(&workflow_resume_priority(right.status))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+    });
+
+    let mut facts = WorkflowResumeFacts {
+        latest_activity_at: runs.iter().map(|run| run.updated_at).max(),
+        ..WorkflowResumeFacts::default()
+    };
     let mut active_seen = BTreeSet::new();
     let mut completed_seen = BTreeSet::new();
-    let attention_required = !failed.is_empty();
+    let mut failed_seen = BTreeSet::new();
 
-    for process in &process_history {
+    for run in ordered {
+        let summary = workflow_resume_summary(run);
+        match run.status {
+            WorkflowRunStatus::Ambiguous => {
+                facts.attention_required = true;
+                distinct_push(&mut facts.active, &mut active_seen, summary.clone());
+                distinct_push(&mut facts.failed, &mut failed_seen, summary);
+            }
+            WorkflowRunStatus::Failed => {
+                facts.attention_required = true;
+                distinct_push(&mut facts.failed, &mut failed_seen, summary);
+            }
+            WorkflowRunStatus::AwaitingApproval | WorkflowRunStatus::Running => {
+                distinct_push(&mut facts.active, &mut active_seen, summary);
+            }
+            WorkflowRunStatus::Succeeded => {
+                distinct_push(&mut facts.completed, &mut completed_seen, summary);
+            }
+        }
+    }
+
+    facts
+}
+
+fn workflow_runs_for_resume_result(
+    result: Result<Vec<WorkflowRunReceipt>, String>,
+) -> (Vec<WorkflowRunReceipt>, Option<String>) {
+    match result {
+        Ok(runs) => (runs, None),
+        Err(error) => (
+            Vec::new(),
+            Some(bounded(
+                format!("Workflow receipt history is unavailable for Resume: {error}"),
+                MAX_FACT_CHARS,
+            )),
+        ),
+    }
+}
+
+fn workflow_runs_for_resume(
+    app: &AppHandle,
+    workspace_id: &str,
+) -> (Vec<WorkflowRunReceipt>, Option<String>) {
+    workflow_runs_for_resume_result(workflow::list_workflow_runs(
+        app,
+        workspace_id,
+        MAX_BRIEF_ITEMS * 3,
+    ))
+}
+
+fn merge_resume_items(primary: Vec<String>, secondary: Vec<String>) -> Vec<String> {
+    let mut merged = Vec::new();
+    let mut seen = BTreeSet::new();
+    for item in primary.into_iter().chain(secondary) {
+        distinct_push(&mut merged, &mut seen, bounded(item, MAX_FACT_CHARS));
+    }
+    merged
+}
+
+#[derive(Debug)]
+struct ResumeFacts {
+    active: Vec<String>,
+    completed: Vec<String>,
+    failed: Vec<String>,
+    attention_required: bool,
+    latest_activity_at: Option<u64>,
+}
+
+fn resume_facts(groups: &[ActivityGroup], process_history: &[ManagedProcessRecord]) -> ResumeFacts {
+    let latest_activity_at = groups
+        .iter()
+        .flat_map(|group| group.events.iter())
+        .filter(|event| meaningful_event(event))
+        .map(|event| event.updated_at)
+        .max();
+    let mut active = Vec::new();
+    let mut completed = Vec::new();
+    let failed = unresolved_failure_summaries(groups, process_history);
+    let mut active_seen = BTreeSet::new();
+    let mut completed_seen = BTreeSet::new();
+
+    for process in process_history {
         if matches!(
             process.status,
             ManagedProcessStatus::Pending | ManagedProcessStatus::Running
@@ -749,7 +1097,7 @@ pub(crate) fn resume_snapshot(
         }
     }
 
-    for group in &activity_timeline.groups {
+    for group in groups {
         for event in group.events.iter().rev() {
             match event.status {
                 ActivityStatus::Pending | ActivityStatus::Running if meaningful_event(event) => {
@@ -777,9 +1125,61 @@ pub(crate) fn resume_snapshot(
         }
     }
 
+    ResumeFacts {
+        active,
+        completed,
+        attention_required: !failed.is_empty(),
+        failed,
+        latest_activity_at,
+    }
+}
+
+pub(crate) fn resume_snapshot(
+    app: &AppHandle,
+    workspace: &Workspace,
+) -> Result<ResumeSnapshot, String> {
+    let memory = project_memory::get(app, workspace)?;
+    let git_status = git::repository_status(workspace);
+    let mut process_history =
+        terminal::list_processes(app, Some(&workspace.id), 100).unwrap_or_default();
+    process_history.sort_by_key(|process| std::cmp::Reverse(process.updated_at));
+    let (activity_groups, activity_diagnostic) = activity_groups_for_resume(app, &workspace.id);
+    if let Some(diagnostic) = activity_diagnostic.as_deref() {
+        eprintln!("RepoTunnel Continuity activity recovery warning: {diagnostic}");
+    }
+    capture_activity_groups(app, &activity_groups);
+
+    let (workflow_runs, workflow_diagnostic) = workflow_runs_for_resume(app, &workspace.id);
+    if let Some(diagnostic) = workflow_diagnostic.as_deref() {
+        eprintln!("RepoTunnel Continuity workflow recovery warning: {diagnostic}");
+    }
+    let (task_integrity_facts, task_integrity_diagnostic) = task_integrity_resume_facts_result(
+        crate::task_integrity::store::load_task_contracts(app),
+        &workspace.id,
+    );
+    if let Some(diagnostic) = task_integrity_diagnostic.as_deref() {
+        eprintln!("RepoTunnel Continuity task recovery warning: {diagnostic}");
+    }
+
+    let facts = resume_facts(&activity_groups, &process_history);
+    let workflow_facts = workflow_resume_facts(&workflow_runs);
+    let latest_activity_at = facts
+        .latest_activity_at
+        .unwrap_or(0)
+        .max(workflow_facts.latest_activity_at.unwrap_or(0));
+    let active = merge_resume_items(workflow_facts.active, facts.active);
+    let completed = merge_resume_items(workflow_facts.completed, facts.completed);
+    let failed = merge_resume_items(workflow_facts.failed, facts.failed);
+    let attention_required = facts.attention_required
+        || workflow_facts.attention_required
+        || task_integrity_facts
+            .iter()
+            .any(task_integrity_fact_requires_attention);
+
     let (memory_state, memory_stale_reason) =
         memory_state(&memory, git_status.head.as_deref(), latest_activity_at);
-    let next = resume_next_actions(
+    let next = resume_next_actions_with_task_integrity(
+        &task_integrity_facts,
         &memory_state,
         &active,
         &failed,
@@ -813,6 +1213,7 @@ pub(crate) fn resume_snapshot(
                 ahead: git_status.ahead,
                 behind: git_status.behind,
             },
+            task_integrity: task_integrity_facts,
             active,
             last_completed: completed,
             last_failed: failed,
@@ -821,6 +1222,7 @@ pub(crate) fn resume_snapshot(
             last_activity_at: latest_activity_at,
         },
         context: ResumeContextPreview {
+            project_knowledge: resume_knowledge_preview(&memory.knowledge),
             summary: bounded(&memory.summary, 1_200),
             goals: memory.goals.iter().take(5).cloned().collect(),
             decisions: memory.decisions.iter().take(5).cloned().collect(),
@@ -834,7 +1236,9 @@ pub(crate) fn resume_snapshot(
         milestones: recent_milestones(app, &workspace.id, 8),
         details_available: vec![
             "get_project_memory",
+            "find_project_knowledge",
             "get_activity_timeline",
+            "get_workflow_run",
             "get_monitoring_snapshot",
             "git_status",
         ],
@@ -844,13 +1248,55 @@ pub(crate) fn resume_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_project, latest_meaningful_activity_at, memory_state, milestone_from_group,
-        resume_next_actions, unresolved_failure_summaries, upsert_milestone, ProjectContinuity,
+        activity_groups_for_resume_result, compact_project, latest_meaningful_activity_at,
+        memory_state, milestone_from_group, resume_facts, resume_next_actions,
+        resume_next_actions_with_task_integrity, task_integrity_resume_fact,
+        task_integrity_resume_facts_result, unresolved_failure_summaries, upsert_milestone,
+        workflow_resume_facts, workflow_runs_for_resume_result, ProjectContinuity,
     };
-    use crate::models::{
-        ActivityEvent, ActivityGroup, ActivityKind, ActivityStatus, ManagedProcessRecord,
-        ManagedProcessStatus, ProjectMemory,
+    use crate::{
+        models::{
+            ActivityEvent, ActivityGroup, ActivityKind, ActivityStatus, ManagedProcessRecord,
+            ManagedProcessStatus, ProjectMemory,
+        },
+        task_integrity::{
+            model::{
+                TaskAcceptanceCriterion, TaskChangeBudget, TaskContract, TaskId,
+                TaskIntegrityStatus, TaskOperationClass, TaskPrincipal, TaskVerificationContract,
+                VerificationLevel,
+            },
+            verification::{complete_task_from_facts, CompletionFacts},
+        },
+        workflow::{WorkflowRunReceipt, WorkflowRunStatus},
     };
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn new_chat_preview_carries_reusable_procedures_and_retired_warnings() {
+        use crate::models::{
+            ProjectKnowledgeEntry, ProjectKnowledgeKind as Kind, ProjectKnowledgeState as State,
+        };
+        let entries = vec![
+            ProjectKnowledgeEntry {
+                key:"test-resource".into(),kind:Kind::ResourceReference,
+                state:State::NeedsRecheck,title:"Saved test session".into(),
+                guidance:"Previously used an authorized test session; inspect whether it still works before asking for login".into(),
+                evidence:None,updated_at:100,
+            },
+            ProjectKnowledgeEntry {
+                key:"abandoned-approach".into(),kind:Kind::KnownPitfall,
+                state:State::Retired,title:"Stopped benchmark".into(),
+                guidance:"Do not resume this abandoned benchmark just because it appears in old logs".into(),
+                evidence:None,updated_at:200,
+            },
+        ];
+        let preview = super::resume_knowledge_preview(&entries);
+        assert_eq!(preview.len(), 2);
+        assert_eq!(preview[0].key, "test-resource");
+        assert_eq!(preview[0].state, State::NeedsRecheck);
+        assert_eq!(preview[1].key, "abandoned-approach");
+        assert_eq!(preview[1].state, State::Retired);
+    }
 
     fn event(
         kind: ActivityKind,
@@ -898,6 +1344,274 @@ mod tests {
             restart_count: 0,
             error: None,
         }
+    }
+
+    fn workflow_run(
+        id: &str,
+        status: WorkflowRunStatus,
+        safe_next_action: &str,
+        updated_at: u64,
+    ) -> WorkflowRunReceipt {
+        WorkflowRunReceipt {
+            schema_version: 1,
+            id: id.to_string(),
+            workspace_id: "workspace-1".to_string(),
+            workspace_name: "RepoTunnel".to_string(),
+            intent: format!("Intent for {id}"),
+            request_fingerprint: "0".repeat(64),
+            task_binding: None,
+            task_scope_approval_pending: false,
+            status,
+            stages: Vec::new(),
+            safe_next_action: safe_next_action.to_string(),
+            created_at: 10,
+            updated_at,
+        }
+    }
+
+    fn task_contract(id: &str, status: TaskIntegrityStatus) -> TaskContract {
+        let mut contract = TaskContract::new(
+            TaskId::new(id).expect("task id"),
+            "workspace-1".to_string(),
+            TaskPrincipal::from_opaque_id("principal-resume").expect("principal"),
+            format!("Resume {id} safely."),
+            vec![
+                TaskAcceptanceCriterion::new("criterion", "Resume facts are correct")
+                    .expect("criterion"),
+            ],
+            BTreeSet::from([TaskOperationClass::InspectRead]),
+            Vec::new(),
+            TaskChangeBudget::default(),
+            TaskVerificationContract::new(VerificationLevel::ChangeSpecific),
+            100,
+        )
+        .expect("contract");
+        contract
+            .transition_to(TaskIntegrityStatus::Active, 101)
+            .expect("activate");
+        if status == TaskIntegrityStatus::Succeeded {
+            complete_task_from_facts(
+                &mut contract,
+                &CompletionFacts::ready(),
+                Vec::new(),
+                0,
+                0,
+                102,
+            )
+            .expect("complete task");
+        } else if status != TaskIntegrityStatus::Active {
+            contract.transition_to(status, 102).expect("transition");
+        }
+        contract
+    }
+
+    #[test]
+    fn task13_resume_maps_task_integrity_states_to_bounded_safe_facts() {
+        let cases = [
+            (TaskIntegrityStatus::Active, None, "Continue"),
+            (
+                TaskIntegrityStatus::AwaitingScopeApproval,
+                Some("scopeApproval"),
+                "scope approval",
+            ),
+            (
+                TaskIntegrityStatus::FrozenIntegrityViolation,
+                Some("integrityViolation"),
+                "integrity violation",
+            ),
+            (
+                TaskIntegrityStatus::FrozenConflict,
+                Some("staleConflict"),
+                "stale conflict",
+            ),
+            (
+                TaskIntegrityStatus::Ambiguous,
+                Some("ambiguousMutation"),
+                "do not replay",
+            ),
+            (
+                TaskIntegrityStatus::Verifying,
+                Some("verificationRemaining"),
+                "verification",
+            ),
+            (TaskIntegrityStatus::Succeeded, None, "complete"),
+        ];
+
+        for (index, (status, blocker, action_fragment)) in cases.into_iter().enumerate() {
+            let contract = task_contract(&format!("task-resume-{index}"), status);
+            let fact = task_integrity_resume_fact(&contract);
+            assert_eq!(fact.task_id, contract.task_id.as_str());
+            assert_eq!(fact.principal_fingerprint, contract.principal.as_str());
+            assert_eq!(fact.workspace_id, contract.workspace_id);
+            assert_eq!(fact.status, status);
+            assert_eq!(fact.scope_revision, contract.scope_revision().get());
+            match blocker {
+                Some(blocker) => assert!(fact.blockers.iter().any(|item| item == blocker)),
+                None => assert!(fact.blockers.is_empty()),
+            }
+            assert!(fact
+                .safe_next_action
+                .to_ascii_lowercase()
+                .contains(&action_fragment.to_ascii_lowercase()));
+            assert_eq!(
+                fact.remaining_verification,
+                (status != TaskIntegrityStatus::Succeeded)
+                    .then_some(VerificationLevel::ChangeSpecific)
+            );
+        }
+    }
+
+    #[test]
+    fn task13_resume_degrades_safely_when_task_ledger_is_corrupt() {
+        let (facts, diagnostic) = task_integrity_resume_facts_result(
+            Err("task ledger is corrupt".to_string()),
+            "workspace-1",
+        );
+        assert!(facts.is_empty());
+        let diagnostic = diagnostic.expect("corrupt ledger diagnostic");
+        assert!(diagnostic.contains("Task Integrity"));
+        assert!(diagnostic.contains("Resume"));
+        assert!(diagnostic.contains("corrupt"));
+    }
+
+    #[test]
+    fn task13_task_integrity_safety_next_action_precedes_stale_semantic_memory() {
+        let conflict = task_integrity_resume_fact(&task_contract(
+            "task-resume-conflict",
+            TaskIntegrityStatus::FrozenConflict,
+        ));
+        let next = resume_next_actions_with_task_integrity(
+            &[conflict],
+            "current",
+            &[],
+            &[],
+            &[],
+            &["Blindly continue the old saved plan.".to_string()],
+        );
+        assert_eq!(next.len(), 1);
+        assert!(next[0].to_ascii_lowercase().contains("stale conflict"));
+        assert!(!next[0].contains("Blindly continue"));
+    }
+
+    #[test]
+    fn workflow_resume_facts_surface_safe_next_actions_and_attention() {
+        let runs = vec![
+            workflow_run(
+                "running-workflow",
+                WorkflowRunStatus::Running,
+                "Continue the current stage.",
+                30,
+            ),
+            workflow_run(
+                "approval-workflow",
+                WorkflowRunStatus::AwaitingApproval,
+                "Wait for local approval before continuing.",
+                40,
+            ),
+            workflow_run(
+                "failed-workflow",
+                WorkflowRunStatus::Failed,
+                "Inspect the failed verification receipt before retrying.",
+                45,
+            ),
+            workflow_run(
+                "ambiguous-workflow",
+                WorkflowRunStatus::Ambiguous,
+                "Inspect current browser state; do not replay the navigation.",
+                50,
+            ),
+            workflow_run(
+                "completed-workflow",
+                WorkflowRunStatus::Succeeded,
+                "Workflow is complete.",
+                20,
+            ),
+        ];
+
+        let facts = workflow_resume_facts(&runs);
+        assert_eq!(facts.latest_activity_at, Some(50));
+        assert!(facts.attention_required);
+        assert!(facts.active[0].contains("ambiguous-workflow"));
+        assert!(facts.active[0].contains("do not replay"));
+        assert!(facts
+            .active
+            .iter()
+            .any(|item| item.contains("approval-workflow") && item.contains("local approval")));
+        assert!(facts
+            .active
+            .iter()
+            .any(|item| item.contains("running-workflow") && item.contains("current stage")));
+        assert!(facts
+            .failed
+            .iter()
+            .any(|item| item.contains("ambiguous-workflow") && item.contains("do not replay")));
+        assert!(facts
+            .failed
+            .iter()
+            .any(|item| item.contains("failed-workflow") && item.contains("failed verification")));
+        assert!(facts
+            .completed
+            .iter()
+            .any(|item| item.contains("completed-workflow")));
+    }
+
+    #[test]
+    fn resume_survives_unavailable_workflow_history() {
+        let (runs, diagnostic) =
+            workflow_runs_for_resume_result(Err("workflow receipt store is corrupt".to_string()));
+        assert!(runs.is_empty());
+        assert!(diagnostic
+            .as_deref()
+            .is_some_and(|value| value.contains("workflow receipt store is corrupt")));
+    }
+
+    #[test]
+    fn resume_survives_unavailable_activity_history() {
+        let (groups, diagnostic) =
+            activity_groups_for_resume_result(Err("activity store is corrupt".to_string()));
+        assert!(groups.is_empty());
+        assert!(diagnostic
+            .as_deref()
+            .is_some_and(|value| value.contains("activity store is corrupt")));
+    }
+
+    #[test]
+    fn resume_without_activity_still_reports_live_managed_process() {
+        let process = managed_process(
+            "live-recovery",
+            "cargo test --locked",
+            ManagedProcessStatus::Running,
+            50,
+        );
+        let facts = resume_facts(&[], &[process]);
+        assert_eq!(facts.active.len(), 1);
+        assert!(facts.active[0].contains("live-recovery"));
+        assert!(!facts.attention_required);
+    }
+
+    #[test]
+    fn resume_without_activity_keeps_managed_process_failure_attention() {
+        let process = managed_process(
+            "failed-recovery",
+            "cargo test --locked",
+            ManagedProcessStatus::Failed,
+            60,
+        );
+        let facts = resume_facts(&[], &[process]);
+        assert!(facts.attention_required);
+        assert_eq!(facts.failed.len(), 1);
+        assert!(facts.failed[0].contains("failed-recovery"));
+    }
+
+    #[test]
+    fn missing_activity_never_creates_fake_completed_milestone() {
+        let (groups, diagnostic) =
+            activity_groups_for_resume_result(Err("activity unavailable".to_string()));
+        let facts = resume_facts(&groups, &[]);
+        assert!(diagnostic.is_some());
+        assert!(groups.is_empty());
+        assert!(facts.completed.is_empty());
+        assert_eq!(facts.latest_activity_at, None);
     }
 
     #[test]
@@ -975,6 +1689,7 @@ mod tests {
             decisions: vec![],
             preferences: vec![],
             next_steps: vec!["Continue".to_string()],
+            knowledge: Vec::new(),
             updated_at: 100,
             git_head_at_update: Some("abc".to_string()),
             activity_updated_at: 100,
@@ -996,6 +1711,7 @@ mod tests {
             decisions: vec![],
             preferences: vec![],
             next_steps: vec![],
+            knowledge: Vec::new(),
             updated_at: 100,
             git_head_at_update: Some("abc".to_string()),
             activity_updated_at: 100,
@@ -1391,6 +2107,7 @@ mod tests {
             decisions: vec![],
             preferences: vec![],
             next_steps: vec!["old next step".to_string()],
+            knowledge: Vec::new(),
             updated_at: 500,
             git_head_at_update: None,
             activity_updated_at: 0,

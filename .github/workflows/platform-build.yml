@@ -30,7 +30,29 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
+            bubblewrap \
             wget
+
+      - name: Enable distro-restricted Bubblewrap for sandbox security tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 may restrict unprivileged Bubblewrap with AppArmor.
+          # Use its restricted per-binary profile, not global userns changes.
+          if /usr/bin/bwrap --ro-bind / / -- /usr/bin/true; then
+            echo "Bubblewrap sandbox available."
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends apparmor-profiles apparmor-utils
+          source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          target=/etc/apparmor.d/bwrap-userns-restrict
+          test -f "$source" || {
+            echo "STOP: Restricted Bubblewrap AppArmor profile unavailable." >&2
+            exit 1
+          }
+          sudo install -m 0644 "$source" "$target"
+          sudo apparmor_parser -r "$target"
+          /usr/bin/bwrap --ro-bind / / -- /usr/bin/true
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -75,13 +97,10 @@ jobs:
         shell: bash
         run: |
           VERSION="$(node -p "require('./package.json').version")"
-          case "${GITHUB_REF_NAME}" in
-            "v${VERSION}"|"v${VERSION}-retry"*) ;;
-            *)
-              echo "Tag ${GITHUB_REF_NAME} does not match RepoTunnel v${VERSION}." >&2
-              exit 1
-              ;;
-          esac
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            echo "STOP: Release tag ${GITHUB_REF_NAME} must match exact source version v${VERSION}." >&2
+            exit 1
+          fi
 
       - name: Verify release metadata
         shell: bash
@@ -127,8 +146,8 @@ jobs:
       - name: Rust Clippy (warnings are errors)
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-      - name: Rust tests
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - name: Rust tests (serialized sandbox acceptance)
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
 
       - name: RustSec dependency audit
         run: cargo audit --no-yanked --file src-tauri/Cargo.lock
@@ -217,6 +236,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up Node.js for linked desktop acceptance
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Python for Windows native helper tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -242,10 +275,24 @@ jobs:
         shell: cmd
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings
 
+      - name: Build frontend for linked desktop acceptance
+        run: npm run build
+
+      - name: Link native RepoTunnel helper for AppContainer acceptance
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin repotunnel
+
+      - name: Prepare Windows native test fixture directory
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'RepoTunnelNativeFixtures'
+          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
+          "TEMP=$fixture" >> $env:GITHUB_ENV
+          "TMP=$fixture" >> $env:GITHUB_ENV
+
       - name: Windows Rust tests
         env:
           REPOTUNNEL_WINDOWS_TEST_MANIFEST: "1"
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
 
   windows:
     name: Windows x64
@@ -384,6 +431,13 @@ jobs:
             exit "$status"
           fi
 
+      - name: Build frontend for linked desktop acceptance
+        run: npm run build
+
+      - name: Link native RepoTunnel desktop executable for sandbox acceptance
+        shell: bash
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin repotunnel
+
       - name: macOS Rust tests
         shell: bash
         run: |
@@ -395,7 +449,8 @@ jobs:
           fi
           export DYLD_LIBRARY_PATH="$swift_runtime_paths${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           export DYLD_FALLBACK_LIBRARY_PATH="$swift_runtime_paths${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+          export TMPDIR="$(cd "$TMPDIR" && pwd -P)/"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
 
       - name: Build signed app and DMG
         shell: bash
@@ -453,8 +508,13 @@ jobs:
 
   release:
     name: Publish release
-    if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && github.ref_name == github.event.repository.default_branch)
+    # Manual dispatch validates and builds only. Publication requires an
+    # explicit version tag and successful platform/security gates.
+    if: github.ref_type == 'tag'
     needs: [quality, linux, windows_checks, windows, macos]
+    concurrency:
+      group: repotunnel-release-publication
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -491,21 +551,23 @@ jobs:
           )
           ls -lh release-files
 
-      - name: Point final release tag at verified commit
+      - name: Verify immutable release tag and unpublished release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh api --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/git/refs/tags/${RELEASE_TAG}" \
-              -f sha="${GITHUB_SHA}" \
-              -F force=true >/dev/null
-          else
-            gh api --method POST \
-              "repos/${GITHUB_REPOSITORY}/git/refs" \
-              -f ref="refs/tags/${RELEASE_TAG}" \
-              -f sha="${GITHUB_SHA}" >/dev/null
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
+            echo "STOP: Publishing requires the exact source-version tag." >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}" || {
+            echo "STOP: Checked-out commit differs from the workflow release commit." >&2
+            exit 1
+          }
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "STOP: Release ${RELEASE_TAG} already exists; do not overwrite it." >&2
+            exit 1
           fi
 
       - name: Publish GitHub release
@@ -516,15 +578,3 @@ jobs:
             --verify-tag \
             --title "RepoTunnel ${RELEASE_TAG}" \
             --notes-file release-notes.md
-
-      - name: Remove successful retry tag
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
-            gh api --method DELETE \
-              "repos/${GITHUB_REPOSITORY}/git/refs/tags/${GITHUB_REF_NAME}" \
-              >/dev/null || echo "Release succeeded; retry-tag cleanup can be done later."
-          fi

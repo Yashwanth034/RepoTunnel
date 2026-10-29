@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "RepoTunnel Continuation",
   "short_name": "RepoTunnel",
-  "version": "0.4.1",
+  "version": "0.4.4",
   "description": "Safely delivers RepoTunnel continuation checkpoints to exact saved ChatGPT conversations.",
   "minimum_chrome_version": "102",
   "incognito": "not_allowed",

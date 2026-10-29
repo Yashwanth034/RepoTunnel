@@ -1,0 +1,145 @@
+name: Cross-platform source validation
+
+# No installers or signed release artifacts are created here. Run against
+# proposed commits, or manually while preparing a cross-platform milestone.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-platform-source-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: ${{ matrix.name }} — source and native tests
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    # Native runners have limited temporary disk and RAM. Keep debug symbols
+    # out of test binaries without relaxing compile warnings or test coverage.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+          - name: macOS Intel
+            runner: macos-15-intel
+          - name: macOS Apple Silicon
+            runner: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Node 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      # The persistent-helper transport regression starts Python on the
+      # current runner; don't assume a Unix /usr/bin/python3 on Windows.
+      - name: Python for Windows native helper tests
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+          components: clippy,rustfmt
+
+      - name: Cache Rust compilation
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Frontend dependency consistency
+        run: npm ci
+
+      - name: Frontend typecheck
+        run: npm run check
+
+      - name: Frontend tests
+        run: npm run test:frontend
+
+      - name: Browser transaction and Chrome CDP fast-path tests
+        run: node --test src-tauri/tests/browser_transaction_runtime.test.cjs src-tauri/tests/browser_fastpath.test.cjs
+
+      - name: Frontend build without desktop packaging
+        run: npm run build
+
+      - name: Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Rust clippy with warnings denied
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # cargo check/clippy and --lib tests can pass while the actual Tauri
+      # executable fails at native FFI/system-library linking. Build the
+      # desktop entrypoint on every Windows/macOS runner, without producing
+      # an installer or publishing artifacts, before native acceptance.
+      - name: Link native RepoTunnel desktop executable (no installer)
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin repotunnel
+
+      - name: Prepare Windows native test fixture directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Windows runners may expose TEMP as an 8.3 alias (RUNNER~1);
+          # native junction and scoped-source tests need a stable long path.
+          $fixture = Join-Path $env:RUNNER_TEMP 'RepoTunnelNativeFixtures'
+          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
+          "TEMP=$fixture" >> $env:GITHUB_ENV
+          "TMP=$fixture" >> $env:GITHUB_ENV
+
+      - name: Windows native Rust tests
+        if: runner.os == 'Windows'
+        env:
+          REPOTUNNEL_WINDOWS_TEST_MANIFEST: "1"
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+
+      - name: macOS native Rust tests with Swift runtime paths
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift_runtime_paths="$(xcrun swift -print-target-info | python3 -c 'import json, sys; print(":".join(json.load(sys.stdin)["paths"]["runtimeLibraryPaths"]))')"
+          if [ -z "$swift_runtime_paths" ]; then
+            echo "Swift runtime paths are unavailable." >&2
+            exit 1
+          fi
+          export DYLD_LIBRARY_PATH="$swift_runtime_paths${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          export DYLD_FALLBACK_LIBRARY_PATH="$swift_runtime_paths${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+          # macOS exposes /var as a symlink to /private/var; native sandbox
+          # tests compare fully resolved paths, so use a canonical temp root.
+          export TMPDIR="$(cd "$TMPDIR" && pwd -P)/"
+          if cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1; then
+            echo "macOS native Rust tests passed."
+          else
+            # Diagnostic only. Run /usr/bin/true with two *independent*
+            # temporary policies to distinguish an unavailable sandbox-exec
+            # from RepoTunnel's task-scoped Seatbelt profile. The native
+            # security tests remain mandatory and this job still fails.
+            echo "SEATBELT_DIAGNOSTIC_BEGIN"
+            set +e
+            /usr/bin/sandbox-exec -p '(version 1)(allow default)' -- /usr/bin/true
+            echo "SEATBELT_ALLOW_DEFAULT_EXIT=$?"
+            /usr/bin/sandbox-exec -p '(version 1)(deny default)(allow process*)(allow sysctl-read)(allow file-read* (subpath "/System") (subpath "/Library") (subpath "/usr") (subpath "/private/etc") (subpath "/dev"))' -- /usr/bin/true
+            echo "SEATBELT_MINIMAL_DENY_DEFAULT_EXIT=$?"
+            /usr/bin/sandbox-exec -p '(version 1)(deny default)(allow process*)(allow sysctl-read)(allow file-read* (literal "/") (subpath "/System") (subpath "/Library") (subpath "/usr") (subpath "/private/etc") (subpath "/dev"))' -- /usr/bin/true
+            echo "SEATBELT_ROOT_READ_EXIT=$?"
+            set -e
+            echo "SEATBELT_DIAGNOSTIC_END"
+            exit 1
+          fi

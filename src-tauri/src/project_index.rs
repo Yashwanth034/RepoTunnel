@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     fs::{self, File},
-    io::{ErrorKind, Read},
+    io::{ErrorKind, Read, Seek},
     path::{Component, Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -143,6 +143,13 @@ pub(crate) struct ProjectFileMetadata {
     pub(crate) path: String,
     pub(crate) size: u64,
     pub(crate) modified_nanos: u128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectMonitoringMetadata {
+    pub(crate) files: Vec<ProjectFileMetadata>,
+    pub(crate) directories: Vec<String>,
+    pub(crate) truncated: bool,
 }
 
 fn workspace_root(workspace: &Workspace) -> Result<PathBuf, String> {
@@ -398,11 +405,32 @@ pub(crate) fn is_probably_binary(path: &Path, size: u64) -> Result<bool, String>
 
     let mut file =
         File::open(path).map_err(|error| format!("Could not inspect file content: {error}"))?;
+    is_probably_binary_opened(path, size, &mut file)
+}
+
+// The authenticated reader already owns a checked file handle. Inspect that
+// handle rather than opening the pathname a second time after authorization.
+pub(crate) fn is_probably_binary_opened(
+    path: &Path,
+    size: u64,
+    file: &mut File,
+) -> Result<bool, String> {
+    if extension(path)
+        .as_deref()
+        .is_some_and(|ext| BINARY_EXTENSIONS.contains(&ext))
+    {
+        return Ok(true);
+    }
+    if size == 0 {
+        return Ok(false);
+    }
     let mut buffer = vec![0u8; SNIFF_BYTES.min(size as usize)];
     let read = file
         .read(&mut buffer)
         .map_err(|error| format!("Could not inspect file content: {error}"))?;
     buffer.truncate(read);
+    file.rewind()
+        .map_err(|error| format!("Could not reset inspected file content: {error}"))?;
 
     if buffer.contains(&0) {
         return Ok(true);
@@ -459,10 +487,10 @@ fn inspect_file(
     })
 }
 
-pub(crate) fn project_file_metadata(
+pub(crate) fn project_monitoring_metadata(
     workspace: &Workspace,
     entry_limit: usize,
-) -> Result<(Vec<ProjectFileMetadata>, bool), String> {
+) -> Result<ProjectMonitoringMetadata, String> {
     let entry_limit = entry_limit.clamp(100, MAX_PROJECT_ENTRIES);
     let root = workspace_root(workspace)?;
     let root_rules = rules_for_directory(&root, &root);
@@ -471,6 +499,7 @@ pub(crate) fn project_file_metadata(
         rules: root_rules,
     }]);
     let mut files = Vec::new();
+    let mut directories = Vec::new();
     let mut seen_entries = 0usize;
     let mut truncated = false;
 
@@ -509,6 +538,7 @@ pub(crate) fn project_file_metadata(
             seen_entries += 1;
 
             if is_directory {
+                directories.push(relative.clone());
                 let mut child_rules = item.rules.clone();
                 child_rules.extend(parse_ignore_file(&root, &path, ".gitignore"));
                 child_rules.extend(parse_ignore_file(&root, &path, ".ignore"));
@@ -536,7 +566,20 @@ pub(crate) fn project_file_metadata(
         }
     }
 
-    Ok((files, truncated))
+    Ok(ProjectMonitoringMetadata {
+        files,
+        directories,
+        truncated,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn project_file_metadata(
+    workspace: &Workspace,
+    entry_limit: usize,
+) -> Result<(Vec<ProjectFileMetadata>, bool), String> {
+    let metadata = project_monitoring_metadata(workspace, entry_limit)?;
+    Ok((metadata.files, metadata.truncated))
 }
 
 pub(crate) fn project_snapshot(

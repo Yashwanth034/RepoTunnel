@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ConfirmationDialog from "./ConfirmationDialog";
+import { reconcilePolledRecords } from "../lib/commandPolling";
+import { preserveGitStatus, preserveGitDiff } from "../lib/gitSnapshot";
 import {
   approveGitAction,
   getGitDiff,
@@ -65,6 +67,14 @@ function GitPanel({ workspaces, gatewayRunning, onError, onChangeQueued }: GitPa
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [restoreTarget, setRestoreTarget] = useState<GitFileChange | null>(null);
+  const revisionRef = useRef(0);
+  const fullRefreshInFlightRef = useRef<number | null>(null);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; revisionRef.current++; };
+  }, []);
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
@@ -78,11 +88,14 @@ function GitPanel({ workspaces, gatewayRunning, onError, onChangeQueued }: GitPa
   }, [selectedWorkspaceId, workspaces]);
 
   const refresh = useCallback(async () => {
+    const revision = ++revisionRef.current;
+    fullRefreshInFlightRef.current = revision;
     if (!selectedWorkspaceId) {
       setStatus(null);
       setDiff(null);
       setCommits([]);
       setActions([]);
+      fullRefreshInFlightRef.current = null;
       return;
     }
     setLoading(true);
@@ -91,50 +104,78 @@ function GitPanel({ workspaces, gatewayRunning, onError, onChangeQueued }: GitPa
         getGitStatus(selectedWorkspaceId),
         listGitActions(selectedWorkspaceId, 30),
       ]);
-      setStatus(repository);
-      setActions(activity);
+      if (revision !== revisionRef.current || !mountedRef.current) return;
       if (repository.available) {
         const [nextDiff, nextCommits] = await Promise.all([
           getGitDiff(selectedWorkspaceId, showStagedDiff),
           getGitLog(selectedWorkspaceId, 10),
         ]);
-        setDiff(nextDiff);
+        if (revision !== revisionRef.current || !mountedRef.current) return;
+        setStatus((current) => preserveGitStatus(current, repository));
+        setActions((current) => reconcilePolledRecords(current, activity));
+        setDiff((current) => preserveGitDiff(current, nextDiff));
         setCommits(nextCommits);
       } else {
+        setStatus((current) => preserveGitStatus(current, repository));
+        setActions((current) => reconcilePolledRecords(current, activity));
         setDiff(null);
         setCommits([]);
       }
     } catch (error) {
-      onError(error instanceof Error ? error.message : String(error));
+      if (revision === revisionRef.current && mountedRef.current) {
+        onError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setLoading(false);
+      if (fullRefreshInFlightRef.current === revision) {
+        fullRefreshInFlightRef.current = null;
+        if (mountedRef.current) setLoading(false);
+      }
     }
   }, [onError, selectedWorkspaceId, showStagedDiff]);
 
   useEffect(() => {
-    refresh().catch(() => undefined);
+    void refresh();
+    return () => { revisionRef.current++; };
   }, [refresh]);
 
   useEffect(() => {
     if (!gatewayRunning || !selectedWorkspaceId) return;
-    const timer = window.setInterval(() => {
-      Promise.all([
-        getGitStatus(selectedWorkspaceId),
-        listGitActions(selectedWorkspaceId, 30),
-      ])
-        .then(async ([repository, activity]) => {
-          setStatus(repository);
-          setActions(activity);
-          if (repository.available) {
-            const nextDiff = await getGitDiff(selectedWorkspaceId, showStagedDiff);
-            setDiff(nextDiff);
-          } else {
-            setDiff(null);
-          }
-        })
-        .catch(() => undefined);
-    }, 3500);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let pending = false;
+    const poll = async () => {
+      // Expensive Git status/diff reads must not stack when a project is busy.
+      if (!active || pending || fullRefreshInFlightRef.current !== null) return;
+      pending = true;
+      const revision = ++revisionRef.current;
+      try {
+        const [repository, activity] = await Promise.all([
+          getGitStatus(selectedWorkspaceId),
+          listGitActions(selectedWorkspaceId, 30),
+        ]);
+        if (!active || revision !== revisionRef.current) return;
+        if (repository.available) {
+          const nextDiff = await getGitDiff(selectedWorkspaceId, showStagedDiff);
+          if (!active || revision !== revisionRef.current) return;
+          setStatus((current) => preserveGitStatus(current, repository));
+          setActions((current) => reconcilePolledRecords(current, activity));
+          setDiff((current) => preserveGitDiff(current, nextDiff));
+        } else {
+          setStatus((current) => preserveGitStatus(current, repository));
+          setActions((current) => reconcilePolledRecords(current, activity));
+          setDiff(null);
+        }
+      } catch {
+        // Background status polling is best-effort.
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = window.setInterval(() => void poll(), 3500);
+    return () => {
+      active = false;
+      revisionRef.current++;
+      window.clearInterval(timer);
+    };
   }, [gatewayRunning, selectedWorkspaceId, showStagedDiff]);
 
   async function requestCommit() {

@@ -435,9 +435,14 @@ fn apply_home_change_plan(
     let edit_group = format!("home-chat-{generation_id}");
     for action in plan.actions {
         let outcome = match action {
-            HomeChangeAction::CreateFile { path, content } => {
-                changes::create_file(app, workspace, path, content, Some(&edit_group))?
-            }
+            HomeChangeAction::CreateFile { path, content } => changes::create_file(
+                app,
+                workspace,
+                changes::ChangeActor::InternalSystem,
+                path,
+                content,
+                Some(&edit_group),
+            )?,
             HomeChangeAction::PatchFile {
                 path,
                 expected,
@@ -445,6 +450,7 @@ fn apply_home_change_plan(
             } => changes::patch_file(
                 app,
                 workspace,
+                changes::ChangeActor::InternalSystem,
                 path,
                 expected,
                 replacement,

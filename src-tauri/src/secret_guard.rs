@@ -73,8 +73,18 @@ fn looks_like_generic_assignment(line: &str) -> bool {
         && plausible_token(value)
 }
 
+fn token_prefix_start(line: &str, prefix: &str) -> Option<usize> {
+    line.match_indices(prefix).find_map(|(index, _)| {
+        let at_boundary = line[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')));
+        at_boundary.then_some(index)
+    })
+}
+
 fn token_after_prefix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
-    let index = line.find(prefix)?;
+    let index = token_prefix_start(line, prefix)?;
     let tail = &line[index..];
     let token = tail
         .split(|ch: char| {
@@ -228,7 +238,7 @@ fn redact_token_prefixes(mut line: String) -> String {
         "AIza",
         "AKIA",
     ] {
-        while let Some(start) = line.find(prefix) {
+        while let Some(start) = token_prefix_start(&line, prefix) {
             let end = line[start..]
                 .char_indices()
                 .skip(1)
@@ -393,6 +403,13 @@ mod tests {
         assert!(detect_secret(b"GITHUB_TOKEN=${GITHUB_TOKEN}").is_none());
         assert!(detect_secret(b"api_key=process.env.OPENAI_API_KEY").is_none());
         assert!(detect_secret(b"Authorization=Bearer ${TOKEN}").is_none());
+    }
+
+    #[test]
+    fn harmless_secret_prefix_substrings_inside_filenames_are_not_credentials() {
+        let text = "bash scripts/check-task-integrity-invariants.sh";
+        assert!(detect_secret(text.as_bytes()).is_none());
+        assert_eq!(redact_text(text), text);
     }
 
     #[test]

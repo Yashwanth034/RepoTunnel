@@ -255,7 +255,7 @@ fn validate_drafts(nodes: &[SemanticNodeDraft]) -> Result<(), String> {
     Ok(())
 }
 
-fn fingerprint(
+fn fingerprint_streaming(
     surface: SemanticSurface,
     target_id: &str,
     document_identity: &str,
@@ -272,17 +272,40 @@ fn fingerprint(
         truncated: bool,
     }
 
-    let encoded = serde_json::to_vec(&Fingerprint {
-        surface,
-        target_id,
-        document_identity,
-        nodes,
-        truncated,
-    })
+    struct DigestWriter<'a>(&'a mut Sha256);
+
+    impl std::io::Write for DigestWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(
+        DigestWriter(&mut hasher),
+        &Fingerprint {
+            surface,
+            target_id,
+            document_identity,
+            nodes,
+            truncated,
+        },
+    )
     .map_err(|error| format!("Could not hash semantic snapshot: {error}"))?;
 
-    let digest = Sha256::digest(encoded);
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    use std::fmt::Write as _;
+    for byte in digest {
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|error| format!("Could not encode semantic snapshot hash: {error}"))?;
+    }
+    Ok(encoded)
 }
 
 fn build_nodes(drafts: &[SemanticNodeDraft]) -> (Vec<SemanticNode>, HashMap<String, String>) {
@@ -343,7 +366,7 @@ pub(crate) fn publish_snapshot(input: SemanticSnapshotInput) -> Result<SemanticS
         .collect::<Vec<_>>();
     validate_drafts(&sanitized)?;
 
-    let hash = fingerprint(
+    let hash = fingerprint_streaming(
         input.surface,
         &input.target_id,
         &input.document_identity,
@@ -476,17 +499,19 @@ pub(crate) fn resolve_ref(
         .ok_or(SemanticRefError::UnknownRef)
 }
 
-fn contains_case_insensitive(value: &str, needle: &str) -> bool {
+fn normalized_ascii_needle(value: Option<&str>) -> Option<String> {
     value
-        .to_ascii_lowercase()
-        .contains(&needle.to_ascii_lowercase())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
-fn option_matches(value: &str, expected: Option<&str>) -> bool {
-    expected
-        .map(str::trim)
-        .filter(|expected| !expected.is_empty())
-        .is_none_or(|expected| contains_case_insensitive(value, expected))
+fn contains_ascii_lowercase(value: &str, lowercase_needle: &str) -> bool {
+    value.to_ascii_lowercase().contains(lowercase_needle)
+}
+
+fn option_matches(value: &str, lowercase_expected: Option<&str>) -> bool {
+    lowercase_expected.is_none_or(|expected| contains_ascii_lowercase(value, expected))
 }
 
 pub(crate) fn find_nodes(
@@ -513,21 +538,9 @@ pub(crate) fn find_nodes(
         return Err(SemanticRefError::ExpiredSnapshot);
     }
 
-    let free_text = query
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let role = query
-        .role
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let name = query
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let free_text = normalized_ascii_needle(query.query.as_deref());
+    let role = normalized_ascii_needle(query.role.as_deref());
+    let name = normalized_ascii_needle(query.name.as_deref());
     let state = query
         .state
         .as_deref()
@@ -541,10 +554,10 @@ pub(crate) fn find_nodes(
 
     let mut results = Vec::new();
     for node in &snapshot.nodes {
-        if !option_matches(&node.role, role) {
+        if !option_matches(&node.role, role.as_deref()) {
             continue;
         }
-        if !option_matches(&node.name, name) {
+        if !option_matches(&node.name, name.as_deref()) {
             continue;
         }
         if state.is_some_and(|wanted| {
@@ -563,7 +576,7 @@ pub(crate) fn find_nodes(
         }) {
             continue;
         }
-        if let Some(wanted) = free_text {
+        if let Some(wanted) = free_text.as_deref() {
             let matches = [
                 Some(node.role.as_str()),
                 Some(node.name.as_str()),
@@ -573,7 +586,7 @@ pub(crate) fn find_nodes(
             ]
             .into_iter()
             .flatten()
-            .any(|value| contains_case_insensitive(value, wanted));
+            .any(|value| contains_ascii_lowercase(value, wanted));
             if !matches {
                 continue;
             }
@@ -647,6 +660,38 @@ mod tests {
             truncated: false,
             known_hash,
         }
+    }
+
+    #[test]
+    fn streaming_fingerprint_matches_legacy_json_hash() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LegacyFingerprint<'a> {
+            surface: SemanticSurface,
+            target_id: &'a str,
+            document_identity: &'a str,
+            nodes: &'a [SemanticNodeDraft],
+            truncated: bool,
+        }
+
+        let nodes = vec![draft("backend-a", "Continue"), draft("backend-b", "Cancel")];
+        let legacy = serde_json::to_vec(&LegacyFingerprint {
+            surface: SemanticSurface::Desktop,
+            target_id: "app-1",
+            document_identity: "window-1",
+            nodes: &nodes,
+            truncated: true,
+        })
+        .expect("legacy fingerprint json");
+        let expected = Sha256::digest(legacy)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        let streamed =
+            fingerprint_streaming(SemanticSurface::Desktop, "app-1", "window-1", &nodes, true)
+                .expect("streamed fingerprint");
+        assert_eq!(streamed, expected);
     }
 
     #[test]

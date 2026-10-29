@@ -11,7 +11,10 @@ use tauri::{path::BaseDirectory, AppHandle, Manager};
 
 use crate::{
     activity, continuity, git,
-    models::{ProjectMemory, Workspace},
+    models::{
+        ProjectKnowledgeEntry, ProjectKnowledgeKind, ProjectKnowledgeState, ProjectMemory,
+        Workspace,
+    },
     secret_guard,
 };
 
@@ -19,6 +22,11 @@ const MEMORY_FILE: &str = "project-memory.json";
 const MAX_CONTEXT_CHARS: usize = 12_000;
 const MAX_ITEM_CHARS: usize = 1_000;
 const MAX_ITEMS: usize = 40;
+const MAX_KNOWLEDGE: usize = 64;
+const MAX_KNOWLEDGE_TITLE_CHARS: usize = 120;
+const MAX_KNOWLEDGE_GUIDANCE_CHARS: usize = 3_000;
+const MAX_KNOWLEDGE_EVIDENCE_CHARS: usize = 512;
+static MEMORY_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -199,6 +207,7 @@ pub(crate) fn get(app: &AppHandle, workspace: &Workspace) -> Result<ProjectMemor
             decisions: Vec::new(),
             preferences: Vec::new(),
             next_steps: Vec::new(),
+            knowledge: Vec::new(),
             updated_at: 0,
             git_head_at_update: None,
             activity_updated_at: 0,
@@ -214,7 +223,15 @@ pub(crate) fn update(
     preferences: Vec<String>,
     next_steps: Vec<String>,
 ) -> Result<ProjectMemory, String> {
+    let _guard = MEMORY_MUTATION_LOCK
+        .lock()
+        .map_err(|_| "Project memory mutation is temporarily unavailable.")?;
     let mut store = load(app)?;
+    let knowledge = store
+        .projects
+        .get(&workspace.id)
+        .map(|existing| existing.knowledge.clone())
+        .unwrap_or_default();
     let summary = clip(summary, MAX_CONTEXT_CHARS);
     let goals = clean_items(goals);
     let decisions = clean_items(decisions);
@@ -244,6 +261,7 @@ pub(crate) fn update(
         decisions,
         preferences,
         next_steps,
+        knowledge,
         updated_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
@@ -256,7 +274,239 @@ pub(crate) fn update(
     Ok(memory)
 }
 
+/// A reusable project fact belongs to the existing durable project memory.
+/// No new database, framework or capability registry is created.
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectKnowledgeDraft {
+    pub(crate) key: String,
+    pub(crate) kind: ProjectKnowledgeKind,
+    pub(crate) state: ProjectKnowledgeState,
+    pub(crate) title: String,
+    pub(crate) guidance: String,
+    pub(crate) evidence: Option<String>,
+}
+
+fn validate_knowledge_draft(draft: &ProjectKnowledgeDraft) -> Result<(), String> {
+    if draft.key.is_empty()
+        || draft.key.len() > 80
+        || !draft.key.bytes().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'-' | b'_' | b'.')
+        })
+    {
+        return Err("Knowledge key must be 1..80 lowercase ASCII letters, digits, dots, dashes or underscores.".into());
+    }
+    let valid = |value: &str, max: usize| !value.trim().is_empty() && value.chars().count() <= max;
+    if !valid(&draft.title, MAX_KNOWLEDGE_TITLE_CHARS)
+        || !valid(&draft.guidance, MAX_KNOWLEDGE_GUIDANCE_CHARS)
+    {
+        return Err("Knowledge title must be 1..120 chars and guidance 1..3000 chars, with no silent truncation.".into());
+    }
+    if draft
+        .evidence
+        .as_deref()
+        .is_some_and(|text| text.chars().count() > MAX_KNOWLEDGE_EVIDENCE_CHARS)
+    {
+        return Err("Knowledge evidence reference is limited to 512 characters.".into());
+    }
+    // Resource references may mention a previously configured session, never
+    // contain the credential/session data itself. Do not weaken this guard.
+    let combined = format!(
+        "{}\n{}\n{}\n{}",
+        draft.key,
+        draft.title,
+        draft.guidance,
+        draft.evidence.as_deref().unwrap_or("")
+    );
+    if let Some(kind) = secret_guard::detect_secret(combined.as_bytes()) {
+        return Err(format!(
+            "Project knowledge contains {kind}; save only non-secret references and steps."
+        ));
+    }
+    Ok(())
+}
+
+fn apply_knowledge(
+    memory: &mut ProjectMemory,
+    draft: ProjectKnowledgeDraft,
+    now: u64,
+) -> Result<bool, String> {
+    validate_knowledge_draft(&draft)?;
+    let evidence = draft
+        .evidence
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty());
+    let title = draft.title.trim().to_string();
+    let guidance = draft.guidance.trim().to_string();
+    if let Some(existing) = memory
+        .knowledge
+        .iter_mut()
+        .find(|entry| entry.key == draft.key)
+    {
+        if existing.kind == draft.kind
+            && existing.state == draft.state
+            && existing.title == title
+            && existing.guidance == guidance
+            && existing.evidence == evidence
+        {
+            return Ok(false);
+        }
+        existing.kind = draft.kind;
+        existing.state = draft.state;
+        existing.title = title;
+        existing.guidance = guidance;
+        existing.evidence = evidence;
+        existing.updated_at = now;
+    } else {
+        if memory.knowledge.len() >= MAX_KNOWLEDGE {
+            return Err("Project knowledge is full (64 records); explicitly retire/consolidate an existing item instead of silently discarding it.".into());
+        }
+        memory.knowledge.push(ProjectKnowledgeEntry {
+            key: draft.key,
+            kind: draft.kind,
+            state: draft.state,
+            title,
+            guidance,
+            evidence,
+            updated_at: now,
+        });
+    }
+    Ok(true)
+}
+
+/// Upsert a durable, bounded reusable note in the EXISTING project-memory.json.
+pub(crate) fn upsert_knowledge(
+    app: &AppHandle,
+    workspace: &Workspace,
+    draft: ProjectKnowledgeDraft,
+) -> Result<ProjectKnowledgeEntry, String> {
+    validate_knowledge_draft(&draft)?;
+    let _guard = MEMORY_MUTATION_LOCK
+        .lock()
+        .map_err(|_| "Project memory mutation is temporarily unavailable.")?;
+    let mut store = load(app)?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let key = draft.key.clone();
+    let memory = store
+        .projects
+        .entry(workspace.id.clone())
+        .or_insert_with(|| ProjectMemory {
+            workspace_id: workspace.id.clone(),
+            workspace_name: workspace.name.clone(),
+            summary: String::new(),
+            goals: Vec::new(),
+            decisions: Vec::new(),
+            preferences: Vec::new(),
+            next_steps: Vec::new(),
+            knowledge: Vec::new(),
+            updated_at: 0,
+            git_head_at_update: None,
+            activity_updated_at: 0,
+        });
+    let changed = apply_knowledge(memory, draft, now)?;
+    let result = memory
+        .knowledge
+        .iter()
+        .find(|entry| entry.key == key)
+        .ok_or("Project knowledge entry missing after upsert.")?
+        .clone();
+    if changed {
+        // Keep saved semantic intent intact; knowledge is recorded, not
+        // a claim that code or runtime resources were reverified.
+        // Knowledge has its own per-entry timestamp; changing a test note
+        // must not make an older semantic summary appear freshly verified.
+        save(app, &store)?;
+    }
+    Ok(result)
+}
+
+/// Multi-word, ranked retrieval from the EXISTING project-memory store.
+/// This works when a new chat describes a previously used procedure in
+/// different words; it does not invent or verify resources that are absent.
+fn rank_knowledge(
+    entries: &[ProjectKnowledgeEntry],
+    query: Option<&str>,
+    kind: Option<ProjectKnowledgeKind>,
+    include_retired: bool,
+    limit: usize,
+) -> Vec<ProjectKnowledgeEntry> {
+    let query = query
+        .unwrap_or("")
+        .chars()
+        .take(240)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let terms = query
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|term| term.len() >= 2)
+        .take(12)
+        .collect::<Vec<_>>();
+    let mut results = entries
+        .iter()
+        .filter(|item| kind.is_none_or(|selected| selected == item.kind))
+        .filter(|item| include_retired || item.state != ProjectKnowledgeState::Retired)
+        .filter_map(|item| {
+            let key = item.key.to_ascii_lowercase();
+            let title = item.title.to_ascii_lowercase();
+            let guidance = item.guidance.to_ascii_lowercase();
+            let mut score = 0;
+            for term in &terms {
+                if key.contains(term) {
+                    score += 6;
+                }
+                if title.contains(term) {
+                    score += 4;
+                }
+                if guidance.contains(term) {
+                    score += 1;
+                }
+            }
+            if !terms.is_empty() && score == 0 {
+                None
+            } else {
+                Some((score, item))
+            }
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|(score_a, a), (score_b, b)| {
+        score_b
+            .cmp(score_a)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    results
+        .into_iter()
+        .take(limit.clamp(1, 15))
+        .map(|(_, item)| item.clone())
+        .collect()
+}
+
+/// Bounded, intent-based retrieval: avoid dumping the entire memory record
+/// when a returning agent needs a specific test procedure or resource.
+pub(crate) fn find_knowledge(
+    app: &AppHandle,
+    workspace: &Workspace,
+    query: Option<&str>,
+    kind: Option<ProjectKnowledgeKind>,
+    include_retired: bool,
+    limit: usize,
+) -> Result<Vec<ProjectKnowledgeEntry>, String> {
+    let memory = get(app, workspace)?;
+    Ok(rank_knowledge(
+        &memory.knowledge,
+        query,
+        kind,
+        include_retired,
+        limit,
+    ))
+}
+
 pub(crate) fn forget(app: &AppHandle, workspace_id: &str) {
+    let Ok(_guard) = MEMORY_MUTATION_LOCK.lock() else {
+        return;
+    };
     if let Ok(mut store) = load(app) {
         if store.projects.remove(workspace_id).is_some() {
             let _ = save(app, &store);
@@ -272,7 +522,139 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{backup_path, private_write, readable_store_path};
+    use super::{
+        apply_knowledge, backup_path, private_write, rank_knowledge, readable_store_path,
+        validate_knowledge_draft, ProjectKnowledgeDraft,
+    };
+    use crate::models::{ProjectKnowledgeKind, ProjectKnowledgeState, ProjectMemory};
+
+    fn example_memory() -> ProjectMemory {
+        ProjectMemory {
+            workspace_id: "workspace-1".into(),
+            workspace_name: "Example".into(),
+            summary: "Preserve our original working project".into(),
+            goals: vec!["Keep existing tests working".into()],
+            decisions: Vec::new(),
+            preferences: vec!["Do not ask for login again until checked".into()],
+            next_steps: vec!["Read current Git status".into()],
+            knowledge: Vec::new(),
+            updated_at: 100,
+            git_head_at_update: Some("abc".into()),
+            activity_updated_at: 100,
+        }
+    }
+
+    fn test_procedure() -> ProjectKnowledgeDraft {
+        ProjectKnowledgeDraft {
+            key: "integration-smoke-test".into(),
+            kind: ProjectKnowledgeKind::TestProcedure,
+            state: ProjectKnowledgeState::NeedsRecheck,
+            title: "Re-use previously configured test session".into(),
+            guidance: "Inspect the existing authorized test session and verify validity before requesting new login".into(),
+            evidence: Some("Prior workspace test receipt reference".into()),
+        }
+    }
+
+    #[test]
+    fn legacy_project_memory_is_compatible_with_new_knowledge_field() {
+        let old = serde_json::json!({
+            "workspaceId":"workspace-old","workspaceName":"Original",
+            "summary":"Old user instructions","goals":[],"decisions":[],
+            "preferences":[],"nextSteps":[],"updatedAt":22
+        });
+        let parsed: ProjectMemory =
+            serde_json::from_value(old).expect("read saved pre-knowledge memory");
+        assert!(parsed.knowledge.is_empty());
+        assert_eq!(parsed.summary, "Old user instructions");
+    }
+
+    #[test]
+    fn adding_and_replaying_knowledge_preserves_existing_project_intent() {
+        let mut memory = example_memory();
+        let old_summary = memory.summary.clone();
+        let old_next = memory.next_steps.clone();
+        assert!(apply_knowledge(&mut memory, test_procedure(), 200).unwrap());
+        assert_eq!(memory.knowledge.len(), 1);
+        assert_eq!(memory.knowledge[0].updated_at, 200);
+        assert!(!apply_knowledge(&mut memory, test_procedure(), 300).unwrap());
+        assert_eq!(memory.knowledge.len(), 1);
+        assert_eq!(memory.knowledge[0].updated_at, 200);
+        assert_eq!(memory.summary, old_summary);
+        assert_eq!(memory.next_steps, old_next);
+        assert_eq!(memory.updated_at, 100);
+        let roundtrip: ProjectMemory =
+            serde_json::from_value(serde_json::to_value(memory).unwrap()).unwrap();
+        assert_eq!(roundtrip.knowledge[0].key, "integration-smoke-test");
+    }
+
+    #[test]
+    fn project_knowledge_input_validation_rejects_invalid_keys_or_truncation() {
+        let mut candidate = test_procedure();
+        candidate.key = "Different/Workspace".into();
+        assert!(validate_knowledge_draft(&candidate).is_err());
+        candidate = test_procedure();
+        candidate.guidance = "x".repeat(3001);
+        assert!(validate_knowledge_draft(&candidate).is_err());
+        candidate = test_procedure();
+        candidate.title = "   ".into();
+        assert!(validate_knowledge_draft(&candidate).is_err());
+    }
+
+    #[test]
+    fn intent_retrieval_matches_multiple_words_without_exact_phrase() {
+        let mut memory = example_memory();
+        apply_knowledge(&mut memory, test_procedure(), 100).unwrap();
+        let found = rank_knowledge(
+            &memory.knowledge,
+            Some("test session login"),
+            Some(ProjectKnowledgeKind::TestProcedure),
+            false,
+            10,
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "integration-smoke-test");
+        let wrong_kind = rank_knowledge(
+            &memory.knowledge,
+            Some("session"),
+            Some(ProjectKnowledgeKind::KnownPitfall),
+            false,
+            10,
+        );
+        assert!(wrong_kind.is_empty());
+        let zero = rank_knowledge(
+            &memory.knowledge,
+            Some("completely unrelated topic"),
+            None,
+            false,
+            10,
+        );
+        assert!(zero.is_empty());
+        let mut retired = test_procedure();
+        retired.key = "retired-test".into();
+        retired.state = ProjectKnowledgeState::Retired;
+        apply_knowledge(&mut memory, retired, 120).unwrap();
+        assert_eq!(
+            rank_knowledge(&memory.knowledge, Some("session"), None, false, 10).len(),
+            1
+        );
+        assert_eq!(
+            rank_knowledge(&memory.knowledge, Some("session"), None, true, 10).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn project_knowledge_stable_key_updates_without_adding_duplicate() {
+        let mut memory = example_memory();
+        apply_knowledge(&mut memory, test_procedure(), 100).unwrap();
+        let mut updated = test_procedure();
+        updated.guidance =
+            "Check live authorized mount before using the stored test session".into();
+        assert!(apply_knowledge(&mut memory, updated, 200).unwrap());
+        assert_eq!(memory.knowledge.len(), 1);
+        assert_eq!(memory.knowledge[0].updated_at, 200);
+        assert!(memory.knowledge[0].guidance.contains("authorized mount"));
+    }
 
     fn temp_file(label: &str) -> (PathBuf, PathBuf) {
         let nonce = SystemTime::now()

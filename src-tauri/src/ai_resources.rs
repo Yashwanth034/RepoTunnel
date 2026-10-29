@@ -320,6 +320,16 @@ pub(crate) fn release_ai_workspace_app(workspace_id: &str, client_key: &str, app
     });
 }
 
+pub(crate) fn release_ai_workspace_app_all_owners(workspace_id: &str, app_session_id: &str) {
+    if let Ok(mut guard) = registry().lock() {
+        for (candidate_key, owned) in guard.iter_mut() {
+            if candidate_key.workspace_id == workspace_id {
+                owned.ai_workspace_sessions.remove(app_session_id);
+            }
+        }
+    }
+}
+
 pub(crate) fn reclaim_ai_workspace_app_if_stale(
     workspace_id: &str,
     client_key: &str,
@@ -507,6 +517,20 @@ mod tests {
         let collision =
             claim_ai_workspace_app("workspace-a", "client-b", "app-session-a").unwrap_err();
         assert!(collision.contains("actively owned by another AI session"));
+    }
+
+    #[test]
+    fn forced_ai_workspace_app_revocation_removes_every_owner() {
+        let _guard = test_guard();
+        reset_for_tests();
+
+        claim_ai_workspace_app("workspace-a", "client-a", "app-session-a").unwrap();
+        release_ai_workspace_app_all_owners("workspace-a", "app-session-a");
+
+        let ownership =
+            ai_workspace_app_ownership("workspace-a", "app-session-a", Some("client-a")).unwrap();
+        assert!(ownership.owner_session_id.is_none());
+        assert!(!ownership.owned_by_current_session);
     }
 
     #[test]

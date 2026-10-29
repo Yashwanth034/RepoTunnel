@@ -38,7 +38,7 @@ fn lower_name(path: &Path) -> Option<String> {
         .map(|name| name.to_ascii_lowercase())
 }
 
-pub(crate) fn is_sensitive_path(relative_path: &Path) -> bool {
+fn is_sensitive_leaf(relative_path: &Path) -> bool {
     let Some(name) = lower_name(relative_path) else {
         return false;
     };
@@ -53,7 +53,12 @@ pub(crate) fn is_sensitive_path(relative_path: &Path) -> bool {
 
     if matches!(
         name.as_str(),
-        "id_rsa"
+        ".git"
+            | ".ssh"
+            | ".aws"
+            | ".gnupg"
+            | ".kube"
+            | "id_rsa"
             | "id_dsa"
             | "id_ecdsa"
             | "id_ed25519"
@@ -80,6 +85,12 @@ pub(crate) fn is_sensitive_path(relative_path: &Path) -> bool {
     )
 }
 
+// Validate every path component, not just the leaf: otherwise a harmless-named
+// file below a protected credential directory could pass the shared guard.
+pub(crate) fn is_sensitive_path(relative_path: &Path) -> bool {
+    relative_path.ancestors().any(is_sensitive_leaf)
+}
+
 pub(crate) fn canonical_workspace_root(workspace: &Workspace) -> Result<PathBuf, String> {
     let root = Path::new(&workspace.path)
         .canonicalize()
@@ -92,10 +103,43 @@ pub(crate) fn canonical_workspace_root(workspace: &Workspace) -> Result<PathBuf,
     Ok(root)
 }
 
+// Canonicalization can resolve an innocently named symlink into a protected
+// directory inside the workspace, so apply the policy to the resolved path too.
+fn ensure_resolved_path_allowed(root: &Path, resolved: &Path) -> Result<(), String> {
+    let relative = resolved
+        .strip_prefix(root)
+        .map_err(|_| "The requested path escapes the approved workspace.".to_string())?;
+    if is_sensitive_path(relative) {
+        return Err("Access to protected credential or secret files is blocked.".to_string());
+    }
+    Ok(())
+}
+
+// Linux exposes the actual opened inode's path through /proc/self/fd. Check it
+// after opening and before returning content so a retargeted symlink cannot
+// substitute an external or protected file after pathname authorization.
+#[cfg(target_os = "linux")]
+pub(crate) fn ensure_opened_file_authorized(
+    workspace: &Workspace,
+    file: &std::fs::File,
+) -> Result<(), String> {
+    use std::{fs, os::fd::AsRawFd};
+
+    let opened_path = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .map_err(|error| format!("Could not verify the opened workspace file: {error}"))?;
+    let root = canonical_workspace_root(workspace)?;
+    ensure_resolved_path_allowed(&root, &opened_path)
+}
+
 fn ensure_existing_ancestor_inside(root: &Path, candidate: &Path) -> Result<(), String> {
     let mut ancestor = candidate.to_path_buf();
 
-    while !ancestor.exists() {
+    while let Err(error) = std::fs::symlink_metadata(&ancestor) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "Could not inspect the requested workspace path: {error}"
+            ));
+        }
         if !ancestor.pop() {
             return Err("Could not resolve the requested workspace path.".to_string());
         }
@@ -105,9 +149,7 @@ fn ensure_existing_ancestor_inside(root: &Path, candidate: &Path) -> Result<(), 
         .canonicalize()
         .map_err(|error| format!("Could not resolve the requested workspace path: {error}"))?;
 
-    if !canonical_ancestor.starts_with(root) {
-        return Err("The requested path escapes the approved workspace.".to_string());
-    }
+    ensure_resolved_path_allowed(root, &canonical_ancestor)?;
 
     Ok(())
 }
@@ -148,9 +190,7 @@ pub(crate) fn resolve_workspace_path(
             .canonicalize()
             .map_err(|error| format!("Could not resolve the requested workspace path: {error}"))?;
 
-        if !canonical_target.starts_with(&root) {
-            return Err("The requested path escapes the approved workspace.".to_string());
-        }
+        ensure_resolved_path_allowed(&root, &canonical_target)?;
 
         if must_exist && !canonical_target.exists() {
             return Err("The requested path does not exist.".to_string());
@@ -250,12 +290,87 @@ mod tests {
     }
 
     #[test]
+    fn blocks_files_inside_sensitive_parent_directories() {
+        let (root, workspace) = temp_workspace();
+        for parent in [".env.local", "credentials", ".git", ".ssh", ".aws"] {
+            fs::create_dir_all(root.join(parent)).unwrap();
+            fs::write(root.join(parent).join("ordinary.txt"), "not a secret").unwrap();
+            let relative_path = format!("{parent}/ordinary.txt");
+            assert!(
+                resolve_workspace_path(&workspace, &relative_path, AccessOperation::Read, true)
+                    .is_err(),
+                "sensitive parent should deny access: {relative_path}"
+            );
+        }
+        fs::create_dir_all(root.join(".env.example")).unwrap();
+        fs::write(root.join(".env.example/ordinary.txt"), "safe example").unwrap();
+        assert!(resolve_workspace_path(
+            &workspace,
+            ".env.example/ordinary.txt",
+            AccessOperation::Read,
+            true,
+        )
+        .is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn read_only_workspace_blocks_writes() {
         let (root, mut workspace) = temp_workspace();
         workspace.access_mode = WorkspaceAccessMode::ReadOnly;
         let result = resolve_workspace_path(&workspace, "src/app.ts", AccessOperation::Write, true);
 
         assert!(result.is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocks_symlink_aliases_into_sensitive_directories() {
+        use std::os::unix::fs::symlink;
+
+        let (root, workspace) = temp_workspace();
+        fs::create_dir_all(root.join(".ssh")).unwrap();
+        fs::write(root.join(".ssh/secret.txt"), "secret").unwrap();
+        symlink(root.join(".ssh"), root.join("alias")).unwrap();
+
+        assert!(resolve_workspace_path(
+            &workspace,
+            "alias/secret.txt",
+            AccessOperation::Read,
+            true,
+        )
+        .is_err());
+        assert!(
+            resolve_workspace_path(&workspace, "alias/new.txt", AccessOperation::Write, false,)
+                .is_err()
+        );
+
+        symlink(root.join("src"), root.join("safe-alias")).unwrap();
+        assert!(resolve_workspace_path(
+            &workspace,
+            "safe-alias/app.ts",
+            AccessOperation::Read,
+            true,
+        )
+        .is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_dangling_symlinks_when_creating_paths() {
+        use std::os::unix::fs::symlink;
+
+        let (root, workspace) = temp_workspace();
+        let missing = root.with_extension("nonexistent-outside");
+        symlink(&missing, root.join("dangling-link")).unwrap();
+        for path in ["dangling-link", "dangling-link/new.txt"] {
+            assert!(
+                resolve_workspace_path(&workspace, path, AccessOperation::Write, false).is_err(),
+                "dangling symlink should be rejected: {path}"
+            );
+        }
         let _ = fs::remove_dir_all(root);
     }
 
