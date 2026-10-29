@@ -274,9 +274,17 @@ fn executable_identity(path: &Path) -> Result<String, String> {
 
     #[cfg(windows)]
     {
+        // Creation timestamp and file length can be identical after an
+        // uninstall/reinstall. Bind approval to the kernel file identity,
+        // rather than giving the replacement the old executable's rights.
         use std::os::windows::fs::MetadataExt;
+        let file = fs::File::open(path).map_err(|error| {
+            format!("Could not open application for identity verification: {error}")
+        })?;
+        let (volume, file_index) =
+            crate::platform_sandbox::windows_private_opened_object_identity(&file)?;
         Ok(format!(
-            "windows:{}:{}",
+            "windows-v2:{volume}:{file_index}:{}:{}",
             metadata.creation_time(),
             metadata.file_size()
         ))

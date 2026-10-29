@@ -12304,6 +12304,18 @@ mod tests {
             .expect("prepare scoped native source copies");
         let projection = super::prepare_windows_private_source_projection(&root, &view)
             .expect("prepare bounded private Windows project");
+        // The projected bytes and the authoritative, scoped private source
+        // must agree before the test simulates any GUI changes.
+        assert_eq!(
+            fs::read_to_string(view.root().join("docs/readme.md"))
+                .expect("private docs/readme baseline must exist"),
+            "documentation"
+        );
+        assert_eq!(
+            fs::read_to_string(projection.workspace_root.join("docs/readme.md"))
+                .expect("projected docs/readme baseline must exist"),
+            "documentation"
+        );
         assert_eq!(
             fs::read_to_string(projection.workspace_root.join("src/readonly.rs")).unwrap(),
             "untouched"
@@ -13408,8 +13420,11 @@ mod tests {
         assert_eq!(
             allowed.status,
             super::TerminalCommandStatus::Completed,
-            "Windows AppContainer private scoped edit: {:?}",
-            allowed.error
+            "Windows AppContainer private scoped edit: error={:?}; code={:?}; stdout={}; stderr={}",
+            allowed.error,
+            allowed.exit_code,
+            allowed.stdout,
+            allowed.stderr
         );
         assert_eq!(
             fs::read_to_string(root.join("src/edit.rs")).unwrap(),

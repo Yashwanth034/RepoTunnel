@@ -2734,7 +2734,7 @@ mod platform {
             .arg("--")
             .arg("/bin/zsh")
             .arg("-c")
-            .arg("runtime=$1; shift; \"$@\"; status=$?; rm -rf -- \"$runtime\"; exit $status")
+            .arg("runtime=$1; shift; \"$@\"; rt_exit_code=$?; rm -rf -- \"$runtime\"; exit $rt_exit_code")
             .arg("repotunnel-sandbox-cleanup")
             .arg(&runtime_root)
             .arg(program)
