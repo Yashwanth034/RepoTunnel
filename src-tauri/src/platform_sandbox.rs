@@ -2617,7 +2617,8 @@ mod platform {
              (deny default)\n\
              (allow process*)\n\
              (allow signal (target self))\n\
-             (allow sysctl-read)\n",
+             (allow sysctl-read)\n\
+             (allow file-read* (literal \"/\"))\n",
         );
 
         for root in safe_read_roots(

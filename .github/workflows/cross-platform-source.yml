@@ -137,6 +137,8 @@ jobs:
             echo "SEATBELT_ALLOW_DEFAULT_EXIT=$?"
             /usr/bin/sandbox-exec -p '(version 1)(deny default)(allow process*)(allow sysctl-read)(allow file-read* (subpath "/System") (subpath "/Library") (subpath "/usr") (subpath "/private/etc") (subpath "/dev"))' -- /usr/bin/true
             echo "SEATBELT_MINIMAL_DENY_DEFAULT_EXIT=$?"
+            /usr/bin/sandbox-exec -p '(version 1)(deny default)(allow process*)(allow sysctl-read)(allow file-read* (literal "/") (subpath "/System") (subpath "/Library") (subpath "/usr") (subpath "/private/etc") (subpath "/dev"))' -- /usr/bin/true
+            echo "SEATBELT_ROOT_READ_EXIT=$?"
             set -e
             echo "SEATBELT_DIAGNOSTIC_END"
             exit 1

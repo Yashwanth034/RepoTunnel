@@ -2783,6 +2783,17 @@ fn read_verified_private_source_bytes(
     path: &Path,
     expected: &fs::Metadata,
 ) -> Result<Vec<u8>, String> {
+    read_verified_private_source_bytes_with_identity(path, expected, None)
+}
+
+// If enumeration has pinned the original file ID, require the reopened source
+// to be the very same object. Windows MetadataExt::file_index is unstable on
+// stable Rust; the opened-handle identity comes from GetFileInformationByHandle.
+fn read_verified_private_source_bytes_with_identity(
+    path: &Path,
+    expected: &fs::Metadata,
+    expected_identity: Option<(u64, u64)>,
+) -> Result<Vec<u8>, String> {
     if !expected.is_file() || task_source_metadata_is_alias(expected) {
         return Err("Task Integrity private source scan requires a regular non-alias file.".into());
     }
@@ -2805,6 +2816,14 @@ fn read_verified_private_source_bytes(
         .open(path)
         .map_err(|error| format!("Could not safely open Task Integrity private source: {error}"))?;
     let opened_identity = private_source_opened_identity(&opened)?;
+    #[cfg(windows)]
+    if expected_identity.is_some_and(|original| original != opened_identity) {
+        return Err(
+            "Task Integrity private source was replaced after its identity was pinned.".into(),
+        );
+    }
+    #[cfg(not(windows))]
+    let _ = expected_identity;
     let valid = |metadata: &fs::Metadata| {
         if !metadata.is_file()
             || task_source_metadata_is_alias(metadata)
@@ -2813,20 +2832,6 @@ fn read_verified_private_source_bytes(
             || metadata.modified().ok() != expected.modified().ok()
         {
             return false;
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            // Timestamps and lengths do not authenticate a Windows file.
-            // Compare its kernel-backed volume and file index against the
-            // metadata captured before the task writer could replace it.
-            if expected.file_index().is_none()
-                || expected.volume_serial_number().is_none()
-                || metadata.file_index() != expected.file_index()
-                || metadata.volume_serial_number() != expected.volume_serial_number()
-            {
-                return false;
-            }
         }
         #[cfg(unix)]
         {
@@ -2916,7 +2921,10 @@ fn collect_source_mutation_files_with(
         let pinned_identity = private_source_opened_identity(&pinned_directory)?;
 
         #[cfg(unix)]
-        let entries = macos_verified_projection_directory_entries_with(root, &directory, true)?;
+        let entries = macos_verified_projection_directory_entries_with(root, &directory, true)?
+            .into_iter()
+            .map(|(name, metadata)| (name, metadata, None::<(u64, u64)>))
+            .collect::<Vec<_>>();
         #[cfg(windows)]
         let entries = fs::read_dir(&directory)
             .map_err(|error| format!("Could not scan Windows private source directory: {error}"))?
@@ -2930,11 +2938,22 @@ fn collect_source_mutation_files_with(
                 }
                 let metadata =
                     fs::symlink_metadata(entry.path()).map_err(|error| error.to_string())?;
-                Ok((name, metadata))
+                let identity = if metadata.is_file() && !task_source_metadata_is_alias(&metadata) {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    let mut open = OpenOptions::new();
+                    open.read(true).custom_flags(0x0020_0000); // NO FOLLOW
+                    let pinned = open.open(entry.path()).map_err(|e| e.to_string())?;
+                    Some(private_source_opened_identity(&pinned)?)
+                } else {
+                    None
+                };
+                Ok((name, metadata, identity))
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        for (name, metadata) in entries {
+        for (name, metadata, expected_identity) in entries {
+            #[cfg(unix)]
+            let _ = expected_identity;
             let path = directory.join(name);
             if task_source_metadata_is_alias(&metadata) {
                 return Err(format!(
@@ -2964,7 +2983,11 @@ fn collect_source_mutation_files_with(
             #[cfg(windows)]
             let bytes = {
                 reject_task_path_alias_components(root, Path::new(&relative))?;
-                read_verified_private_source_bytes(&path, &metadata)?
+                read_verified_private_source_bytes_with_identity(
+                    &path,
+                    &metadata,
+                    expected_identity,
+                )?
             };
             files.insert(relative, bytes);
         }
@@ -12439,6 +12462,8 @@ mod tests {
         let source = view.join("allowed.rs");
         fs::write(&source, b"safe").unwrap();
         let original = fs::symlink_metadata(&source).unwrap();
+        let original_identity =
+            super::private_source_opened_identity(&fs::File::open(&source).unwrap()).unwrap();
         assert_eq!(
             super::read_verified_private_source_bytes(&source, &original).unwrap(),
             b"safe"
@@ -12450,7 +12475,12 @@ mod tests {
         fs::write(&replacement, b"evil").unwrap();
         fs::rename(&replacement, &source).unwrap();
         assert!(
-            super::read_verified_private_source_bytes(&source, &original).is_err(),
+            super::read_verified_private_source_bytes_with_identity(
+                &source,
+                &original,
+                Some(original_identity),
+            )
+            .is_err(),
             "an equal-size replacement after enumeration cannot change source bytes"
         );
 
