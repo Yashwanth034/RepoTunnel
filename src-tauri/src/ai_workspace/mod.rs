@@ -3996,6 +3996,12 @@ fn native_gui_projected_paths(
                 (None, arg.as_str())
             };
             let path = Path::new(value);
+            // Windows considers /etc/passwd and \absolute\path root-relative,
+            // not fully absolute. Never pass them through as harmless relative
+            // GUI arguments: they could resolve outside the private project.
+            if path.has_root() && !path.is_absolute() {
+                return Err("Native GUI argument uses an unsafe root-relative path.".into());
+            }
             if path
                 .components()
                 .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
@@ -11314,6 +11320,14 @@ for line in sys.stdin:
             additional_applications: Vec::new(),
         };
         assert!(super::persisted_ai_workspace_may_reattach(&state, true));
+        if cfg!(windows) {
+            // Windows must additionally authenticate the AppContainer's
+            // actual child via its signed-off handoff metadata. This synthetic
+            // test fixture deliberately has no such child proof, so recovery
+            // must refuse to treat the task-bound process as live.
+            assert!(!super::persisted_task_bound_processes_live(&state));
+            return;
+        }
         assert!(super::persisted_task_bound_processes_live(&state));
         std::mem::forget(view); // crash: the original process did not run Drop
         let mut resumed = super::runtime_from_persisted(&state);

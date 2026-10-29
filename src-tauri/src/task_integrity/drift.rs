@@ -1792,7 +1792,11 @@ mod native_adapter_tests {
     #[test]
     fn native_task_adapter_maps_rename_and_stays_inside_task_scope() {
         let fixture = tempfile::tempdir().unwrap();
-        let root = fixture.path();
+        // Native watcher roots are canonical. Use matching canonical event
+        // paths on Windows where tempfile may expose a non-extended drive
+        // spelling and the watcher uses an extended-length spelling.
+        let canonical_root = fixture.path().canonicalize().unwrap();
+        let root = canonical_root.as_path();
         fs::create_dir(root.join("src")).unwrap();
         fs::create_dir(root.join("other")).unwrap();
         let targets = vec![TaskWatchTarget::recursive("src").unwrap()];

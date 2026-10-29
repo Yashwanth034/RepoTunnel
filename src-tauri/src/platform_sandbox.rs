@@ -2617,7 +2617,8 @@ mod platform {
              (deny default)\n\
              (allow process*)\n\
              (allow signal (target self))\n\
-             (allow sysctl-read)\n",
+             (allow sysctl-read)\n\
+             (allow file-read-metadata (literal \"/\"))\n",
         );
 
         for root in safe_read_roots(
@@ -4236,18 +4237,21 @@ mod platform {
                 .canonicalize()
                 .map_err(|error| format!("Could not resolve native task workspace: {error}"))?;
             for (scoped, _) in &scoped_paths {
-                let relative = scoped.strip_prefix(&workspace).map_err(|_| {
-                    "Native Windows task writable path escaped its canonical workspace.".to_string()
-                })?;
-                let normalized = relative.to_string_lossy().replace('\\', "/");
-                let verified =
-                    crate::terminal::validate_task_generated_output_path(&workspace, &normalized)?;
+                // Verify the *actual* scoped directory before computing its
+                // workspace-relative name. On Windows, canonical paths use
+                // extended-length roots even when the input uses D:\... .
                 let actual = std::fs::canonicalize(scoped).map_err(|error| {
                     format!(
                         "Could not resolve Windows task source grant '{}': {error}",
                         scoped.display()
                     )
                 })?;
+                let relative = actual.strip_prefix(&workspace).map_err(|_| {
+                    "Native Windows task writable path escaped its canonical workspace.".to_string()
+                })?;
+                let normalized = relative.to_string_lossy().replace('\\', "/");
+                let verified =
+                    crate::terminal::validate_task_generated_output_path(&workspace, &normalized)?;
                 if verified != actual {
                     return Err(format!(
                         "Native Windows task writable path '{}' changed since authorization.",
