@@ -1,6 +1,12 @@
 # Changelog
 
-## 0.4.2 - 2026-10-28
+## Unreleased
+
+- Updated the Rust `zip` dependency to 9.0.5 to address the critical archive-header security advisory; resolved the website's transitive `undici` and `zod` advisories through lockfile-only upgrades.
+- Improved the ChatGPT Continuation extension's interruption recovery: use in-place continuation while ChatGPT is still generating, and use refresh-based recovery only after generation stops. Added regression tests for both paths.
+- Updated website download and installation instructions to the current published version while preserving historical release notes.
+
+## 0.4.2 - 2026-10-29
 
 RepoTunnel v0.4.2 is a reliability and security-focused update across the existing desktop platforms. It continues the RepoTunnel 0.4.x release line without requiring users to reset saved project permissions or reconfigure their existing connections.
 

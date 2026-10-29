@@ -83,10 +83,15 @@ for item in idx:
     target=resolve_internal(DIST/'index.html',item['url'])
     if target and not target.exists(): errors.append(f'search index broken URL: {item["url"]}')
 
-expected_downloads = [
-    'RepoTunnel_0.4.1_amd64.deb','RepoTunnel-0.4.1-1.x86_64.rpm','RepoTunnel_0.4.1_amd64.AppImage',
-    'RepoTunnel_0.4.1_x64-setup.exe','RepoTunnel_0.4.1_x64_en-US.msi','RepoTunnel_0.4.1_aarch64.dmg','RepoTunnel_0.4.1_x64.dmg'
-]
+# Derive the download expectation from the same release data used by the
+# installation pages. Keep the production audit version-independent.
+release = json.loads((ROOT / 'src' / 'data' / 'site-content.json').read_text(encoding='utf-8'))['site']['release']
+expected_downloads = [url.rsplit('/', 1)[-1] for url in release['downloads'].values()]
+if len(expected_downloads) != 7 or len(set(expected_downloads)) != 7:
+    errors.append('expected seven distinct official platform downloads')
+for name in expected_downloads:
+    if release['version'] not in name:
+        errors.append(f'current release version is missing from download filename: {name}')
 combined='\n'.join(f.read_text(encoding='utf-8') for f in [DIST/'install/index.html',DIST/'downloads/index.html'])
 for name in expected_downloads:
     if name not in combined: errors.append(f'missing official release asset link: {name}')
