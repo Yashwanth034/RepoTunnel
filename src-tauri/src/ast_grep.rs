@@ -1427,7 +1427,15 @@ mod tests {
         let file = std::fs::File::create(&archive_path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
-        zip.start_file("ast-grep", options).unwrap();
+        zip.start_file(
+            if cfg!(windows) {
+                "ast-grep.exe"
+            } else {
+                "ast-grep"
+            },
+            options,
+        )
+        .unwrap();
         zip.write_all(b"expected-binary").unwrap();
         zip.start_file("sg", options).unwrap();
         zip.write_all(b"wrong-binary").unwrap();

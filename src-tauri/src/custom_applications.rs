@@ -1627,6 +1627,9 @@ mod tests {
         assert_eq!(launchable.category, "custom");
         assert!(!launchable.supports_urls);
         assert!(launchable.supports_paths);
-        assert_eq!(launchable.executable, executable.to_string_lossy());
+        assert_eq!(
+            launchable.executable,
+            executable.canonicalize().unwrap().to_string_lossy()
+        );
     }
 }

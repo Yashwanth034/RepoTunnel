@@ -1470,11 +1470,11 @@ mod tests {
         ];
         assert_eq!(
             super::find_windows_installed_gui_in_roots("vscode", &roots),
-            Some(editor)
+            Some(editor.canonicalize().unwrap())
         );
         assert_eq!(
             super::find_windows_installed_gui_in_roots("google-chrome", &roots),
-            Some(browser)
+            Some(browser.canonicalize().unwrap())
         );
         assert!(super::find_windows_installed_gui_in_roots("../vscode", &roots).is_none());
         assert!(super::find_windows_installed_gui_in_roots("powershell", &roots).is_none());

@@ -45,6 +45,14 @@ jobs:
           node-version: "22"
           cache: npm
 
+      # The persistent-helper transport regression starts Python on the
+      # current runner; don't assume a Unix /usr/bin/python3 on Windows.
+      - name: Python for Windows native helper tests
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

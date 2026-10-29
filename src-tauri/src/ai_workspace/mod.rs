@@ -9792,7 +9792,12 @@ for line in sys.stdin:
     request=envelope.get('request') or {}
     print(json.dumps({'id':envelope.get('id'),'ok':True,'result':{'value':request.get('value')}}), flush=True)
 "#;
-        let mut child = Command::new("/usr/bin/python3")
+        let python = if cfg!(windows) {
+            "python"
+        } else {
+            "/usr/bin/python3"
+        };
+        let mut child = Command::new(python)
             .args(["-u", "-c", script])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

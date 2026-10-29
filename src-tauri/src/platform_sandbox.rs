@@ -3008,7 +3008,9 @@ mod platform {
         let allowed = run("printf allowed > generated/artifact.txt");
         assert!(
             allowed.status.success(),
-            "Native Seatbelt rejected an authorized generated write: {}",
+            "Native Seatbelt rejected an authorized generated write (status: {:?}; stdout: {}; stderr: {})",
+            allowed.status,
+            String::from_utf8_lossy(&allowed.stdout),
             String::from_utf8_lossy(&allowed.stderr)
         );
         assert_eq!(
