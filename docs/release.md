@@ -12,7 +12,7 @@ Use semantic versioning for future releases:
 - Use a minor version for meaningful feature releases.
 - Reserve `1.0.0` for the stable product milestone.
 
-The current public release is **v0.4.1**. Version changes require a separate, explicitly authorized release.
+Find the current published version at [GitHub Releases](https://github.com/Yashwanth034/RepoTunnel/releases/latest). Version changes require a separate, explicitly authorized release; this guide intentionally does not pin a version.
 
 Keep the version identical in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` and `src-tauri/tauri.conf.json`. The release workflow rejects mismatches.
 
@@ -58,14 +58,14 @@ Treat the updater private key as a long-term release identity. Losing it prevent
 
 `.github/workflows/platform-build.yml` performs the release pipeline:
 
-1. Prefer an authorized **`workflow_dispatch` on the default branch**. The workflow also supports tag-triggered runs; main-branch dispatch makes the stable Windows cache reusable.
-2. Run quality/security checks and platform builds in parallel. **Windows validation** (Rust Clippy and tests) is a separate job from **Windows packaging**; the validation job avoids unnecessary Node setup.
-3. Build Linux DEB/RPM/AppImage, Windows NSIS/MSI, and Apple Silicon/Intel macOS DMGs and signed updater artifacts.
-4. Wait for quality, Linux, Windows validation, Windows packaging, and both macOS builds to pass before the final release job can proceed.
-5. Collect the verified artifacts, derive release notes from the matching `CHANGELOG.md` section, generate `latest.json`, and generate `RepoTunnel-SHA256SUMS.txt`.
-6. The final job establishes the canonical `v<version>` tag for the verified commit and publishes the release.
+1. Run an authorized **`workflow_dispatch` rehearsal** on the intended release branch. Manual dispatch can test signed packaging but **cannot publish** a release.
+2. Run Quality/security plus Linux, Windows validation, Windows packaging, and both macOS native packaging jobs. Rust sandbox tests run serially; the Ubuntu Quality runner uses restricted Bubblewrap/AppArmor support and fails closed if unavailable.
+3. Review the release candidate and CI evidence; merge the approved PR into `main` without overwriting existing tags.
+4. Create the exact, new, immutable `v<version>` tag on the **verified merge commit**. The tag-triggered workflow repeats all required quality and package checks before publication.
+5. After all six prerequisite jobs succeed, collect the artifacts, verify signatures, generate `latest.json` and `RepoTunnel-SHA256SUMS.txt`, and publish the GitHub Release.
+6. Verify the public release's version,  checksums, updater artifact URLs and signatures against what was uploaded.
 
-**Protected tags:** Publication and any protected-tag changes need explicit repository-owner authorization. Do not alter the published v0.4.1 tag.
+**Protected tags:** Manual dispatch cannot publish or move tags. Never force-move, delete or reuse an existing release tag.
 
 The installed application checks only the official endpoint:
 
@@ -123,8 +123,8 @@ Any future data-schema migration must be backward-aware, tested independently, a
 2. Verify the updater signing configuration is available to the release workflow.
 3. For a separately **approved future release**, synchronize version files and update `CHANGELOG.md`.
 4. Run validation and the applicable live acceptance checks. Confirm the intended Git publication and tag-protection operations have been authorized.
-5. Prefer `workflow_dispatch` from the default branch; keep quality, Linux, Windows validation, Windows packaging, and macOS builds parallel.
-6. Confirm all required checks pass before the final job establishes the canonical tag and publishes assets.
+5. Run an authorized `workflow_dispatch` rehearsal on the release branch; it cannot publish. Validate quality and all native package jobs.
+6. Merge the verified release PR, create the new matching immutable version tag on the merge commit, and verify that the tag-triggered workflow passes before publication.
 7. Verify updater manifests, signatures, checksums, and asset lists. Exclude package-inspection leftovers.
 8. Test clean packages on each native platform available for acceptance.
 9. Exercise in-app installation only where enabled; preserve the current macOS install safety gate.
