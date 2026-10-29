@@ -24,7 +24,13 @@ const PRODUCTION_PINNED_ROOT: &[u8] =
 const UNPROVISIONED_ROOT_SENTINEL: &[u8] = b"UNPROVISIONED\n";
 
 fn production_pinned_root() -> Result<&'static [u8], String> {
-    if PRODUCTION_PINNED_ROOT.is_empty() || PRODUCTION_PINNED_ROOT == UNPROVISIONED_ROOT_SENTINEL {
+    // Git may check out this dedicated *unprovisioned* text sentinel with
+    // CRLF on Windows. Both exact encodings must disable capability fetching;
+    // neither is a trusted bootstrap root or an authorization to update.
+    if PRODUCTION_PINNED_ROOT.is_empty()
+        || PRODUCTION_PINNED_ROOT == UNPROVISIONED_ROOT_SENTINEL
+        || PRODUCTION_PINNED_ROOT == b"UNPROVISIONED\r\n"
+    {
         return Err(
             "RepoTunnel managed capability TUF root is not provisioned; signed capability updates are disabled."
                 .to_string(),

@@ -124,4 +124,20 @@ jobs:
           # macOS exposes /var as a symlink to /private/var; native sandbox
           # tests compare fully resolved paths, so use a canonical temp root.
           export TMPDIR="$(cd "$TMPDIR" && pwd -P)/"
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
+          if cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1; then
+            echo "macOS native Rust tests passed."
+          else
+            # Diagnostic only. Run /usr/bin/true with two *independent*
+            # temporary policies to distinguish an unavailable sandbox-exec
+            # from RepoTunnel's task-scoped Seatbelt profile. The native
+            # security tests remain mandatory and this job still fails.
+            echo "SEATBELT_DIAGNOSTIC_BEGIN"
+            set +e
+            /usr/bin/sandbox-exec -p '(version 1)(allow default)' -- /usr/bin/true
+            echo "SEATBELT_ALLOW_DEFAULT_EXIT=$?"
+            /usr/bin/sandbox-exec -p '(version 1)(deny default)(allow process*)(allow sysctl-read)(allow file-read* (subpath "/System") (subpath "/Library") (subpath "/usr") (subpath "/private/etc") (subpath "/dev"))' -- /usr/bin/true
+            echo "SEATBELT_MINIMAL_DENY_DEFAULT_EXIT=$?"
+            set -e
+            echo "SEATBELT_DIAGNOSTIC_END"
+            exit 1
+          fi
