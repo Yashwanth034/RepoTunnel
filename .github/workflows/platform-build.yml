@@ -214,6 +214,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Set up Node.js for linked desktop acceptance
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Python for Windows native helper tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -239,10 +253,24 @@ jobs:
         shell: cmd
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --message-format short -- -D warnings
 
+      - name: Build frontend for linked desktop acceptance
+        run: npm run build
+
+      - name: Link native RepoTunnel helper for AppContainer acceptance
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin repotunnel
+
+      - name: Prepare Windows native test fixture directory
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'RepoTunnelNativeFixtures'
+          New-Item -ItemType Directory -Force -Path $fixture | Out-Null
+          "TEMP=$fixture" >> $env:GITHUB_ENV
+          "TMP=$fixture" >> $env:GITHUB_ENV
+
       - name: Windows Rust tests
         env:
           REPOTUNNEL_WINDOWS_TEST_MANIFEST: "1"
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
 
   windows:
     name: Windows x64
@@ -381,6 +409,13 @@ jobs:
             exit "$status"
           fi
 
+      - name: Build frontend for linked desktop acceptance
+        run: npm run build
+
+      - name: Link native RepoTunnel desktop executable for sandbox acceptance
+        shell: bash
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --bin repotunnel
+
       - name: macOS Rust tests
         shell: bash
         run: |
@@ -392,7 +427,8 @@ jobs:
           fi
           export DYLD_LIBRARY_PATH="$swift_runtime_paths${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
           export DYLD_FALLBACK_LIBRARY_PATH="$swift_runtime_paths${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+          export TMPDIR="$(cd "$TMPDIR" && pwd -P)/"
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads=1
 
       - name: Build signed app and DMG
         shell: bash
