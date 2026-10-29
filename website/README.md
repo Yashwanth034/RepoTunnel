@@ -2,13 +2,13 @@
 
 Website checkpoint: **1.2.0** (see `WEBSITE_VERSION`). This version preserves the complete guides, provider screenshots and UI corrections after the saved 1.1.0 checkpoint. Website versions are independent of the RepoTunnel desktop release versions.
 
-The independent public website for [RepoTunnel](https://github.com/Yashwanth034/RepoTunnel). It explains installation, controlled MCP access, real workflows, security boundaries, release downloads and common problems.
+The public website for [RepoTunnel](https://github.com/Yashwanth034/RepoTunnel), maintained in the same Git repository under website/. It explains installation, controlled MCP access, real workflows, security boundaries, release downloads and common problems.
 
-**This repository is not the RepoTunnel desktop application.** It contains only the static website and does not modify, install or bundle the desktop application.
+**RepoTunnel, the website and the continuation extension share one repository.** The website/ directory is independently built and deployed; its commands do not rebuild, install or publish the desktop app.
 
 ## Stack
 
-- Astro 5 + TypeScript
+- Astro 7 + TypeScript
 - Content source: `src/data/site-content.json`
 - Lightweight custom CSS
 - Pagefind static production search, with locally generated fallback search data
@@ -18,14 +18,14 @@ No accounts, backend, database, paid CMS or tracking SDK.
 
 ## Run locally
 
-Requires Node.js 20.3+ and npm:
+Requires a Node.js version supported by Astro 7 (use Node.js 22 or newer) and npm:
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
-Open the localhost URL shown by Astro. The development server defaults to port 4321 unless another port is specified or already occupied.
+Open the localhost URL shown by Astro. The development server defaults to port 4321 unless another port is specified or already occupied. Preview it locally before committing or pushing.
 
 ## Validate and build
 
@@ -62,7 +62,7 @@ In another terminal:
 SITE_PREVIEW_ORIGIN=http://127.0.0.1:3010 node scripts/smoke_live.mjs
 ```
 
-This performs live HTTP checks for all indexed pages. Real cross-browser/mobile visual review and external release-download availability still require separate verification.
+This performs live HTTP checks for all indexed pages. Real cross-browser/mobile visual review and external release-download availability still require separate verification. Use npm run verify:release-assets to check the live official GitHub release when network access is available.
 
 For a production build, use the **actual** public HTTPS origin:
 

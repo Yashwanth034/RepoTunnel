@@ -346,3 +346,19 @@ html[data-theme=dark] .theme-moon{display:none}
 .footer-legal{display:flex;flex-wrap:wrap;align-items:center;gap:12px 20px}
 .footer-legal>a{text-decoration:underline;text-underline-offset:3px}
 .mobile-nav a[aria-current=page]{font-weight:700;color:var(--accent);background:var(--accent-soft)}
+
+/* Current-release information: compact, accessible and consistent with the existing design. */
+.release-spotlight{padding:42px 0 62px;background:var(--paper-alt);border-block:1px solid var(--line)}
+.release-spotlight-heading{display:flex;align-items:end;justify-content:space-between;gap:32px;padding-bottom:25px}
+.release-spotlight-heading h2{max-width:670px;margin:10px 0;font-size:var(--type-section);font-weight:600;letter-spacing:-.04em;line-height:1.16}
+.release-spotlight-heading p{max-width:660px;margin:0;color:var(--muted);font-size:var(--type-small);line-height:1.75}
+.release-spotlight-actions{display:flex;align-items:center;flex-wrap:wrap;gap:17px;flex-shrink:0}
+.release-spotlight-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.release-spotlight-grid>a{display:flex;flex-direction:column;min-width:0;min-height:225px;padding:22px;background:var(--paper);border:1px solid var(--line);border-radius:7px;transition:border-color .18s,background .18s}
+.release-spotlight-grid>a:hover{border-color:var(--accent);background:var(--bg)}
+.release-spotlight-grid>a>span{font:var(--type-label)/1.6 var(--mono);color:var(--accent)}
+.release-spotlight-grid h3{margin:17px 0 9px;font-size:var(--type-title);letter-spacing:-.025em;line-height:1.35}
+.release-spotlight-grid p{margin:0 0 16px;color:var(--muted);font-size:var(--type-small);line-height:1.7}
+.release-spotlight-grid strong{margin-top:auto;color:var(--accent);font-size:var(--type-label)}
+@media(max-width:1050px){.release-spotlight-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.release-spotlight-heading{align-items:start;flex-direction:column;gap:17px}}
+@media(max-width:620px){.release-spotlight{padding:36px 0 48px}.release-spotlight-grid{grid-template-columns:1fr}.release-spotlight-grid>a{min-height:0}.release-spotlight-heading h2{font-size:var(--type-subhead)}.release-spotlight-actions{gap:14px}}

@@ -50,7 +50,7 @@ const sourceFilesBySlug: Record<string, string> = {
   'checks/workflow-readiness': 'docs/workflow.md',
   'projects/project-memory': 'src/components/ProjectMemoryPanel.tsx',
   'reference/settings-and-help': 'src/components/ProductionPanel.tsx',
-  'connections/secure-mcp-tunnel': 'docs/connection.md',
+  'connections/secure-mcp-tunnel': 'src/components/SecureMcpTunnelGuide.tsx',
 };
 const sourceFile = sourceFilesBySlug[page.slug];
 if (!sourceFile) throw new Error(`Missing source-document mapping for docs/${page.slug}`);

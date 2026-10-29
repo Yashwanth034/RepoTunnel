@@ -28,6 +28,7 @@ for (const [url, title, description, keywords] of [
   ['/downloads/', 'Downloads', 'Official release packages for all supported platforms', 'Linux Windows macOS'],
   ['/security/', 'Security', 'RepoTunnel permission and isolation model', 'OAuth protected paths sandbox git device'],
   ['/changelog/', 'Changelog', 'RepoTunnel release history', 'new versions fixes releases'],
+  ['/changelog/0.4.2/', 'RepoTunnel v0.4.2', 'RepoTunnel release notes', 'Secure MCP Tunnel keyring managed processes remote computers native platform reliability'],
   ['/changelog/0.4.1/', 'RepoTunnel v0.4.1', 'RepoTunnel release notes', 'phone AI workspace continuity team video'],
   ['/community/', 'Community', 'Issue reports, feature requests and contributions', 'github issues contributing'],
   ['/privacy/', 'Website privacy', 'What the static RepoTunnel site collects', 'privacy localstorage cookies analytics']

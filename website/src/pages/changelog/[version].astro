@@ -1,11 +1,37 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
-export function getStaticPaths() { return [{ params: { version: '0.4.1' } }]; }
+import content from '../../data/site-content.json';
+
+export function getStaticPaths() {
+  return [{ params: { version: '0.4.2' } }, { params: { version: '0.4.1' } }];
+}
+
+const { version } = Astro.params;
+const isCurrent = version === '0.4.2';
+const title = 'RepoTunnel v' + version;
+const current = content.site.release;
+const highlights = isCurrent ? [
+  'Reliable managed-process startup and bounded failure diagnostics, with Linux process smoke testing.',
+  'Larger projects: more resilient paged inspection, resumable search, and fail-closed sensitive-file handling.',
+  'OpenAI Secure MCP Tunnel support with guarded official-client provisioning, explicit Pause/Resume, and optional Linux system-keyring remember that restores paused after restart.',
+  'Expanded AI Workspace transactions, installed application selection, browser automation and project continuity.',
+  'Remote Computers and Team Mode refinements with explicit approvals, delegated tools and cross-platform validation.',
+  'Source-reviewed Website Design Intelligence with Impeccable references and anti-slop guidance; no silent third-party installs.',
+  'Additional platform, TLS/dependency and release-publishing hardening, with native Windows/macOS/Linux CI validation.'
+] : [
+  'Full Phone Access workflows with scrcpy 4.1 live video, human controls, semantic transactions, app/files/settings/network tooling and payment-sensitive privacy blocking.',
+  'Large-repository inspection, project search and range reads with resumable cursors.',
+  'Durable process supervision and Linux restart reattachment.',
+  'Browser mutation receipts to avoid blind replay after uncertain state changes.',
+  'Expanded Continuity/Resume, Team Mode, AI Workspace recovery and Video Production.'
+];
 ---
-<BaseLayout title="RepoTunnel v0.4.1" description="RepoTunnel v0.4.1 release notes covering Phone Access, large-project reads, process reliability, browser receipts, Continuity, Team Mode and Video Production." type="article">
-  <section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="/">Home</a><a href="/changelog/">Changelog</a><span>v0.4.1</span></div><span class="eyebrow"><span class="eyebrow-dot"></span>2026-10-05</span><h1>RepoTunnel v0.4.1</h1><p class="lead">The first public 0.4.x release, combining the validated 0.4.0 capability work with final Phone reliability fixes.</p></div></section>
+<BaseLayout title={title} description={isCurrent ? 'RepoTunnel v0.4.2 release details: secure tunnel, managed process reliability, cross-platform workflow hardening and platform support.' : 'RepoTunnel v0.4.1 release notes covering Phone Access, large-project reads, process reliability, Continuity and Video Production.'} type="article">
+  <section class="page-hero"><div class="container"><div class="breadcrumbs"><a href="/">Home</a><a href="/changelog/">Changelog</a><span>v{version}</span></div><span class="eyebrow"><span class="eyebrow-dot"></span>{isCurrent ? current.date : '2026-10-05'}</span><h1>{title}</h1><p class="lead">{isCurrent ? 'More reliable local AI work, private tunnel connectivity and stronger cross-platform capability checks.' : 'The first public 0.4.x release, with the validated capability work and final Phone reliability fixes.'}</p></div></section>
   <div class="container content-shell"><article class="prose">
-    <section id="highlights"><h2>Highlights</h2><ul><li>Full Phone Access workflows with persistent scrcpy 4.1 live video, human control, semantic accessibility actions, bounded transactions, apps/files/settings/network/shell tooling and payment-sensitive privacy blocking.</li><li>Bounded large-project inspection, search and range-read tools with resumable cursors and concurrency protection.</li><li>Durable managed-process supervision with Linux restart reattachment backed by persisted supervisor state and process identity checks.</li><li>Browser mutation receipts so state-changing actions are not blindly replayed after uncertain helper transport failures.</li><li>Expanded Continuity/Resume, ChatGPT continuation recovery, Team Mode, AI Workspace recovery and Video Production.</li><li>Release validation reported 43/43 frontend tests and 448 Rust tests passing with 8 intentional ignores.</li></ul></section>
-    <section id="download"><h2>Download</h2><p>Use the official GitHub Release assets and checksum file.</p><p><a class="btn btn-accent" href="/downloads/">Download current version</a> <a class="btn" href="https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1">GitHub release</a></p></section>
-  </article><aside class="toc"><div class="toc-title">On this page</div><a href="#highlights">Highlights</a><a href="#download">Download</a></aside></div>
+    <section id="highlights"><h2>What changed</h2><ul>{highlights.map(item => <li>{item}</li>)}</ul></section>
+    {isCurrent && <section id="secure-tunnel"><h2>OpenAI Secure MCP Tunnel</h2><p>Connect your approved local MCP gateway through OpenAI’s outbound tunnel when your account and workspace support it. The private tunnel uses a tunnel ID and restricted runtime API key and does not require a public inbound port. It is separate from Direct HTTPS and its OAuth flow.</p><p>The current RepoTunnel integration supports a guarded official client setup on compatible Linux/Windows machines, supported manual installation on macOS, explicit connection control and optional Linux keyring persistence.</p><p><a class="btn" href="/docs/connections/secure-mcp-tunnel/">Read the complete setup guide</a></p></section>}
+    <section id="validation"><h2>Validation and release scope</h2><p>{isCurrent ? 'The v0.4.2 release was validated with Rust, frontend, browser and native-platform CI. The later source-maintenance update patched lockfile advisories and continuation-extension recovery; those changes do not retroactively modify previously published installers.' : 'The v0.4.1 release validated Phone, frontend and Rust workflows. Newer functionality is documented with the current release separately.'}</p><p>Capabilities vary by platform and permission. Check the platform guide and the current project source before relying on an advanced integration.</p><p><a class="text-link" href="/docs/reference/platforms/">Platform and capability limits</a></p></section>
+    <section id="download"><h2>Download</h2><p>Choose the correct official installer and verify its checksum before running it.</p><p><a class="btn btn-accent" href="/downloads/">Download current version</a> <a class="btn" href={isCurrent ? current.releaseUrl : 'https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1'}>GitHub release and assets</a></p></section>
+  </article><aside class="toc"><div class="toc-title">On this page</div><a href="#highlights">What changed</a>{isCurrent && <a href="#secure-tunnel">Secure Tunnel</a>}<a href="#validation">Validation</a><a href="#download">Download</a></aside></div>
 </BaseLayout>
