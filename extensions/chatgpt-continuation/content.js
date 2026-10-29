@@ -1116,21 +1116,33 @@
 
       const interrupted = findInterruptedResponse();
       const editor = findEditor();
-      // This distinct path persists recovery state across a full tab reload.
-      // Legacy interruption and manual actions remain the fallback for unsaved chats.
+      // Two distinct cases: if generation is still running, stop and continue
+      // in-place. Refresh only when the exact interruption notice remains and
+      // ChatGPT is already stopped; post-refresh recovery is handled by the claim above.
       if (interrupted && !preparedDelivery && editor && !editorText(editor).trim() && composerIsHumanIdle()) {
-        const refreshRecovery = await chrome.runtime.sendMessage({
-          type: 'CHAT_INTERRUPTED_REFRESH_BEGIN',
-          eventKey: interrupted.eventKey,
-          userCount: getUserMessages().length
-        });
-        if (refreshRecovery?.handled) return;
+        const userCount = getUserMessages().length;
+        if (getStopButton()) {
+          const continuationRecovery = await chrome.runtime.sendMessage({
+            type: 'CHAT_CONNECTION_INTERRUPTED',
+            eventKey: interrupted.eventKey,
+            userCount
+          });
+          if (continuationRecovery?.handled) return;
+        } else {
+          const refreshRecovery = await chrome.runtime.sendMessage({
+            type: 'CHAT_INTERRUPTED_REFRESH_BEGIN',
+            eventKey: interrupted.eventKey,
+            userCount
+          });
+          if (refreshRecovery?.handled) return;
 
-        const continuationRecovery = await chrome.runtime.sendMessage({
-          type: 'CHAT_CONNECTION_INTERRUPTED', eventKey: interrupted.eventKey,
-          userCount: getUserMessages().length
-        });
-        if (continuationRecovery?.handled) return;
+          const continuationRecovery = await chrome.runtime.sendMessage({
+            type: 'CHAT_CONNECTION_INTERRUPTED',
+            eventKey: interrupted.eventKey,
+            userCount
+          });
+          if (continuationRecovery?.handled) return;
+        }
         const manualRecovery = await chrome.runtime.sendMessage({
           type: 'CHAT_MANUAL_DEFAULT_ACTION', action: 'interrupted', eventKey: interrupted.eventKey,
           userCount: getUserMessages().length

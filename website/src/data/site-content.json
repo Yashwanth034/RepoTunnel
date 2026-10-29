@@ -9,19 +9,19 @@
     "security": "https://github.com/Yashwanth034/RepoTunnel/security",
     "chatgptCreate": "https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins",
     "release": {
-      "version": "0.4.1",
-      "date": "2026-10-05",
-      "releaseUrl": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1",
+      "version": "0.4.2",
+      "date": "2026-10-29",
+      "releaseUrl": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.2",
       "latestUrl": "https://github.com/Yashwanth034/RepoTunnel/releases/latest",
-      "checksums": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-SHA256SUMS.txt",
+      "checksums": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel-SHA256SUMS.txt",
       "downloads": {
-        "linuxDeb": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_amd64.deb",
-        "linuxRpm": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-0.4.1-1.x86_64.rpm",
-        "linuxAppImage": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_amd64.AppImage",
-        "windowsExe": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_x64-setup.exe",
-        "windowsMsi": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_x64_en-US.msi",
-        "macArm": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_aarch64.dmg",
-        "macIntel": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel_0.4.1_x64.dmg"
+        "linuxDeb": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel_0.4.2_amd64.deb",
+        "linuxRpm": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel-0.4.2-1.x86_64.rpm",
+        "linuxAppImage": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel_0.4.2_amd64.AppImage",
+        "windowsExe": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel_0.4.2_x64-setup.exe",
+        "windowsMsi": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel_0.4.2_x64_en-US.msi",
+        "macArm": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel_0.4.2_aarch64.dmg",
+        "macIntel": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel_0.4.2_x64.dmg"
       }
     }
   },
@@ -1113,7 +1113,7 @@
         {
           "title": "Install the source companion",
           "paragraphs": [
-            "Load extensions/chatgpt-continuation from RepoTunnel’s main branch using a compatible Chromium browser’s Load unpacked control. The published v0.4.1 desktop release does not provide a separate extension asset."
+            "Load extensions/chatgpt-continuation from RepoTunnel’s main branch using a compatible Chromium browser’s Load unpacked control. The published v0.4.2 desktop release does not provide a separate extension asset."
           ],
           "bullets": [],
           "code": null,
@@ -1922,7 +1922,7 @@
           "title": "Optional ChatGPT continuation extension",
           "paragraphs": [
             "RepoTunnel Continuation is a Chromium companion that delivers authorized checkpoints to exact ChatGPT conversations you explicitly save. It is useful for eligible interrupted or long-running work, and it waits for a safe idle chat with an empty composer.",
-            "The extension source is in extensions/chatgpt-continuation on the project’s main branch. It is loaded unpacked and is not a separate desktop v0.4.1 release asset."
+            "The extension source is in extensions/chatgpt-continuation on the project’s main branch. It is loaded unpacked and is not a separate desktop v0.4.2 release asset."
           ],
           "bullets": [],
           "code": null,
@@ -1947,7 +1947,7 @@
         {
           "title": "Current public release",
           "paragraphs": [
-            "The current public release documented by the project is v0.4.1 (2026-10-05). Use the official GitHub Release assets and checksum file."
+            "The current public release documented by the project is v0.4.2 (2026-10-29). Use the official GitHub Release assets and checksum file."
           ],
           "bullets": [
             "Linux x64: .deb, .rpm or AppImage",
@@ -1958,8 +1958,8 @@
           "note": null,
           "links": [
             {
-              "label": "Official v0.4.1 release and assets",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1"
+              "label": "Official v0.4.2 release and assets",
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.2"
             }
           ]
         },
@@ -2018,7 +2018,7 @@
           "links": [
             {
               "label": "Official release SHA-256 checksums",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-SHA256SUMS.txt"
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel-SHA256SUMS.txt"
             }
           ]
         }
@@ -2399,12 +2399,12 @@
             "Find that exact filename in RepoTunnel-SHA256SUMS.txt and compare the complete hash. Continue with installation only when they match."
           ],
           "bullets": [],
-          "code": "sha256sum RepoTunnel_0.4.1_amd64.deb",
+          "code": "sha256sum RepoTunnel_0.4.2_amd64.deb",
           "note": "For the RPM or AppImage, replace the filename with the actual package you downloaded. A mismatch means the file should be downloaded again from the official release.",
           "links": [
             {
               "label": "Official release SHA-256 checksums",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-SHA256SUMS.txt"
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel-SHA256SUMS.txt"
             },
             {
               "label": "GNU SHA-256 command reference",
@@ -2415,15 +2415,15 @@
         {
           "title": "Debian / Ubuntu / Linux Mint",
           "paragraphs": [
-            "For Linux Mint, Ubuntu and other Debian-family x64 installations, download the official .deb from the v0.4.1 release and open it using the distribution's package installer. Alternatively, use your distribution's package manager on the downloaded local file."
+            "For Linux Mint, Ubuntu and other Debian-family x64 installations, download the official .deb from the v0.4.2 release and open it using the distribution's package installer. Alternatively, use your distribution's package manager on the downloaded local file."
           ],
           "bullets": [],
-          "code": "sudo apt install ./RepoTunnel_0.4.1_amd64.deb",
+          "code": "sudo apt install ./RepoTunnel_0.4.2_amd64.deb",
           "note": "Run this from the folder where you downloaded the .deb. Verify the package name and checksum first.",
           "links": [
             {
               "label": "Official release assets and SHA-256 checksums",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1"
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.2"
             }
           ]
         },
@@ -2433,7 +2433,7 @@
             "Use the official .rpm package from the release."
           ],
           "bullets": [],
-          "code": "sudo dnf install ./RepoTunnel-0.4.1-1.x86_64.rpm",
+          "code": "sudo dnf install ./RepoTunnel-0.4.2-1.x86_64.rpm",
           "note": null
         },
         {
@@ -2442,7 +2442,7 @@
             "The AppImage is a portable Linux x64 option. After verifying the downloaded file, mark the AppImage executable and launch it as your normal user. It should not require exposing the MCP gateway to the network."
           ],
           "bullets": [],
-          "code": "chmod +x RepoTunnel_0.4.1_amd64.AppImage\n./RepoTunnel_0.4.1_amd64.AppImage",
+          "code": "chmod +x RepoTunnel_0.4.2_amd64.AppImage\n./RepoTunnel_0.4.2_amd64.AppImage",
           "note": null
         },
         {
@@ -2487,15 +2487,15 @@
           "title": "Packages",
           "paragraphs": [],
           "bullets": [
-            "Recommended for most users: RepoTunnel_0.4.1_x64-setup.exe",
-            "Alternative: RepoTunnel_0.4.1_x64_en-US.msi"
+            "Recommended for most users: RepoTunnel_0.4.2_x64-setup.exe",
+            "Alternative: RepoTunnel_0.4.2_x64_en-US.msi"
           ],
           "code": null,
           "note": null,
           "links": [
             {
               "label": "Official release assets and SHA-256 checksums",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1"
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.2"
             }
           ]
         },
@@ -2515,12 +2515,12 @@
             "Compare the full Hash value with the line for that exact filename in the checksum file. Letter case does not matter; every hexadecimal digit must match before you run the installer."
           ],
           "bullets": [],
-          "code": "Get-FileHash .\\RepoTunnel_0.4.1_x64-setup.exe -Algorithm SHA256",
-          "note": "For MSI, replace the filename with RepoTunnel_0.4.1_x64_en-US.msi. If the hash differs, download the package again from the official release.",
+          "code": "Get-FileHash .\\RepoTunnel_0.4.2_x64-setup.exe -Algorithm SHA256",
+          "note": "For MSI, replace the filename with RepoTunnel_0.4.2_x64_en-US.msi. If the hash differs, download the package again from the official release.",
           "links": [
             {
               "label": "Official release SHA-256 checksums",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-SHA256SUMS.txt"
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel-SHA256SUMS.txt"
             },
             {
               "label": "Microsoft Get-FileHash reference",
@@ -2572,15 +2572,15 @@
           "title": "Choose the correct DMG",
           "paragraphs": [],
           "bullets": [
-            "Apple Silicon: RepoTunnel_0.4.1_aarch64.dmg",
-            "Intel: RepoTunnel_0.4.1_x64.dmg"
+            "Apple Silicon: RepoTunnel_0.4.2_aarch64.dmg",
+            "Intel: RepoTunnel_0.4.2_x64.dmg"
           ],
           "code": null,
           "note": null,
           "links": [
             {
               "label": "Official release assets and SHA-256 checksums",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.1"
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/tag/v0.4.2"
             }
           ]
         },
@@ -2610,12 +2610,12 @@
             "The current macOS command sandbox uses the Seatbelt sandbox-exec compatibility backend. It may not expose the same native automation behavior as the primary Linux development platform."
           ],
           "bullets": [],
-          "code": "shasum -a 256 RepoTunnel_0.4.1_aarch64.dmg",
-          "note": "For an Intel Mac, use RepoTunnel_0.4.1_x64.dmg. Continue only when the full hash matches the official checksum file.",
+          "code": "shasum -a 256 RepoTunnel_0.4.2_aarch64.dmg",
+          "note": "For an Intel Mac, use RepoTunnel_0.4.2_x64.dmg. Continue only when the full hash matches the official checksum file.",
           "links": [
             {
               "label": "Official release SHA-256 checksums",
-              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.1/RepoTunnel-SHA256SUMS.txt"
+              "href": "https://github.com/Yashwanth034/RepoTunnel/releases/download/v0.4.2/RepoTunnel-SHA256SUMS.txt"
             }
           ]
         },
@@ -4789,7 +4789,7 @@
           "title": "Get the source folder",
           "paragraphs": [
             "The extension lives at extensions/chatgpt-continuation in the RepoTunnel repository’s main branch. Obtain that source folder before using Load unpacked; select the extension folder containing manifest.json rather than the repository root.",
-            "The already-published v0.4.1 desktop release does not list a separate extension asset. This guide does not imply a browser-store listing or an extension installer bundled into that desktop package."
+            "The already-published v0.4.2 desktop release does not list a separate extension asset. This guide does not imply a browser-store listing or an extension installer bundled into that desktop package."
           ],
           "bullets": [],
           "code": null,
