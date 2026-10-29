@@ -30,7 +30,29 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
+            bubblewrap \
             wget
+
+      - name: Enable distro-restricted Bubblewrap for sandbox security tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 may restrict unprivileged Bubblewrap with AppArmor.
+          # Use its restricted per-binary profile, not global userns changes.
+          if /usr/bin/bwrap --ro-bind / / -- /usr/bin/true; then
+            echo "Bubblewrap sandbox available."
+            exit 0
+          fi
+          sudo apt-get install -y --no-install-recommends apparmor-profiles apparmor-utils
+          source=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          target=/etc/apparmor.d/bwrap-userns-restrict
+          test -f "$source" || {
+            echo "STOP: Restricted Bubblewrap AppArmor profile unavailable." >&2
+            exit 1
+          }
+          sudo install -m 0644 "$source" "$target"
+          sudo apparmor_parser -r "$target"
+          /usr/bin/bwrap --ro-bind / / -- /usr/bin/true
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
