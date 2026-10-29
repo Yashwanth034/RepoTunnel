@@ -59,8 +59,9 @@ RepoTunnel retains the official OpenAI `tunnel-client` integration as an optiona
 For that path:
 
 - the tunnel ID is validated before launch
-- the Runtime API key is passed only through the child environment
-- the Runtime API key is not stored by RepoTunnel
+- the Runtime API key is passed to the official tunnel client through its child environment rather than exposed to MCP tools
+- by default credentials are not remembered; on supported Linux desktops, the user can explicitly opt in to remembering the tunnel ID and runtime API key in the system keyring
+- remembered Secure Tunnel connections restore paused and require a deliberate Resume action; Disconnect clears saved keyring credentials
 - RepoTunnel uses the tunnel client's health mechanism to determine readiness
 - stopping the local gateway also stops the managed tunnel process
 
