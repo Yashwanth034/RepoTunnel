@@ -1243,6 +1243,7 @@ fn macos_task_scope_profile_rules(
 // leaf is allowed only under an already verified, real directory so tools
 // can create an explicitly authorized output file/directory.
 #[cfg(any(target_os = "macos", test))]
+#[cfg_attr(windows, allow(dead_code))]
 fn macos_validate_task_scope_aliases(
     workspace_root: &std::path::Path,
     writable_scopes: &[(std::path::PathBuf, bool)],

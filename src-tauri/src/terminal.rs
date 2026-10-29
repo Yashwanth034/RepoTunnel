@@ -5445,6 +5445,7 @@ fn reconcile_supervisor_directory_with_validator(
 }
 
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn reconcile_supervisor_directory_paths(
     supervisor_directory: &Path,
     log_directory: &Path,
@@ -6218,6 +6219,7 @@ pub(crate) fn maybe_run_ai_workspace_github_proxy() -> Option<i32> {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GitMetadataMountKind {
     RealDirectory,
@@ -6226,6 +6228,7 @@ enum GitMetadataMountKind {
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn linux_git_metadata_mount_kind(path: &Path) -> Result<GitMetadataMountKind, String> {
     match fs::symlink_metadata(path) {
         Ok(meta) if task_source_metadata_is_alias(&meta) => {
@@ -10467,6 +10470,10 @@ mod windows_supervisor_job_tests {
             return;
         }
         let _job = attach_windows_supervisor_job().expect("create native kill-on-close job");
+        #[expect(
+            clippy::zombie_processes,
+            reason = "This supervisor child must remain alive for the parent test to verify kill-on-close; its OS job reaps it"
+        )]
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

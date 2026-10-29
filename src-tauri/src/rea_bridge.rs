@@ -1288,6 +1288,7 @@ fn configure_sandboxed_rea_program(
 }
 
 #[cfg(all(not(target_os = "linux"), test))]
+#[allow(dead_code)]
 fn configure_sandboxed_rea_command(
     program: &str,
     args: &[String],

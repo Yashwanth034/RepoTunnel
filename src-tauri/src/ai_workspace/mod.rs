@@ -11791,7 +11791,7 @@ for line in sys.stdin:
                 // Shared CI runners may be compiling other platform jobs at
                 // the same time. Preserve every readiness requirement while
                 // leaving room for a cold GTK and accessibility helper startup.
-                let deadline = Instant::now() + Duration::from_secs(30);
+                let deadline = Instant::now() + Duration::from_secs(45);
                 loop {
                     let output = Command::new("/usr/bin/xwininfo")
                         .args(["-root", "-tree"])
@@ -11803,15 +11803,15 @@ for line in sys.stdin:
                         String::from_utf8_lossy(&output.stdout).contains("RepoTunnelLiveRecovery");
                     let private_edit_ready = fs::read_to_string(view.root().join("src/editor.rs"))
                         .is_ok_and(|content| content == "private-live-edit");
-                    let owned_windows_ready =
-                        super::isolated_window_count(handle, &nested, &authority, Some(&address))
-                            .is_ok_and(|count| count > 0);
+                    let window_count =
+                        super::isolated_window_count(handle, &nested, &authority, Some(&address));
+                    let owned_windows_ready = window_count.as_ref().is_ok_and(|count| *count > 0);
                     if window_visible && private_edit_ready && owned_windows_ready {
                         break;
                     }
                     assert!(
                         super::process_exists(application.id()) && Instant::now() < deadline,
-                        "production task-scoped GTK fixture not ready: window_visible={window_visible}, private_edit_ready={private_edit_ready}, owned_windows_ready={owned_windows_ready}"
+                        "production task-scoped GTK fixture not ready: window_visible={window_visible}, private_edit_ready={private_edit_ready}, window_count={window_count:?}"
                     );
                     thread::sleep(Duration::from_millis(100));
                 }
