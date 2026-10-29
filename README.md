@@ -4,9 +4,9 @@
 
 # RepoTunnel
 
-**Your local development environment, securely connected to AI.**
+**Work with your real projects from ChatGPT — with your computer's permissions still under your control.**
 
-A local-first desktop application that lets MCP-compatible AI clients work with approved projects and supported tools on your computer—without handing over unrestricted filesystem or shell access.
+RepoTunnel is a local-first desktop gateway that connects ChatGPT Web and other compatible MCP clients to **projects you explicitly approve**. Explore code, make reviewed edits, run tests, use Git, and operate supported local tools without handing an AI unrestricted access to your computer.
 
 [![Latest release](https://img.shields.io/github/v/release/Yashwanth034/RepoTunnel?label=latest%20release)](https://github.com/Yashwanth034/RepoTunnel/releases/latest)
 [![Release builds](https://github.com/Yashwanth034/RepoTunnel/actions/workflows/platform-build.yml/badge.svg)](https://github.com/Yashwanth034/RepoTunnel/actions/workflows/platform-build.yml)
@@ -21,13 +21,15 @@ A local-first desktop application that lets MCP-compatible AI clients work with 
   <img src="RepoTunnel.png" alt="RepoTunnel desktop application showing project workspace controls" width="100%" />
 </p>
 
-## Overview
+## Work with your projects directly from ChatGPT Web
 
-RepoTunnel is a **permissioned bridge between AI clients and a computer you control**. It runs an MCP (Model Context Protocol) gateway locally, exposes only explicitly approved capabilities, and gives you the final say over project access, reviews, devices, and external actions.
+After connecting RepoTunnel as an MCP app, you can ask ChatGPT to inspect the **actual approved project on your computer**, investigate a bug, make a targeted fix, run its checks, and report the real result in the same conversation. There is no need to repeatedly upload source files or paste terminal output. RepoTunnel is the **permissioned bridge**, not an alternative editor or a separate AI account.
 
-Instead of repeatedly uploading repositories or copying terminal output into a chat, an authorized AI client can inspect a real workspace, propose or apply changes according to your policies, run checks, and return verifiable results. RepoTunnel keeps the desktop application, approvals, persistent state, and operating-system sandbox boundary on your machine.
+RepoTunnel runs a local MCP gateway and enforces workspace boundaries, AI Review / AI Auto policies, secret protections, and separate grants for browser, desktop, Phone, and remote-machine capabilities. You retain control of project access, queued reviews, connection settings, and publishing.
 
-**RepoTunnel itself does not require a RepoTunnel account.** You bring your own compatible AI client and, for remote connectivity, whichever HTTPS transport you choose. Client subscriptions, provider limits, network services, and optional APIs have their own requirements and charges.
+**No RepoTunnel account is required.** Using an eligible ChatGPT account through its supported MCP app flow does not require purchasing an additional OpenAI API key for that conversation. ChatGPT plan limits and availability, optional OpenAI Secure Tunnel credentials or billing, and any other connection-provider fees are separate. **Direct HTTPS** is a different connection option and does not require an OpenAI API key.
+
+For setup, see [Quick start](#quick-start), [connection methods](docs/connection.md), and [security boundaries](#security-and-permissions).
 
 ## How it works
 
@@ -174,7 +176,7 @@ Packages are built for the architectures shown. Third-party connection services,
 
 An optional Chromium extension is included in the source at [`extensions/chatgpt-continuation/`](extensions/chatgpt-continuation/).
 
-It targets only **conversations you explicitly bind** and can resume a checkpoint when the conversation is idle. It will not overwrite user-entered composer text or automatically replay an uncertain send.
+It targets only **conversations you explicitly bind**. The RepoTunnel continuation mode can deliver authorized checkpoints when a saved conversation is idle. A separate manual-message mode can repeat your own saved message after a completed response. The extension checks for active generation, interruptions, human drafts, and uncertain sends; it will not overwrite user-entered text or blindly replay an unverified send.
 
 To install from source, open `chrome://extensions`, enable **Developer mode**, select **Load unpacked** and choose `extensions/chatgpt-continuation`. Then bind the specific conversation from the extension.
 
