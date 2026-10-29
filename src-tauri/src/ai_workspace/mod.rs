@@ -4015,7 +4015,24 @@ fn native_gui_projected_paths(
                 }
                 return Ok(arg.clone());
             }
-            let relative = path.strip_prefix(&workspace).map_err(|_| {
+            // Windows Path::canonicalize uses extended-length \\?\ roots,
+            // whereas a launcher's argument often uses the ordinary D:\ root.
+            // Resolve existing source paths BEFORE enforcing workspace
+            // containment; symlink/reparse escapes still fail closed.
+            #[cfg(windows)]
+            let resolved = if path.exists() {
+                fs::canonicalize(path).map_err(|_| {
+                    "Native GUI absolute argument cannot be verified against its approved project."
+                        .to_string()
+                })?
+            } else {
+                path.to_path_buf()
+            };
+            #[cfg(windows)]
+            let checked_path = resolved.as_path();
+            #[cfg(not(windows))]
+            let checked_path = path;
+            let relative = checked_path.strip_prefix(&workspace).map_err(|_| {
                 "Native GUI absolute argument points outside its approved project.".to_string()
             })?;
             if relative

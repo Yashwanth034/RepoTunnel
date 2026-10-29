@@ -1615,11 +1615,7 @@ mod tests {
         .unwrap();
         let junction = roots.store.join("overlay/src");
         let target = roots.base.join("protected");
-        let command = format!(
-            r#"mklink /J "{}" "{}""#,
-            junction.display(),
-            target.display()
-        );
+        let command = crate::windows_test_junction_command(&junction, &target);
         let result = std::process::Command::new("cmd.exe")
             .args(["/D", "/C", &command])
             .output()

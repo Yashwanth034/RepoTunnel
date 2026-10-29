@@ -463,11 +463,7 @@ mod tests {
         let task_dir = store.mission_directory(&id).join("task-workspaces");
         fs::create_dir_all(&task_dir).unwrap();
         let junction = task_dir.join("unexpected-link");
-        let cmd = format!(
-            r#"mklink /J "{}" "{}""#,
-            junction.display(),
-            external.display()
-        );
+        let cmd = crate::windows_test_junction_command(&junction, &external);
         let result = std::process::Command::new("cmd.exe")
             .args(["/D", "/C", &cmd])
             .output()
@@ -500,11 +496,7 @@ mod tests {
 
         let id = MissionId::parse("mission-junction").unwrap();
         let junction = store.mission_directory(&id);
-        let cmd = format!(
-            r#"mklink /J "{}" "{}""#,
-            junction.display(),
-            external.display()
-        );
+        let cmd = crate::windows_test_junction_command(&junction, &external);
         let output = std::process::Command::new("cmd.exe")
             .args(["/D", "/C", &cmd])
             .output()

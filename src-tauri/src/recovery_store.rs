@@ -426,11 +426,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("secret.json"), b"{\"protected\":true}").unwrap();
         let junction = directory.join("redirect");
-        let command = format!(
-            r#"mklink /J "{}" "{}""#,
-            junction.display(),
-            outside.display()
-        );
+        let command = crate::windows_test_junction_command(&junction, &outside);
         let output = std::process::Command::new("cmd.exe")
             .args(["/D", "/C", &command])
             .output()

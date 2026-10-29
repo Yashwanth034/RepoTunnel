@@ -1837,11 +1837,7 @@ mod native_wake_tests {
         let root = directory.path();
         fs::create_dir(root.join("real")).unwrap();
         let junction = root.join("redirect");
-        let command = format!(
-            r#"mklink /J "{}" "{}""#,
-            junction.display(),
-            root.join("real").display()
-        );
+        let command = crate::windows_test_junction_command(&junction, &root.join("real"));
         let output = std::process::Command::new("cmd.exe")
             .args(["/D", "/C", &command])
             .output()

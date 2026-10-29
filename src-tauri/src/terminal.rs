@@ -14325,11 +14325,7 @@ mod tests {
         let output = Command::new("cmd.exe")
             .arg("/D")
             .arg("/C")
-            .arg(format!(
-                "mklink /J \"{}\" \"{}\"",
-                junction.display(),
-                outside.display()
-            ))
+            .arg(crate::windows_test_junction_command(&junction, &outside))
             .output()
             .expect("create Windows directory junction");
         assert!(

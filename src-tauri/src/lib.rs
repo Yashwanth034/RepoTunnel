@@ -91,6 +91,24 @@ mod macos_window_capture;
 mod task_integrity;
 mod temp_workspace;
 mod terminal;
+
+// Windows test fixtures sometimes receive extended-length \\?\ drive paths
+// from tempfile. cmd.exe's mklink /J accepts ordinary drive paths instead.
+// This helper is TEST-ONLY and does not change production path validation.
+#[cfg(all(test, windows))]
+fn windows_test_junction_command(link: &std::path::Path, target: &std::path::Path) -> String {
+    fn cmd_path(path: &std::path::Path) -> String {
+        let text = path.to_string_lossy();
+        let value = text.strip_prefix(r"\\?\").unwrap_or(&text);
+        assert!(
+            std::path::Path::new(value).is_absolute()
+                && !value.chars().any(|c| c == '"' || c == '\n' || c == '\r'),
+            "Windows junction fixture requires an absolute unquoted drive path"
+        );
+        value.to_string()
+    }
+    format!(r#"mklink /J "{}" "{}""#, cmd_path(link), cmd_path(target))
+}
 mod ui_transaction;
 mod updates;
 mod versioning;

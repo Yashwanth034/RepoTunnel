@@ -175,9 +175,17 @@ fn remove_request(app: &AppHandle, id: &str) {
 fn git_binary() -> Result<PathBuf, String> {
     let path_value = env::var_os("PATH").unwrap_or_default();
     for directory in env::split_paths(&path_value) {
-        let candidate = directory.join("git");
-        if candidate.is_file() {
-            return Ok(candidate);
+        // Windows executables require the .exe suffix for is_file(), even
+        // though process launching can resolve "git" through PATHEXT.
+        #[cfg(windows)]
+        let names = ["git.exe", "git"];
+        #[cfg(not(windows))]
+        let names = ["git"];
+        for name in names {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
     }
     Err("Git was not found in PATH.".to_string())
