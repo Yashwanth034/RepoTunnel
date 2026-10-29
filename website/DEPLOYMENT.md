@@ -2,13 +2,13 @@
 
 ## Hosting
 
-The website is fully static. Cloudflare Pages is the intended zero-server setup; any host that serves static HTML and asset files works.
+The website is fully static and lives inside the **same `Yashwanth034/RepoTunnel` Git repository** as the desktop application and continuation extension, under `website/`. The current public site is https://repotunnel.pages.dev/. Cloudflare Pages builds this static site separately; it must not build, install, or publish desktop binaries.
 
-1. Create a separate website repository or upload the built `dist/` folder.
-2. Configure the build command `npm run build` and output directory `dist`.
-3. Set `PUBLIC_SITE_URL` to the **real** HTTPS origin you will serve, such as your Cloudflare-assigned Pages address.
-4. Trigger a production build, publish its `dist/` directory and test HTTPS URLs.
-5. If you later add a custom domain, update `PUBLIC_SITE_URL`, configure the DNS/redirects, and rebuild with the new canonical origin.
+1. In Cloudflare Pages, connect the **existing** `Yashwanth034/RepoTunnel` repository and use the `main` production branch. Do not create or split out a second website repository.
+2. Set the Pages **root directory** to `website` (relative to the repository root), **build command** to `npm run build`, and **build output directory** to `dist` (relative to `website`). Install dependencies with the locked npm dependencies supported by your Pages Node runtime.
+3. Set `PUBLIC_SITE_URL=https://repotunnel.pages.dev` as a production environment variable while that remains the canonical domain. Use an appropriate supported Node.js version (Node.js 22 or later with the current Astro toolchain).
+4. Push an approved website-only change to `main` or explicitly trigger a Pages deployment; confirm the resulting build succeeds and inspect the actual production pages.
+5. If you later add a custom domain, configure and verify DNS/redirects, update `PUBLIC_SITE_URL` to that actual canonical HTTPS origin, and rebuild.
 
 Do not set the canonical origin to an invented address. Cloudflare Pages builds fail explicitly if `PUBLIC_SITE_URL` is missing, to prevent launching without canonical and sitemap metadata.
 
@@ -19,7 +19,7 @@ The website's `public/_headers` contains additional browser security headers.
 The production build contains a sitemap index at:
 
 ```text
-https://YOUR_REAL_SITE/sitemap-index.xml
+https://repotunnel.pages.dev/sitemap-index.xml
 ```
 
 and a generated sitemap file at `/sitemap-0.xml`. `robots.txt` references the sitemap index automatically.
@@ -41,9 +41,9 @@ A sitemap and technical SEO make the site discoverable; they do **not** guarante
 
 ## Authority and update workflow
 
-The public desktop-app GitHub repository remains the source of truth for release assets, security policy and code. Once the website has a real public URL, an **independently authorized change** to the desktop repository may add the official website link to its repository About/README.
+The existing RepoTunnel GitHub repository is the source of truth for the desktop code, `website/`, the continuation extension, release assets, and security policy. Its repository About URL already links to the deployed website. Website-only changes belong under `website/`; never stage or publish unfinished desktop changes alongside site updates.
 
-Review download URLs on every desktop release. The website currently documents v0.4.1 and must not call older versions the newest indefinitely; check the official GitHub release page before changing any release links. Build-time tests cannot verify live external assets when network access is unavailable.
+The current public desktop release is **v0.4.2**. On every desktop release, update the website's release metadata, platform installers, download guides, and changelog together. Validate the configured asset names against GitHub using `npm run verify:release-assets` when online. This fetches release metadata only; it does not download installers. The offline `npm run check` verifies internal links, search, and the expected release URL structure but cannot prove remote files are available.
 
 ## Privacy
 
@@ -55,9 +55,9 @@ The website has no account system, analytics SDK, marketing tracking or third-pa
 - Run `npm run check`.
 - Visually inspect home, docs, install, security, downloads and both themes on desktop and mobile.
 - Test search, theme, tab switching, keyboard navigation and code copy.
-- Verify actual GitHub downloads and checksum files through a normal network connection.
+- Run `npm run verify:release-assets` against the live GitHub Release to confirm every configured OS installer and the SHA-256 checksum file exist.
 - Build with the real public `PUBLIC_SITE_URL`.
 - Confirm the sitemap, robots.txt, HTTPS, canonical metadata and OpenGraph preview work in production.
 - Submit the verified site to search engines.
 
-Do not report the last two steps as complete until a public deployment exists.
+The public site currently exists at https://repotunnel.pages.dev/; independently verify the deployed version, sitemap, canonical URLs, and downloads after each publishing change. Search engine submissions or indexing cannot be assumed merely because the sitemap is reachable.
