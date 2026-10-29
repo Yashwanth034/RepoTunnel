@@ -463,11 +463,8 @@ mod tests {
         let task_dir = store.mission_directory(&id).join("task-workspaces");
         fs::create_dir_all(&task_dir).unwrap();
         let junction = task_dir.join("unexpected-link");
-        let cmd = crate::windows_test_junction_command(&junction, &external);
-        let result = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", &cmd])
-            .output()
-            .unwrap();
+        let result = crate::windows_test_create_junction(&junction, &external)
+            .expect("create native junction fixture");
         assert!(
             result.status.success(),
             "native junction fixture failed: {}",
@@ -496,10 +493,7 @@ mod tests {
 
         let id = MissionId::parse("mission-junction").unwrap();
         let junction = store.mission_directory(&id);
-        let cmd = crate::windows_test_junction_command(&junction, &external);
-        let output = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", &cmd])
-            .output()
+        let output = crate::windows_test_create_junction(&junction, &external)
             .expect("start junction fixture");
         assert!(
             output.status.success(),

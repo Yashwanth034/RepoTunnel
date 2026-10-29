@@ -14313,7 +14313,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn task8_windows_junction_inside_approved_prefix_cannot_escape_source_copy() {
-        use std::{os::windows::fs::MetadataExt, process::Command};
+        use std::os::windows::fs::MetadataExt;
 
         let (root, _) = temp_workspace("windows-task-junction");
         let scope = root.join("scope");
@@ -14322,11 +14322,7 @@ mod tests {
         fs::create_dir_all(&outside).expect("outside scope");
         fs::write(outside.join("private.txt"), "private").expect("outside fixture");
         let junction = scope.join("reparse-target");
-        let output = Command::new("cmd.exe")
-            .arg("/D")
-            .arg("/C")
-            .arg(crate::windows_test_junction_command(&junction, &outside))
-            .output()
+        let output = crate::windows_test_create_junction(&junction, &outside)
             .expect("create Windows directory junction");
         assert!(
             output.status.success(),

@@ -426,10 +426,7 @@ mod tests {
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("secret.json"), b"{\"protected\":true}").unwrap();
         let junction = directory.join("redirect");
-        let command = crate::windows_test_junction_command(&junction, &outside);
-        let output = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", &command])
-            .output()
+        let output = crate::windows_test_create_junction(&junction, &outside)
             .expect("create Windows reparse fixture");
         assert!(
             output.status.success(),

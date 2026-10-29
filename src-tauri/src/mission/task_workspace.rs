@@ -1615,11 +1615,8 @@ mod tests {
         .unwrap();
         let junction = roots.store.join("overlay/src");
         let target = roots.base.join("protected");
-        let command = crate::windows_test_junction_command(&junction, &target);
-        let result = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", &command])
-            .output()
-            .unwrap();
+        let result = crate::windows_test_create_junction(&junction, &target)
+            .expect("create native junction fixture");
         assert!(
             result.status.success(),
             "junction fixture failed: {}",

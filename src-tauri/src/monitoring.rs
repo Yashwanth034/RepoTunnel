@@ -1837,11 +1837,8 @@ mod native_wake_tests {
         let root = directory.path();
         fs::create_dir(root.join("real")).unwrap();
         let junction = root.join("redirect");
-        let command = crate::windows_test_junction_command(&junction, &root.join("real"));
-        let output = std::process::Command::new("cmd.exe")
-            .args(["/D", "/C", &command])
-            .output()
-            .unwrap();
+        let output = crate::windows_test_create_junction(&junction, &root.join("real"))
+            .expect("create native junction fixture");
         assert!(
             output.status.success(),
             "junction setup failed: {}",

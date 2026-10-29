@@ -9098,9 +9098,11 @@ mod tests {
                 .expect("approved project arguments belong to disposable project");
         assert_eq!(cwd, projected.join("src"));
         assert_eq!(rewritten[0], "--wait");
+        // Windows may normalize slashes in the remapped absolute path.
+        // Compare path components, not their separator spelling.
         assert_eq!(
-            rewritten[1],
-            projected.join("src/edited.rs").to_string_lossy()
+            std::path::Path::new(&rewritten[1]),
+            projected.join("src/edited.rs")
         );
         assert_eq!(rewritten[2], "--literal");
         let assignments = vec![format!("--file={absolute}"), "--wait".into()];
@@ -9108,8 +9110,8 @@ mod tests {
             super::native_gui_projected_paths(&source, &source, &projected, &assignments)
                 .expect("embedded absolute project argument must be remapped");
         assert_eq!(
-            remapped[0],
-            format!("--file={}", projected.join("src/edited.rs").display())
+            std::path::Path::new(remapped[0].strip_prefix("--file=").unwrap()),
+            projected.join("src/edited.rs")
         );
         assert_eq!(remapped[1], "--wait");
         for forbidden in [
